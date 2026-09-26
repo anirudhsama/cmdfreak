@@ -53,15 +53,43 @@ final class ComposeTextView: NSTextView {
         needsDisplay = true
     }
 
-    /// Paste and drop of files is the M5 attachment path; forward and let text paste through.
+    /// Pasted or dropped files and images become attachments; text pastes through as plain text.
     var onPasteFiles: (([URL]) -> Void)?
 
     override func paste(_ sender: Any?) {
-        let pb = NSPasteboard.general
-        if let urls = pb.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL], !urls.isEmpty, onPasteFiles != nil {
-            onPasteFiles?(urls)
-            return
+        if let onPasteFiles {
+            let urls = PasteboardAttachments.urls(from: .general)
+            if !urls.isEmpty {
+                onPasteFiles(urls)
+                return
+            }
         }
         pasteAsPlainText(sender)
+    }
+
+    override func validateUserInterfaceItem(_ item: any NSValidatedUserInterfaceItem) -> Bool {
+        if item.action == #selector(paste(_:)), onPasteFiles != nil, PasteboardAttachments.canRead(.general) { return true }
+        return super.validateUserInterfaceItem(item)
+    }
+
+    // Files dropped on the editor attach instead of inserting their paths.
+    private func isAttachmentDrag(_ info: any NSDraggingInfo) -> Bool {
+        onPasteFiles != nil && info.draggingPasteboard.canReadObject(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true])
+    }
+
+    override func draggingEntered(_ sender: any NSDraggingInfo) -> NSDragOperation {
+        isAttachmentDrag(sender) ? .copy : super.draggingEntered(sender)
+    }
+
+    override func draggingUpdated(_ sender: any NSDraggingInfo) -> NSDragOperation {
+        isAttachmentDrag(sender) ? .copy : super.draggingUpdated(sender)
+    }
+
+    override func performDragOperation(_ sender: any NSDraggingInfo) -> Bool {
+        guard isAttachmentDrag(sender) else { return super.performDragOperation(sender) }
+        let urls = PasteboardAttachments.urls(from: sender.draggingPasteboard)
+        guard !urls.isEmpty else { return false }
+        onPasteFiles?(urls)
+        return true
     }
 }

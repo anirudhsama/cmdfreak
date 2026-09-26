@@ -168,12 +168,24 @@ public actor MediaStore {
     }
 
     /// Copies a file we just sent into the content-addressed store so it is not re-downloaded.
-    public func adoptSentFile(_ source: URL, for media: MediaRecord) {
-        guard !media.fileSha256.isEmpty else { return }
+    /// Returns the stored file, or nil if the copy failed.
+    @discardableResult
+    public func adoptSentFile(_ source: URL, for media: MediaRecord) -> URL? {
+        guard !media.fileSha256.isEmpty else { return nil }
         let dest = fileURL(for: media)
-        guard !FileManager.default.fileExists(atPath: dest.path) else { return }
+        if FileManager.default.fileExists(atPath: dest.path) { return dest }
         try? FileManager.default.createDirectory(at: dest.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try? FileManager.default.copyItem(at: source, to: dest)
+        do { try FileManager.default.copyItem(at: source, to: dest) } catch { return nil }
+        return dest
+    }
+
+    /// Upload progress for an optimistic row, keyed like `key(for:)` keys pending media.
+    nonisolated func uploadRelay(chatJid: String, localId: String) -> ProgressRelay {
+        ProgressRelay(key: "\(chatJid)/\(localId)", center: progress)
+    }
+
+    nonisolated func clearUploadProgress(chatJid: String, localId: String) {
+        progress.post("\(chatJid)/\(localId)", nil)
     }
 }
 

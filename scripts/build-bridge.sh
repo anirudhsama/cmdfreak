@@ -27,10 +27,11 @@ export MACOSX_DEPLOYMENT_TARGET=26.0
 cd "$RUST"
 PROFILE_FLAG=$([[ "$PROFILE" == release ]] && echo --release || echo "")
 cargo build $PROFILE_FLAG --target "$TARGET" -p wa-bridge
-LIB_DIR="$RUST/target/$TARGET/$PROFILE"
+# CARGO_TARGET_DIR lets worktrees share one warm build cache; generated files stay local.
+LIB_DIR="${CARGO_TARGET_DIR:-$RUST/target}/$TARGET/$PROFILE"
 
 GEN="$RUST/target/uniffi-swift"
-rm -rf "$GEN"
+rm -rf "$GEN" && mkdir -p "$RUST/target"
 cargo run -q -p uniffi-bindgen -- generate --library "$LIB_DIR/libwa_bridge.dylib" --language swift --out-dir "$GEN"
 
 STAGE="$RUST/target/xcf-stage"

@@ -13,9 +13,6 @@ public final class ChatViewController: NSViewController {
 
     /// Esc with nothing to clear (no reply/edit bar): the shell should focus the chat list.
     public var onEscapeWithNothingToClear: (() -> Void)?
-    /// Attach-file seam for M5: the attach button, ⌘⇧O (`attachFile()`), and file paste all land here.
-    public var onAttachFiles: (([URL]) -> Void)?
-
     public private(set) var chatJid: String?
 
     private let list: MessageListController
@@ -28,6 +25,8 @@ public final class ChatViewController: NSViewController {
     private var lastComposingSent: Date = .distantPast
     private var pausedTimer: Timer?
     private var keyObservers: [NSObjectProtocol] = []
+    /// The attachment tray, in order. Metadata is computed as soon as a file is staged.
+    private var staged: [StagedAttachment] = []
 
     public init(client: WAClient, preloader: ChatOpenPreloader = .shared) {
         self.client = client
@@ -43,8 +42,10 @@ public final class ChatViewController: NSViewController {
     // MARK: - View
 
     public override func loadView() {
-        let root = NSView()
+        let root = AttachmentDropView()
         root.wantsLayer = true
+        root.onDrop = { [weak self] urls in self?.attach(urls) }
+        root.acceptsDrops = { [weak self] in self?.chatJid != nil && self?.editTarget == nil }
         view = root
 
         addChild(list)
@@ -74,10 +75,14 @@ public final class ChatViewController: NSViewController {
         compose.onHeightChange = { [weak self] h in self?.list.setBottomInset(h) }
         compose.onSend = { [weak self] text in self?.send(text) }
         compose.onTyping = { [weak self] in self?.noteTyping() }
-        compose.onEscape = { [weak self] in self?.onEscapeWithNothingToClear?() }
+        compose.onEscape = { [weak self] in
+            guard let self else { return }
+            if !self.clearStaged() { self.onEscapeWithNothingToClear?() }
+        }
         compose.onArrowUpEmpty = { [weak self] in self?.editLastOwnMessage() }
         compose.onAttach = { [weak self] in self?.attachFile() }
-        compose.onPasteFiles = { [weak self] urls in self?.onAttachFiles?(urls) }
+        compose.onPasteFiles = { [weak self] urls in self?.attach(urls) }
+        compose.onRemoveAttachment = { [weak self] id in self?.removeStaged(id) }
         compose.onCancelBar = { [weak self] in
             self?.replyTarget = nil
             self?.editTarget = nil
@@ -127,6 +132,7 @@ public final class ChatViewController: NSViewController {
         self.chatJid = chatJid
         replyTarget = nil
         editTarget = nil
+        clearStaged()
         compose.setBar(nil)
         compose.text = chatJid.flatMap { drafts[$0] } ?? ""
         pausedTimer?.invalidate()
@@ -195,8 +201,7 @@ public final class ChatViewController: NSViewController {
     /// Esc: clears reply/edit state. Returns false when there was nothing to clear.
     @discardableResult
     public func handleEscape() -> Bool {
-        if compose.handleEscape() { return true }
-        return false
+        compose.handleEscape() || clearStaged()
     }
 
     /// Space with the list focused: Quick Look on the selected media message.
@@ -204,17 +209,61 @@ public final class ChatViewController: NSViewController {
         list.quickLookSelection()
     }
 
-    /// ⌘⇧O and the attach button. M5 replaces this with the staging tray.
+    /// ⌘⇧O and the attach button: pick files into the attachment tray.
     public func attachFile() {
-        guard chatJid != nil else { return }
-        guard let onAttachFiles else { return }
+        guard chatJid != nil, let window = view.window else { return }
         let panel = NSOpenPanel()
         panel.allowsMultipleSelection = true
         panel.canChooseDirectories = false
-        panel.beginSheetModal(for: view.window!) { response in
+        panel.message = "Photos, videos and GIFs are sent as media; anything else as a document."
+        panel.beginSheetModal(for: window) { [weak self] response in
             guard response == .OK else { return }
-            onAttachFiles(panel.urls)
+            self?.attach(panel.urls)
         }
+    }
+
+    /// Stages files in the attachment tray (attach button, paste, drop) and starts computing
+    /// their metadata off the main thread.
+    public func attach(_ urls: [URL]) {
+        guard chatJid != nil, !urls.isEmpty else { return }
+        if editTarget != nil { compose.handleEscape() }
+        for url in urls where !url.hasDirectoryPath {
+            let task = Task.detached(priority: .userInitiated) { try await OutgoingMediaPreparer.prepare(url) }
+            let item = StagedAttachment(source: url, task: task)
+            staged.append(item)
+            Task { [weak self] in
+                let result = await task.result
+                self?.finishPreparing(item.id, result)
+            }
+        }
+        refreshTray()
+        compose.focus()
+    }
+
+    private func finishPreparing(_ id: UUID, _ result: Result<PreparedAttachment, any Error>) {
+        guard let i = staged.firstIndex(where: { $0.id == id }) else { return }
+        staged[i].result = result
+        refreshTray()
+    }
+
+    private func removeStaged(_ id: UUID) {
+        guard let i = staged.firstIndex(where: { $0.id == id }) else { return }
+        staged.remove(at: i).discard()
+        refreshTray()
+    }
+
+    /// Empties the tray. Returns false when it was already empty.
+    @discardableResult
+    private func clearStaged() -> Bool {
+        guard !staged.isEmpty else { return false }
+        staged.forEach { $0.discard() }
+        staged = []
+        refreshTray()
+        return true
+    }
+
+    private func refreshTray() {
+        compose.setAttachments(staged.map(\.trayItem))
     }
 
     public var isComposeFocused: Bool {
@@ -239,6 +288,24 @@ public final class ChatViewController: NSViewController {
             Task {
                 do { try await client.edit(edit.message.key, text: text) } catch { Signposts.log.error("edit failed: \(error)") }
                 Signposts.poi.endInterval("Send", state, "edit")
+            }
+        } else if !staged.isEmpty {
+            let items = staged
+            let reply = replyTarget
+            staged = []
+            replyTarget = nil
+            refreshTray()
+            compose.clearAfterSend()
+            let client = self.client
+            Task {
+                // Waits for any metadata still being computed; items that failed to prepare are skipped.
+                var prepared: [PreparedAttachment] = []
+                for item in items {
+                    if let p = try? await item.task.value { prepared.append(p) }
+                }
+                do { try await client.sendAttachments(prepared, caption: text, to: chatJid, replyTo: reply) }
+                catch { Signposts.log.error("media send failed: \(error)") }
+                Signposts.poi.endInterval("Send", state, "media")
             }
         } else {
             let reply = replyTarget

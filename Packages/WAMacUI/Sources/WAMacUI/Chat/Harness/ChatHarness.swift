@@ -48,7 +48,6 @@ public enum ChatHarness {
 
         let vc = ChatViewController(client: client)
         vc.onEscapeWithNothingToClear = { NSLog("harness: Esc with nothing to clear → shell would focus the chat list") }
-        vc.onAttachFiles = { urls in NSLog("harness: attach \(urls.map(\.lastPathComponent))") }
         controller = vc
 
         let window = NSWindow(
@@ -112,6 +111,7 @@ public enum ChatHarness {
 final class HarnessBridge: WaBridgeProtocol, @unchecked Sendable {
     let remoteDir: URL
     var sink: (any EventSink)?
+    private let failedOnce = Mutex(Set<String>())
 
     init(remoteDir: URL) { self.remoteDir = remoteDir }
 
@@ -144,7 +144,35 @@ final class HarnessBridge: WaBridgeProtocol, @unchecked Sendable {
     func revokeMessage(target: BridgeMessageKey) async throws {}
     func sendChatState(chat: String, state: ChatState) async throws { NSLog("harness: chat state \(state)") }
     func sendMedia(chat: String, media: BridgeOutgoingMedia, replyTo: BridgeMessageKey?, progress: (any ProgressSink)?) async throws -> BridgeSendResult {
-        throw BridgeError.NotImplemented("sendMedia is M5")
+        let data = try Data(contentsOf: URL(filePath: media.filePath))
+        let total = UInt64(data.count)
+        for step in 0...20 {
+            progress?.onProgress(done: total * UInt64(step) / 20, total: total)
+            try await Task.sleep(for: .milliseconds(90))
+            // "fail" in the caption fails the first attempt only, so retry can be exercised.
+            if step == 12, media.caption?.localizedCaseInsensitiveContains("fail") == true,
+               failedOnce.withLock({ $0.insert(media.filePath).inserted }) {
+                throw BridgeError.Network("harness: simulated upload failure")
+            }
+        }
+        let kind: MessageKind = switch media.kind {
+        case .image: .image
+        case .video: .video
+        case .gif: .gif
+        case .document: .document
+        }
+        let type: BridgeMediaType = switch media.kind {
+        case .image: .image
+        case .video, .gif: .video
+        case .document: .document
+        }
+        let m = try Seed.media(data, remoteDir: remoteDir, type: type, mime: media.mimetype, name: media.fileName,
+                               width: media.width.map(Int.init), height: media.height.map(Int.init), duration: media.durationSecs.map(Int.init),
+                               thumb: media.jpegThumbnail, pages: media.pageCount.map(Int.init), animated: media.kind == .gif ? true : nil)
+        let ts = Int64(Date().timeIntervalSince1970)
+        return BridgeSendResult(messageId: "SRV-" + UUID().uuidString.prefix(8), timestamp: ts,
+                                message: Seed.message("x", chat: chat, sender: ChatHarness.me, fromMe: true, ts: ts, kind: kind,
+                                                      text: media.caption, media: m, status: .sent))
     }
     func sendReaction(target: BridgeMessageKey, emoji: String) async throws {}
     func sendText(chat: String, text: String, replyTo: BridgeMessageKey?) async throws -> BridgeSendResult {

@@ -404,11 +404,24 @@ final class MessageCell: NSTableCellView {
         }
     }
 
+    /// Download or upload progress. A pending outgoing media row shows an empty ring until the
+    /// first upload tick arrives.
+    private func transferFraction(_ item: MessageItem) -> Double? {
+        if let downloadFraction { return downloadFraction }
+        if item.media?.downloadState == .downloading { return 0 }
+        if item.message.fromMe, item.message.status == .pending, item.media != nil { return 0 }
+        return nil
+    }
+
     private func drawMediaOverlay(_ m: LayoutPlan.Media, item: MessageItem) {
         let f = m.frame
         let downloaded = item.media?.downloadState == .downloaded && item.media?.localPath != nil
-        if let fraction = downloadFraction ?? (item.media?.downloadState == .downloading ? 0 : nil) {
+        if let fraction = transferFraction(item) {
             drawProgressRing(center: NSPoint(x: f.midX, y: f.midY), fraction: fraction)
+            return
+        }
+        if item.message.fromMe, item.message.status == .failed {
+            drawGlyphCircle(center: NSPoint(x: f.midX, y: f.midY), symbol: "arrow.up", diameter: 44)
             return
         }
         switch m.kind {
@@ -438,10 +451,11 @@ final class MessageCell: NSTableCellView {
         let icon = Self.icon(forFileName: d.fileName, mimetype: item.media?.mimetype)
         icon.draw(in: NSRect(x: f.minX + 8, y: f.minY + 10, width: 36, height: 36), from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
         let downloaded = item.media?.downloadState == .downloaded && item.media?.localPath != nil
-        let trailing: CGFloat = downloaded ? 12 : 40
+        let transfer = transferFraction(item)
+        let trailing: CGFloat = downloaded && transfer == nil ? 12 : 40
         d.name.draw(with: NSRect(x: f.minX + 52, y: f.minY + 11, width: f.width - 52 - trailing, height: 17), options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine])
         d.detail.draw(with: NSRect(x: f.minX + 52, y: f.minY + 31, width: f.width - 52 - trailing, height: 15), options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine])
-        if let fraction = downloadFraction ?? (item.media?.downloadState == .downloading ? 0 : nil) {
+        if let fraction = transfer {
             drawProgressRing(center: NSPoint(x: f.maxX - 22, y: f.midY), fraction: fraction, diameter: 24)
         } else if !downloaded {
             drawGlyphCircle(center: NSPoint(x: f.maxX - 22, y: f.midY), symbol: "arrow.down", diameter: 26, tinted: true)

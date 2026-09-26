@@ -1,14 +1,17 @@
-//! Media download (streamed to disk with progress), upload + send, and plain URL fetches.
+//! Media download (streamed to disk with progress), upload + send with byte progress, and plain
+//! URL fetches.
 
 use std::fs::File;
-use std::io::{Seek, SeekFrom, Write};
+use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use whatsapp_rust::download::DownloadParams;
 use whatsapp_rust::prelude::*;
-use whatsapp_rust::upload::UploadOptions;
+use whatsapp_rust::upload::UploadResponse;
 use whatsapp_rust::wacore::download::{DownloadWriter, MediaType};
+use whatsapp_rust::wacore::time::now_secs;
+use whatsapp_rust::wacore::upload::{UploadSource, encrypt_media_streaming, encrypted_len};
 use whatsapp_rust::wacore::net::{HttpClient, HttpRequest};
 use whatsapp_rust_ureq_http_client::UreqHttpClient;
 
@@ -137,9 +140,128 @@ pub async fn fetch_url_to(url: &str, dest_path: &str) -> R<()> {
     std::fs::rename(&part, &dest).map_err(io)
 }
 
-/// Uploads the file and sends the matching message. Buffers the file in memory (the library's
-/// `upload`); progress is reported at start and completion only. M5 can move large videos and
-/// documents to `encrypt_media_streaming` + `upload_stream` with a counting source.
+// MARK: - Upload
+
+/// Above this, videos and documents are encrypted to a temp file and streamed; below it (and for
+/// all images and GIFs) the ciphertext stays in memory.
+const STREAM_THRESHOLD: u64 = 4 * 1024 * 1024;
+
+/// Wraps an upload source so reads report `(offset + bytes read, total)`. The library asks for a
+/// fresh reader per attempt (failover, resume), so progress rewinds with it.
+struct CountingSource<S> {
+    inner: S,
+    sink: Option<Arc<dyn ProgressSink>>,
+}
+
+impl<S: UploadSource> UploadSource for CountingSource<S> {
+    fn len(&self) -> u64 {
+        self.inner.len()
+    }
+
+    fn reader_from(&self, offset: u64) -> std::io::Result<Box<dyn Read + Send>> {
+        let reader = self.inner.reader_from(offset)?;
+        let total = self.inner.len();
+        if let Some(s) = &self.sink {
+            s.on_progress(offset, total);
+        }
+        Ok(Box::new(CountingReader { inner: reader, pos: offset, last: offset, total, sink: self.sink.clone() }))
+    }
+}
+
+struct CountingReader {
+    inner: Box<dyn Read + Send>,
+    pos: u64,
+    last: u64,
+    total: u64,
+    sink: Option<Arc<dyn ProgressSink>>,
+}
+
+impl Read for CountingReader {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        self.pos += n as u64;
+        if let Some(s) = &self.sink
+            && (self.pos - self.last >= ProgressFile::STEP || self.pos == self.total)
+        {
+            self.last = self.pos;
+            s.on_progress(self.pos, self.total);
+        }
+        Ok(n)
+    }
+}
+
+struct FileSource {
+    path: PathBuf,
+    len: u64,
+}
+
+impl UploadSource for FileSource {
+    fn len(&self) -> u64 {
+        self.len
+    }
+
+    fn reader_from(&self, offset: u64) -> std::io::Result<Box<dyn Read + Send>> {
+        let mut f = File::open(&self.path)?;
+        f.seek(SeekFrom::Start(offset))?;
+        Ok(Box::new(BufReader::with_capacity(64 * 1024, f)))
+    }
+}
+
+/// Deletes the staged ciphertext however the send ends.
+struct TempFile(PathBuf);
+
+impl Drop for TempFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+fn temp_upload_path() -> PathBuf {
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    std::env::temp_dir().join(format!("wa-upload-{}-{}-{n}.enc", std::process::id(), now_secs()))
+}
+
+/// Encrypts `path` (in memory, or to a temp file when `stream`) and uploads it with byte progress.
+async fn upload_file(
+    client: &Client,
+    path: PathBuf,
+    media_type: MediaType,
+    stream: bool,
+    progress: Option<Arc<dyn ProgressSink>>,
+) -> R<UploadResponse> {
+    let upload_err = |e: anyhow::Error| BridgeError::Network(format!("upload: {e:#}"));
+    if stream {
+        let tmp = TempFile(temp_upload_path());
+        let dest = tmp.0.clone();
+        let (info, len) = tokio::task::spawn_blocking(move || -> R<_> {
+            let reader = BufReader::with_capacity(256 * 1024, File::open(&path).map_err(io)?);
+            let mut writer = BufWriter::with_capacity(256 * 1024, File::create(&dest).map_err(io)?);
+            let info = encrypt_media_streaming(reader, &mut writer, media_type).map_err(io)?;
+            writer.flush().map_err(io)?;
+            let len = std::fs::metadata(&dest).map_err(io)?.len();
+            Ok((info, len))
+        })
+        .await
+        .map_err(io)??;
+        let source = CountingSource { inner: FileSource { path: tmp.0.clone(), len }, sink: progress };
+        client.upload_stream(source, info, media_type).await.map_err(upload_err)
+    } else {
+        let (info, data) = tokio::task::spawn_blocking(move || -> R<_> {
+            let plain = std::fs::read(&path).map_err(io)?;
+            let mut out = Vec::with_capacity(encrypted_len(plain.len()));
+            let info = encrypt_media_streaming(&plain[..], &mut out, media_type).map_err(io)?;
+            Ok((info, bytes::Bytes::from(out)))
+        })
+        .await
+        .map_err(io)??;
+        let source = CountingSource { inner: data, sink: progress };
+        client.upload_stream(source, info, media_type).await.map_err(upload_err)
+    }
+}
+
+/// Uploads the file and sends the matching message. Swift supplies the metadata (thumbnail,
+/// dimensions, duration, page count); GIFs arrive already converted to MP4.
 pub async fn send_media(
     shared: Arc<Shared>,
     chat: String,
@@ -149,31 +271,22 @@ pub async fn send_media(
 ) -> R<BridgeSendResult> {
     let client = require_client(&shared)?;
     let to: Jid = chat.parse().map_err(|_| BridgeError::InvalidJid(chat.clone()))?;
-    let path = m.file_path.clone();
-    let data = tokio::task::spawn_blocking(move || std::fs::read(path))
-        .await
-        .map_err(io)?
-        .map_err(io)?;
-    let total = data.len() as u64;
-    if let Some(p) = &progress {
-        p.on_progress(0, total);
-    }
+    let path = PathBuf::from(&m.file_path);
+    let plain_len = std::fs::metadata(&path).map_err(io)?.len();
     let (wa_type, bridge_type) = match m.kind {
         SendMediaKind::Image => (MediaType::Image, BridgeMediaType::Image),
         SendMediaKind::Video | SendMediaKind::Gif => (MediaType::Video, BridgeMediaType::Video),
         SendMediaKind::Document => (MediaType::Document, BridgeMediaType::Document),
     };
-    let up = client
-        .upload(data, wa_type, UploadOptions::new())
-        .await
-        .map_err(|e| BridgeError::Network(format!("upload: {e:#}")))?;
-    if let Some(p) = &progress {
-        p.on_progress(total, total);
-    }
+    let stream = matches!(m.kind, SendMediaKind::Video | SendMediaKind::Document) && plain_len > STREAM_THRESHOLD;
+    let up = upload_file(&client, path, wa_type, stream, progress).await?;
 
     let ctx = reply_to.as_ref().map(|k| quote_ctx_for(&shared, k));
     let ctx_field = || ctx.clone().map(MessageField::some).unwrap_or_default();
     let caption = m.caption.clone().filter(|c| !c.is_empty());
+    let doc_name = m.file_name.clone().or_else(|| {
+        Path::new(&m.file_path).file_name().map(|n| n.to_string_lossy().into_owned())
+    });
     let mut msg = wa::Message::default();
     let kind = match m.kind {
         SendMediaKind::Image => {
@@ -219,9 +332,6 @@ pub async fn send_media(
             if gif { MessageKind::Gif } else { MessageKind::Video }
         }
         SendMediaKind::Document => {
-            let name = m.file_name.clone().or_else(|| {
-                Path::new(&m.file_path).file_name().map(|n| n.to_string_lossy().into_owned())
-            });
             msg.document_message = MessageField::some(wa::message::DocumentMessage {
                 url: Some(up.url.clone()),
                 direct_path: Some(up.direct_path.clone()),
@@ -231,11 +341,13 @@ pub async fn send_media(
                 file_length: Some(up.file_length),
                 media_key_timestamp: Some(up.media_key_timestamp),
                 mimetype: Some(m.mimetype.clone()),
-                file_name: name.clone(),
-                title: name,
+                file_name: doc_name.clone(),
+                title: doc_name.clone(),
                 caption: caption.clone(),
                 page_count: m.page_count,
                 jpeg_thumbnail: m.jpeg_thumbnail.clone(),
+                thumbnail_width: m.thumbnail_width,
+                thumbnail_height: m.thumbnail_height,
                 context_info: ctx_field(),
                 ..Default::default()
             });
@@ -255,7 +367,7 @@ pub async fn send_media(
         file_length: up.file_length,
         media_type: bridge_type,
         mimetype: Some(m.mimetype),
-        file_name: m.file_name,
+        file_name: if m.kind == SendMediaKind::Document { doc_name } else { m.file_name },
         width: m.width,
         height: m.height,
         duration_secs: m.duration_secs,

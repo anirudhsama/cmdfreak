@@ -170,21 +170,54 @@ public final class WAClient: Sendable {
         return pending.id
     }
 
+    /// Inserts one optimistic row per attachment (in order) and uploads them one at a time. The caption
+    /// and reply go on the first item, as in WhatsApp's own clients. Returns the local ids.
     @discardableResult
-    public func sendMedia(_ outgoing: BridgeOutgoingMedia, to chatJid: String, replyTo: MessageItem? = nil,
-                          progress: (any ProgressSink)? = nil) async throws -> String {
-        let pending = try await ingest.insertOutgoing(
+    public func sendAttachments(_ items: [PreparedAttachment], caption: String?, to chatJid: String,
+                                replyTo: MessageItem? = nil) async throws -> [String] {
+        var queued: [(String, BridgeOutgoingMedia, MessageItem?)] = []
+        for (i, item) in items.enumerated() {
+            var outgoing = item.outgoing
+            outgoing.caption = i == 0 ? caption.flatMap { $0.isEmpty ? nil : $0 } : nil
+            let reply = i == 0 ? replyTo : nil
+            let pending = try await insertPendingMedia(outgoing, to: chatJid, replyTo: reply)
+            queued.append((pending.id, outgoing, reply))
+        }
+        for (localId, outgoing, reply) in queued {
+            await uploadAndSend(localId: localId, outgoing: outgoing, chatJid: chatJid, replyKey: reply?.message.key)
+        }
+        return queued.map(\.0)
+    }
+
+    @discardableResult
+    public func sendMedia(_ outgoing: BridgeOutgoingMedia, to chatJid: String, replyTo: MessageItem? = nil) async throws -> String {
+        let pending = try await insertPendingMedia(outgoing, to: chatJid, replyTo: replyTo)
+        await uploadAndSend(localId: pending.id, outgoing: outgoing, chatJid: chatJid, replyKey: replyTo?.message.key)
+        return pending.id
+    }
+
+    private func insertPendingMedia(_ outgoing: BridgeOutgoingMedia, to chatJid: String, replyTo: MessageItem?) async throws -> MessageItem {
+        try await ingest.insertOutgoing(
             chatJid: chatJid, text: outgoing.caption, kind: outgoing.kind.messageKind,
             quoted: replyTo.map(Self.quote), media: outgoing, ownJid: ownJid)
-        await performSend(localId: pending.id, chatJid: chatJid) { [bridge, media] in
-            let result = try await bridge.sendMedia(chat: chatJid, media: outgoing, replyTo: replyTo?.message.key, progress: progress)
-            if let m = result.message.media {
-                await media.adoptSentFile(URL(filePath: outgoing.filePath),
-                                          for: IngestActor.mediaRecord(m, chatJid: chatJid, messageId: result.messageId))
+    }
+
+    /// Uploads with progress on the optimistic row, moves the file into the media store, and removes
+    /// a converted staging copy once it is stored.
+    private func uploadAndSend(localId: String, outgoing: BridgeOutgoingMedia, chatJid: String, replyKey: BridgeMessageKey?) async {
+        let jid = await ingest.canonicalJid(chatJid)
+        let relay = media.uploadRelay(chatJid: jid, localId: localId)
+        let source = URL(filePath: outgoing.filePath)
+        await performSend(localId: localId, chatJid: chatJid) { [bridge, media] in
+            defer { media.clearUploadProgress(chatJid: jid, localId: localId) }
+            let result = try await bridge.sendMedia(chat: chatJid, media: outgoing, replyTo: replyKey, progress: relay)
+            guard let m = result.message.media else { return (result, nil) }
+            let stored = await media.adoptSentFile(source, for: IngestActor.mediaRecord(m, chatJid: jid, messageId: result.messageId))
+            if stored != nil, source.path.hasPrefix(OutgoingMediaPreparer.stagingDirectory.path) {
+                try? FileManager.default.removeItem(at: source)
             }
-            return result
+            return (result, stored?.path)
         }
-        return pending.id
     }
 
     /// Re-sends a failed optimistic message.
@@ -197,10 +230,9 @@ public final class WAClient: Sendable {
             let outgoing = BridgeOutgoingMedia(
                 kind: item.message.kind.sendKind, filePath: path, mimetype: m.mimetype ?? "application/octet-stream",
                 fileName: m.fileName, caption: text, width: m.width.map(UInt32.init), height: m.height.map(UInt32.init),
-                durationSecs: m.durationSecs.map(UInt32.init), jpegThumbnail: m.jpegThumbnail, pageCount: m.pageCount.map(UInt32.init))
-            await performSend(localId: localId, chatJid: chatJid) { [bridge] in
-                try await bridge.sendMedia(chat: chatJid, media: outgoing, replyTo: nil, progress: nil)
-            }
+                durationSecs: m.durationSecs.map(UInt32.init), jpegThumbnail: m.jpegThumbnail,
+                thumbnailWidth: nil, thumbnailHeight: nil, pageCount: m.pageCount.map(UInt32.init))
+            await uploadAndSend(localId: localId, outgoing: outgoing, chatJid: chatJid, replyKey: nil)
         } else if let text {
             await performSend(localId: localId, chatJid: chatJid) { [bridge] in
                 try await bridge.sendText(chat: chatJid, text: text, replyTo: nil)
@@ -209,9 +241,13 @@ public final class WAClient: Sendable {
     }
 
     private func performSend(localId: String, chatJid: String, _ send: @Sendable () async throws -> BridgeSendResult) async {
+        await performSend(localId: localId, chatJid: chatJid) { (try await send(), nil) }
+    }
+
+    private func performSend(localId: String, chatJid: String, _ send: @Sendable () async throws -> (BridgeSendResult, String?)) async {
         do {
-            let result = try await send()
-            try await ingest.completeSend(localId: localId, chatJid: chatJid, result: result)
+            let (result, storedPath) = try await send()
+            try await ingest.completeSend(localId: localId, chatJid: chatJid, result: result, storedPath: storedPath)
         } catch {
             WAKit.log.error("send failed: \(error)")
             try? await ingest.failSend(localId: localId, chatJid: chatJid)

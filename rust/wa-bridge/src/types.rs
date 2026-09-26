@@ -413,6 +413,9 @@ pub struct BridgeOutgoingMedia {
     pub duration_secs: Option<u32>,
     #[serde(serialize_with = "crate::json::byte_count")]
     pub jpeg_thumbnail: Option<Vec<u8>>,
+    /// Size of `jpeg_thumbnail`; documents use it to lay out their preview.
+    pub thumbnail_width: Option<u32>,
+    pub thumbnail_height: Option<u32>,
     pub page_count: Option<u32>,
 }
 
