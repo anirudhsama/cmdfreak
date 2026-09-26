@@ -18,3 +18,4 @@ capture/
 *.jsonl
 *.zlib
 wa-session.sqlite*
+.claude/worktrees/
