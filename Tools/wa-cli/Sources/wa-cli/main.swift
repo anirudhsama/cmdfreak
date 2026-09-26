@@ -1,6 +1,7 @@
 import CoreImage
 import Foundation
 import WACoreFFI
+import WAKit
 
 // wa-cli — M1 smoke tests for the Rust bridge.
 //
@@ -10,6 +11,8 @@ import WACoreFFI
 //   wa-cli send-self "text"            send a text to your own number ("Message yourself")
 //   wa-cli download [--out DIR]        newest image + voice note from the capture → download → remux .caf
 //   wa-cli import-capture [DIR]        replay a wa-link capture and print summary counts
+//   wa-cli ingest-capture [--db PATH] replay the capture through WAKit's IngestActor into an app DB
+//                                      (default: the app's real app.sqlite)
 //   wa-cli remux SRC.ogg DST.caf
 //
 // Env: WA_DATA_DIR (default ~/Library/Application Support/BetterWA), WA_LOG=debug|info|warn.
@@ -259,6 +262,33 @@ func cmdImport(_ args: [String]) async throws {
     printStats(bridge)
 }
 
+final class BatchSink: EventSink, @unchecked Sendable {
+    let continuation: AsyncStream<[BridgeEvent]>.Continuation
+    init(_ c: AsyncStream<[BridgeEvent]>.Continuation) { continuation = c }
+    func onEvents(events: [BridgeEvent]) { continuation.yield(events) }
+}
+
+func cmdIngest(_ args: [String]) async throws {
+    let dbURL = option("--db", in: args).map { URL(filePath: $0) } ?? AppDatabase.defaultURL
+    try FileManager.default.createDirectory(at: dbURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+    let ingest = try IngestActor(database: try AppDatabase(url: dbURL))
+    let (stream, cont) = AsyncStream<[BridgeEvent]>.makeStream(bufferingPolicy: .unbounded)
+    let bridge = try WaBridge(dataDir: dataDir, sink: BatchSink(cont))
+    let start = Date()
+    let applier = Task {
+        var batches = 0
+        for await batch in stream {
+            try await ingest.apply(batch)
+            batches += 1
+        }
+        return batches
+    }
+    try await bridge.importCapture(captureDir: captureDir)
+    cont.finish()
+    let batches = try await applier.value
+    print("ingested \(batches) batches into \(dbURL.path) in \(String(format: "%.2f", Date().timeIntervalSince(start)))s")
+}
+
 func cmdDownload(_ args: [String]) async throws {
     let out = option("--out", in: args) ?? NSTemporaryDirectory() + "wa-cli"
     let counter = Counter()
@@ -298,6 +328,7 @@ do {
     case "send-self": try await cmdSendSelf(Array(argv.dropFirst()))
     case "import-capture": try await cmdImport(Array(argv.dropFirst()))
     case "download": try await cmdDownload(Array(argv.dropFirst()))
+    case "ingest-capture": try await cmdIngest(Array(argv.dropFirst()))
     case "qr":
         guard argv.count == 2 else { throw CLIError("usage: wa-cli qr TEXT") }
         print(renderQR(argv[1]), terminator: "")
@@ -305,7 +336,7 @@ do {
         guard argv.count == 3 else { throw CLIError("usage: wa-cli remux SRC DST") }
         try remuxOggToCaf(src: argv[1], dst: argv[2])
     default:
-        err("usage: wa-cli events [--seconds N] [--nudge-after N] | qr TEXT | send-self TEXT | download [--out DIR] | import-capture [DIR] | remux SRC DST")
+        err("usage: wa-cli events [--seconds N] [--nudge-after N] | qr TEXT | send-self TEXT | download [--out DIR] | import-capture [DIR] | ingest-capture [--db PATH] | remux SRC DST")
         exit(2)
     }
 } catch {
