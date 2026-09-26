@@ -6,10 +6,15 @@
 //! or 200 events. History-sync payloads are handed to a worker that decodes them on a blocking
 //! thread and feeds chunks back into the same pipeline, one chunk in flight at a time.
 //!
+//! `EventSink::on_events` runs on a dedicated `wa-bridge-sink` OS thread, never on a tokio worker:
+//! Swift's sink blocks until its database transaction for the batch has committed. A waiter (hook
+//! batch, history chunk) fires only after `on_events` has returned, i.e. after the commit.
+//!
 //! Inbound user messages take the durability-hook path: the hook maps its batch, pushes it through
-//! the pipeline and returns only after the sink has received it, so the library acks to the server
-//! only once Swift has the message. The `Event::Messages` that follows carries
-//! `hook_committed == true` and is skipped to avoid delivering it twice.
+//! the pipeline and returns only after the sink has persisted it, so the library acks to the server
+//! only once Swift has committed the message. The `Event::Messages` that follows carries
+//! `hook_committed == true` and is skipped to avoid delivering it twice. History chunks use the same
+//! wait, so exactly one chunk is in flight against Swift's commit.
 
 use std::future::Future;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -39,7 +44,7 @@ const ORDERED_CAPACITY: usize = 8192;
 pub(crate) enum Input {
     Lib(Arc<Event>),
     /// Already-mapped events (hook batches, history chunks, import). `done` fires after the sink
-    /// has received the flush containing them.
+    /// has returned from the flush containing them.
     Ready(Vec<BridgeEvent>, Option<oneshot::Sender<()>>),
 }
 
@@ -52,7 +57,6 @@ pub(crate) struct Counters {
 
 pub(crate) struct Shared {
     pub data_dir: String,
-    pub sink: Arc<dyn EventSink>,
     pub canon: Canon,
     pub polls: PollCache,
     pub counters: Counters,
@@ -100,19 +104,44 @@ impl Shared {
 
 // MARK: - Pipeline
 
-async fn pipeline(weak: Weak<Shared>, mut rx: mpsc::UnboundedReceiver<Input>) {
+type SinkJob = (Vec<BridgeEvent>, Vec<oneshot::Sender<()>>);
+
+/// Calls the sink in order on its own thread (the sink may block until Swift has committed), then
+/// releases the batch's waiters. Exits when the pipeline drops its sender.
+fn spawn_sink_thread(sink: Arc<dyn EventSink>) -> std::io::Result<std::sync::mpsc::Sender<SinkJob>> {
+    let (tx, rx) = std::sync::mpsc::channel::<SinkJob>();
+    std::thread::Builder::new().name("wa-bridge-sink".into()).spawn(move || {
+        for (events, waiters) in rx {
+            if !events.is_empty() {
+                sink.on_events(events);
+            }
+            for w in waiters {
+                let _ = w.send(());
+            }
+        }
+    })?;
+    Ok(tx)
+}
+
+async fn pipeline(
+    weak: Weak<Shared>,
+    mut rx: mpsc::UnboundedReceiver<Input>,
+    sink_tx: std::sync::mpsc::Sender<SinkJob>,
+) {
     let mut buf: Vec<BridgeEvent> = Vec::new();
     let mut waiters: Vec<oneshot::Sender<()>> = Vec::new();
     let mut deadline = tokio::time::Instant::now();
 
+    // Never blocks: hands the batch to the sink thread. A dead sink thread drops the waiters, which
+    // the durability hook reports as a failure (messages stay unacked).
     let flush = |shared: &Shared, buf: &mut Vec<BridgeEvent>, waiters: &mut Vec<oneshot::Sender<()>>| {
+        if buf.is_empty() && waiters.is_empty() {
+            return;
+        }
         if !buf.is_empty() {
-            shared.sink.on_events(std::mem::take(buf));
             shared.counters.flushed.fetch_add(1, Ordering::Relaxed);
         }
-        for w in waiters.drain(..) {
-            let _ = w.send(());
-        }
+        let _ = sink_tx.send((std::mem::take(buf), std::mem::take(waiters)));
     };
 
     loop {
@@ -319,6 +348,26 @@ async fn connect_inner(shared: Arc<Shared>, session: std::path::PathBuf) -> R<()
     Ok(())
 }
 
+/// Stops the bot, forgets the client and our identity, and removes the session store files.
+async fn reset_session(shared: &Shared, session: &std::path::Path) -> R<()> {
+    let handle = shared.bot.lock().await.take();
+    if let Some(h) = handle {
+        h.shutdown().await;
+    }
+    *shared.client.write().unwrap() = None;
+    shared.canon.set_own(None, None);
+    for suffix in ["", "-wal", "-shm", "-journal"] {
+        let mut p = session.as_os_str().to_owned();
+        p.push(suffix);
+        match std::fs::remove_file(&p) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(BridgeError::Io(e.to_string())),
+        }
+    }
+    Ok(())
+}
+
 #[uniffi::export]
 impl WaBridge {
     /// `data_dir` holds `wa-session.sqlite`. Events are delivered in ordered batches to `sink`.
@@ -331,9 +380,10 @@ impl WaBridge {
             .map_err(|e| BridgeError::Other(format!("runtime: {e}")))?;
         let (tx, rx) = mpsc::unbounded_channel();
         let (history_tx, history_rx) = mpsc::unbounded_channel();
+        let sink_tx = spawn_sink_thread(sink)
+            .map_err(|e| BridgeError::Other(format!("sink thread: {e}")))?;
         let shared = Arc::new(Shared {
             data_dir,
-            sink,
             canon: Canon::default(),
             polls: PollCache::default(),
             counters: Counters::default(),
@@ -342,7 +392,7 @@ impl WaBridge {
             client: RwLock::new(None),
             bot: tokio::sync::Mutex::new(None),
         });
-        rt.spawn(pipeline(Arc::downgrade(&shared), rx));
+        rt.spawn(pipeline(Arc::downgrade(&shared), rx, sink_tx));
         rt.spawn(history_worker(Arc::downgrade(&shared), history_rx));
         Ok(Arc::new(Self { rt: rt.handle().clone(), runtime: Some(rt), shared }))
     }
@@ -387,13 +437,17 @@ impl WaBridge {
         .await
     }
 
-    /// Unlinks this device. Irreversible: a new link needs the phone.
+    /// Unlinks this device. Irreversible: a new link needs the phone. Tears the client down and
+    /// deletes the session store, so a later `connect()`/`start_pairing_qr()` builds a fresh,
+    /// unpaired client that emits QR codes.
     pub async fn logout(&self) -> R<()> {
         let shared = self.shared.clone();
+        let session = self.session_path();
         self.run(async move {
             let client = shared.require_client()?;
             client.logout().await;
-            Ok(())
+            drop(client);
+            reset_session(&shared, &session).await
         })
         .await
     }
@@ -844,4 +898,74 @@ pub fn remux_ogg_to_caf(src: String, dst: String) -> R<()> {
 #[uniffi::export]
 pub fn install_logger(sink: Arc<dyn LogSink>, max_level: LogLevel) {
     crate::logging::install(sink, max_level);
+}
+
+#[cfg(test)]
+mod sink_tests {
+    use super::*;
+    use std::sync::Mutex;
+    use std::sync::atomic::AtomicBool;
+
+    /// Stands in for Swift: blocks like the real sink does until its commit.
+    struct SlowSink {
+        committed: AtomicBool,
+        batches: Mutex<Vec<usize>>,
+    }
+
+    impl EventSink for SlowSink {
+        fn on_events(&self, events: Vec<BridgeEvent>) {
+            std::thread::sleep(Duration::from_millis(80));
+            self.batches.lock().unwrap().push(events.len());
+            self.committed.store(true, Ordering::SeqCst);
+        }
+    }
+
+    fn temp_dir(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("wa-bridge-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn waiters_release_only_after_sink_returns_and_off_the_runtime() {
+        let sink = Arc::new(SlowSink { committed: AtomicBool::new(false), batches: Mutex::new(vec![]) });
+        let dir = temp_dir("sink");
+        let bridge = WaBridge::new(dir.to_string_lossy().into(), sink.clone()).unwrap();
+        let shared = bridge.shared.clone();
+        let ok = bridge.rt.block_on(async move {
+            // A blocked sink must not stall the runtime: this timer still fires meanwhile.
+            let ticker = tokio::spawn(async { tokio::time::sleep(Duration::from_millis(10)).await });
+            let ok = shared
+                .emit_and_wait(vec![BridgeEvent::OfflineSyncCompleted { count: 1 }])
+                .await;
+            ticker.await.unwrap();
+            ok
+        });
+        assert!(ok);
+        assert!(sink.committed.load(Ordering::SeqCst), "hook resolved before the sink returned");
+        assert_eq!(*sink.batches.lock().unwrap(), vec![1]);
+    }
+
+    #[test]
+    fn reset_session_tears_down_and_removes_store() {
+        let sink = Arc::new(SlowSink { committed: AtomicBool::new(false), batches: Mutex::new(vec![]) });
+        let dir = temp_dir("reset");
+        let bridge = WaBridge::new(dir.to_string_lossy().into(), sink).unwrap();
+        let session = bridge.session_path();
+        for suffix in ["", "-wal", "-shm"] {
+            std::fs::write(format!("{}{suffix}", session.display()), b"x").unwrap();
+        }
+        bridge.shared.canon.set_own(
+            Some("15550000000@s.whatsapp.net".parse().unwrap()),
+            Some("123@lid".parse().unwrap()),
+        );
+        let shared = bridge.shared.clone();
+        bridge.rt.block_on(async move { reset_session(&shared, &session).await }).unwrap();
+        for suffix in ["", "-wal", "-shm"] {
+            assert!(!std::path::Path::new(&format!("{}{suffix}", bridge.session_path().display())).exists());
+        }
+        assert!(bridge.shared.client().is_none());
+        assert!(bridge.rt.block_on(bridge.shared.bot.lock()).is_none());
+        assert!(bridge.shared.canon.own_pn().is_none());
+    }
 }

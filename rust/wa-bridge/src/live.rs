@@ -224,9 +224,11 @@ pub async fn map_event(ctx: &MapCtx<'_>, event: &Event) -> Vec<BridgeEvent> {
         })),
         Event::DeleteChatUpdate(d) => out.push(action(BridgeChatAction::Delete {
             chat_jid: canon.resolve(client, &d.jid).await.to_string(),
+            cutoff: Some(range_cutoff(d.action.message_range.as_option(), d.timestamp.timestamp())),
         })),
         Event::ClearChatUpdate(c) => out.push(action(BridgeChatAction::Clear {
             chat_jid: canon.resolve(client, &c.jid).await.to_string(),
+            cutoff: Some(range_cutoff(c.action.message_range.as_option(), c.timestamp.timestamp())),
         })),
         Event::DeleteMessageForMeUpdate(d) => out.push(action(BridgeChatAction::DeleteMessageForMe {
             target: BridgeMessageKey {
@@ -246,6 +248,24 @@ pub async fn map_event(ctx: &MapCtx<'_>, event: &Event) -> Vec<BridgeEvent> {
 
 fn action(a: BridgeChatAction) -> BridgeEvent {
     BridgeEvent::ChatAction { action: a }
+}
+
+/// Newest message time a clear/delete covers: the synced message range when present (its
+/// timestamps are seconds, but tolerate milliseconds), else the action's own time.
+pub fn range_cutoff(range: Option<&wa::sync_action_value::SyncActionMessageRange>, action_ts: i64) -> i64 {
+    let secs = |t: i64| if t > 100_000_000_000 { t / 1000 } else { t };
+    range
+        .into_iter()
+        .flat_map(|r| {
+            [r.last_message_timestamp, r.last_system_message_timestamp]
+                .into_iter()
+                .flatten()
+                .chain(r.messages.iter().filter_map(|m| m.timestamp))
+        })
+        .filter(|t| *t > 0)
+        .map(secs)
+        .max()
+        .unwrap_or(action_ts)
 }
 
 pub fn push_aliases(canon: &Canon, out: &mut Vec<BridgeEvent>) {

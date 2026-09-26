@@ -44,12 +44,45 @@ import Testing
 
         #expect(try db.count("SELECT COUNT(*) FROM chat") == 1)
         let chat = try #require(try db.chat(F.alicePN))
-        #expect(chat.unreadCount == 4)  // 2 + 2, duplicate counted on both sides before merge
+        #expect(chat.unreadCount == 3)  // P1, SAME, L1: the duplicate counts once
         #expect(chat.pinnedAt == 42)
         #expect(chat.lastMessageId == "L1")
         let ids = try await ChatWindowLoader(database: db, chatJid: F.alicePN).initial().items.map(\.id)
         #expect(ids == ["P1", "SAME", "L1"])
         #expect(try db.count("SELECT COUNT(*) FROM message WHERE chatJid = ?", [F.aliceLID]) == 0)
+    }
+
+    @Test func duplicatesKeepStateFromTheLidCopy() async throws {
+        let db = try F.tempDB()
+        let ingest = try IngestActor(database: db)
+        let poll = BridgePoll(question: "Q", options: ["A", "B"], selectableCount: 1)
+        try await ingest.apply([
+            F.live(F.message("R", chat: F.alicePN, kind: .image, media: F.media()), F.message("E", chat: F.alicePN),
+                   F.message("S", chat: F.alicePN, fromMe: true, status: .sent), F.message("P", chat: F.alicePN, kind: .poll, text: nil, poll: poll),
+                   updates: [.reaction(target: F.key("E", chat: F.alicePN),
+                                       reaction: BridgeReaction(senderJid: F.alicePN, fromMe: false, emoji: "😀", timestamp: 1))]),
+            F.live(F.message("R", chat: F.aliceLID, kind: .image, media: F.media()), F.message("E", chat: F.aliceLID),
+                   F.message("S", chat: F.aliceLID, fromMe: true, status: .read), F.message("P", chat: F.aliceLID, kind: .poll, text: nil, poll: poll),
+                   updates: [
+                       .revoke(target: F.key("R", chat: F.aliceLID), revokedBy: F.aliceLID, timestamp: 5),
+                       .edit(target: F.key("E", chat: F.aliceLID), text: "edited", editedAt: 9),
+                       .reaction(target: F.key("E", chat: F.aliceLID),
+                                 reaction: BridgeReaction(senderJid: F.me, fromMe: true, emoji: "👍", timestamp: 2)),
+                       .pollVote(target: F.key("P", chat: F.aliceLID), voterJid: F.me, selected: ["B"], timestamp: 3),
+                   ]),
+        ])
+        try await ingest.apply([.jidAliases(aliases: [BridgeJidAlias(lid: F.aliceLID, pn: F.alicePN)])])
+
+        let r = try #require(try db.message(F.alicePN, "R"))
+        #expect(r.revoked && r.text == nil)
+        #expect(try db.count("SELECT COUNT(*) FROM media WHERE messageId = 'R'") == 0)
+        let e = try #require(try db.message(F.alicePN, "E"))
+        #expect(e.text == "edited" && e.editedAt == 9)
+        #expect(try db.message(F.alicePN, "S")?.status == .read)
+        #expect(try db.count("SELECT COUNT(*) FROM reaction WHERE chatJid = ? AND messageId = 'E'", [F.alicePN]) == 2)
+        #expect(try db.count("SELECT COUNT(*) FROM poll_vote WHERE chatJid = ? AND messageId = 'P'", [F.alicePN]) == 1)
+        #expect(try db.chat(F.alicePN)?.unreadCount == 3)  // R, E, P once each
+        #expect(try db.count("SELECT COUNT(*) FROM message") == 4)
     }
 
     @Test func groupSendersRewrittenAndAliasPersisted() async throws {

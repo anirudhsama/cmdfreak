@@ -312,8 +312,19 @@ pub enum BridgeChatAction {
     Archive { chat_jid: String, archived: bool },
     /// `read == false` means "marked unread".
     MarkRead { chat_jid: String, read: bool },
-    Delete { chat_jid: String },
-    Clear { chat_jid: String },
+    /// Deletes messages at or before `cutoff` (unix seconds; the synced message range, else the
+    /// action time) and the chat itself when nothing newer remains. `None`: everything.
+    Delete {
+        chat_jid: String,
+        #[uniffi(default)]
+        cutoff: Option<i64>,
+    },
+    /// Clears messages at or before `cutoff` (as for `Delete`); the chat stays.
+    Clear {
+        chat_jid: String,
+        #[uniffi(default)]
+        cutoff: Option<i64>,
+    },
     DeleteMessageForMe { target: BridgeMessageKey },
 }
 

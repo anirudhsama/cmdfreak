@@ -206,6 +206,12 @@ extension AppDatabase {
                 """)
         }
 
+        // When unread/pin/mute/archive state was last set by a chat action or a read here; history
+        // snapshots only apply that state while it is NULL.
+        m.registerMigration("v2") { db in
+            try db.alter(table: "chat") { t in t.add(column: "stateAt", .integer) }
+        }
+
         return m
     }
 }

@@ -6,6 +6,7 @@ use std::path::Path;
 
 use serde_json::Value;
 use whatsapp_rust::Jid;
+use whatsapp_rust::prelude::wa;
 use whatsapp_rust::wacore::history_sync::{HistorySyncStream, MAX_DECOMPRESSED};
 
 use crate::bridge::Shared;
@@ -44,6 +45,18 @@ fn parse_name(name: &str) -> (i32, u32) {
         rest.chars().take_while(char::is_ascii_digit).collect::<String>().parse().ok()
     };
     (num_after("-type").map_or(-1, |t| t as i32), num_after("-chunk").unwrap_or(0))
+}
+
+/// `range_cutoff` over a serialized `ClearChatAction`/`DeleteChatAction`.
+fn json_cutoff(action: &Value, timestamp: &Value) -> i64 {
+    let range = action.get("message_range").or_else(|| action.get("messageRange"));
+    let field = |k: &str| range.and_then(|r| r.get(k)).and_then(Value::as_i64);
+    let parsed = range.map(|_| wa::sync_action_value::SyncActionMessageRange {
+        last_message_timestamp: field("last_message_timestamp"),
+        last_system_message_timestamp: field("last_system_message_timestamp"),
+        ..Default::default()
+    });
+    crate::live::range_cutoff(parsed.as_ref(), ts_of(timestamp))
 }
 
 pub fn import_capture(shared: &Shared, dir: &str) -> R<()> {
@@ -145,8 +158,14 @@ pub fn import_capture(shared: &Shared, dir: &str) -> R<()> {
                 chat_jid,
                 read: action.get("read").and_then(Value::as_bool).unwrap_or(true),
             }),
-            "DeleteChatUpdate" => chat().map(|chat_jid| BridgeChatAction::Delete { chat_jid }),
-            "ClearChatUpdate" => chat().map(|chat_jid| BridgeChatAction::Clear { chat_jid }),
+            "DeleteChatUpdate" => chat().map(|chat_jid| BridgeChatAction::Delete {
+                chat_jid,
+                cutoff: Some(json_cutoff(action, &body["timestamp"])),
+            }),
+            "ClearChatUpdate" => chat().map(|chat_jid| BridgeChatAction::Clear {
+                chat_jid,
+                cutoff: Some(json_cutoff(action, &body["timestamp"])),
+            }),
             _ => None,
         };
         if let Some(a) = mapped {

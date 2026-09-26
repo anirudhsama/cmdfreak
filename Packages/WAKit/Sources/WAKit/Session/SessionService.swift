@@ -104,6 +104,9 @@ public final class SessionService {
         case .pairing(.error(let message)):
             pairingError = message
         case .pairing(.loggedOut(let reason)):
+            ownJid = nil
+            ownLid = nil
+            backgroundSync = nil
             state = .loggedOut(reason: reason)
         case .ownJid(let pn, let lid):
             if let pn { ownJid = pn }

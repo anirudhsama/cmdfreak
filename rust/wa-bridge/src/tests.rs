@@ -408,6 +408,28 @@ fn unknown_content_is_unsupported_with_type_name() {
     assert_eq!(b.type_name.as_deref(), Some("event_message"));
 }
 
+#[test]
+fn clear_and_delete_cutoff_comes_from_the_message_range() {
+    use crate::live::range_cutoff;
+    let range = wa::sync_action_value::SyncActionMessageRange {
+        last_message_timestamp: Some(1_700_000_100),
+        last_system_message_timestamp: Some(1_700_000_050),
+        messages: vec![wa::sync_action_value::SyncActionMessage {
+            key: MessageField::none(),
+            timestamp: Some(1_700_000_080),
+        }],
+    };
+    assert_eq!(range_cutoff(Some(&range), 1_800_000_000), 1_700_000_100);
+    let ms = wa::sync_action_value::SyncActionMessageRange {
+        last_message_timestamp: Some(1_700_000_100_000),
+        ..Default::default()
+    };
+    assert_eq!(range_cutoff(Some(&ms), 1_800_000_000), 1_700_000_100);
+    // No range (or an empty one): the action's own time.
+    assert_eq!(range_cutoff(None, 1_800_000_000), 1_800_000_000);
+    assert_eq!(range_cutoff(Some(&Default::default()), 1_800_000_000), 1_800_000_000);
+}
+
 /// `WA_CAPTURE_DIR=… cargo test -- --ignored --nocapture real_capture`
 #[test]
 #[ignore]

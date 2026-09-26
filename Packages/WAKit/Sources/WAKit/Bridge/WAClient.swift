@@ -3,13 +3,23 @@ import GRDB
 import os
 import Synchronization
 
-/// Receives bridge batches on the Rust thread and hands them off without blocking it.
+/// One bridge batch on its way to `IngestActor`; `committed` is signalled once it has been applied.
+struct IngestBatch: Sendable {
+    let events: [BridgeEvent]
+    let committed: DispatchSemaphore?
+}
+
+/// Receives bridge batches on the bridge's dedicated sink thread (never a tokio worker, never the
+/// main thread). Batches that ingest persists block here until their transaction has committed:
+/// the bridge treats `onEvents` returning as "persisted" and only then lets the library ack the
+/// server (durability hook) or send the next history chunk. Ingest never waits on this thread or
+/// the main actor, so the wait cannot deadlock.
 final class EventRouter: EventSink, Sendable {
-    private let ingest: AsyncStream<[BridgeEvent]>.Continuation
+    private let ingest: AsyncStream<IngestBatch>.Continuation
     private let session: AsyncStream<[SessionEvent]>.Continuation
     private let presence: AsyncStream<BridgeChatPresence>.Continuation
 
-    init(ingest: AsyncStream<[BridgeEvent]>.Continuation, session: AsyncStream<[SessionEvent]>.Continuation,
+    init(ingest: AsyncStream<IngestBatch>.Continuation, session: AsyncStream<[SessionEvent]>.Continuation,
          presence: AsyncStream<BridgeChatPresence>.Continuation) {
         self.ingest = ingest
         self.session = session
@@ -17,10 +27,50 @@ final class EventRouter: EventSink, Sendable {
     }
 
     func onEvents(events: [BridgeEvent]) {
-        ingest.yield(events)
         let s = events.compactMap(SessionEvent.init)
         if !s.isEmpty { session.yield(s) }
         for case .chatPresence(let p) in events { presence.yield(p) }
+        guard events.contains(where: \.isPersisted) else {
+            ingest.yield(IngestBatch(events: events, committed: nil))
+            return
+        }
+        let committed = DispatchSemaphore(value: 0)
+        guard case .enqueued = ingest.yield(IngestBatch(events: events, committed: committed)) else { return }
+        committed.wait()
+    }
+}
+
+/// Sends read receipts for messages that arrived while their chat was open, batched per chat.
+actor ReadReceiptBatcher {
+    private let bridge: any WaBridgeProtocol
+    private let delay: Duration
+    private var pending: [String: [BridgeMessageKey]] = [:]
+    private var scheduled = false
+
+    init(bridge: any WaBridgeProtocol, delay: Duration = .milliseconds(300)) {
+        self.bridge = bridge
+        self.delay = delay
+    }
+
+    func add(_ keys: [String: [BridgeMessageKey]]) {
+        for (chat, k) in keys { pending[chat, default: []].append(contentsOf: k) }
+        guard !scheduled, !pending.isEmpty else { return }
+        scheduled = true
+        Task {
+            try? await Task.sleep(for: delay)
+            await flush()
+        }
+    }
+
+    private func flush() async {
+        let batch = pending
+        pending = [:]
+        scheduled = false
+        for (chat, keys) in batch {
+            do { try await bridge.markRead(chat: chat, messages: keys) } catch {
+                WAKit.log.error("markRead \(chat, privacy: .private) failed: \(error)")
+            }
+        }
     }
 }
 
@@ -86,7 +136,7 @@ public final class WAClient: Sendable {
         let ingest = try IngestActor(database: database)
         self.ingest = ingest
 
-        let (ingestStream, ingestCont) = AsyncStream<[BridgeEvent]>.makeStream(bufferingPolicy: .unbounded)
+        let (ingestStream, ingestCont) = AsyncStream<IngestBatch>.makeStream(bufferingPolicy: .unbounded)
         let (sessionStream, sessionCont) = AsyncStream<[SessionEvent]>.makeStream(bufferingPolicy: .unbounded)
         let (presenceStream, presenceCont) = AsyncStream<BridgeChatPresence>.makeStream(bufferingPolicy: .bufferingNewest(64))
         chatPresence = presenceStream
@@ -104,12 +154,17 @@ public final class WAClient: Sendable {
         let groups = GroupService(bridge: bridge, ingest: ingest)
         self.groups = groups
         avatars = AvatarService(bridge: bridge, ingest: ingest)
+        let receipts = ReadReceiptBatcher(bridge: bridge)
 
+        // Single consumer: batches are applied one at a time, in bridge order.
         Task.detached(priority: .userInitiated) {
             try? await ingest.prunePendingMutations(olderThan: Int64(Date().timeIntervalSince1970) - 14 * 86_400)
             for await batch in ingestStream {
-                do { try await ingest.apply(batch) } catch { WAKit.log.error("ingest failed: \(error)") }
-                if batch.contains(where: \.completesSyncPhase) {
+                var reads: [String: [BridgeMessageKey]] = [:]
+                do { reads = try await ingest.applyBatch(batch.events) } catch { WAKit.log.error("ingest failed: \(error)") }
+                batch.committed?.signal()
+                if !reads.isEmpty { await receipts.add(reads) }
+                if batch.events.contains(where: \.completesSyncPhase) {
                     Task { await groups.fillMissingNames() }
                 }
             }
@@ -119,6 +174,7 @@ public final class WAClient: Sendable {
                 session.handle(events)
                 for case .ownJid(let pn, _) in events where pn != nil { self?.ownJidState.withLock { $0 = pn } }
                 for case .pairing(.success(let jid, _)) in events { self?.ownJidState.withLock { $0 = jid } }
+                for case .pairing(.loggedOut) in events { self?.ownJidState.withLock { $0 = nil } }
             }
         }
     }
@@ -132,7 +188,13 @@ public final class WAClient: Sendable {
     public func startPairingQr() async throws { try await bridge.startPairingQr() }
     public func pairWithPhone(_ number: String) async throws -> String { try await bridge.pairWithPhone(number: number) }
     public func cancelPairing() async throws { try await bridge.cancelPairing() }
-    public func logout() async throws { try await bridge.logout() }
+    /// Unlinks this Mac. The bridge drops its client and session store; our identity is forgotten
+    /// so the next launch (or "Link again") starts unpaired.
+    public func logout() async throws {
+        try await bridge.logout()
+        try await ingest.forgetOwnIdentity()
+        ownJidState.withLock { $0 = nil }
+    }
 
     // MARK: Reading
 
@@ -321,6 +383,14 @@ public final class WAClient: Sendable {
 }
 
 extension BridgeEvent {
+    /// Events `IngestActor` writes to the database; batches containing one wait for its commit.
+    var isPersisted: Bool {
+        switch self {
+        case .connection, .pairing, .chatPresence, .presence, .offlineSyncCompleted: false
+        default: true
+        }
+    }
+
     /// Points after which group names are worth back-filling.
     var completesSyncPhase: Bool {
         switch self {

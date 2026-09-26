@@ -1,3 +1,4 @@
+import CryptoKit
 import Dispatch
 import Foundation
 import GRDB
@@ -22,6 +23,9 @@ struct ChangeSet {
     /// Chats whose last-message preview must be recomputed before commit.
     var dirty: Set<String> = []
     var pushNames: [String: String] = [:]
+    /// Incoming live messages that landed in the focused chat: not counted unread, so the caller
+    /// sends read receipts for them after commit.
+    var readWhileFocused: [String: [BridgeMessageKey]] = [:]
 
     mutating func add(_ chat: String, _ id: String) { added[chat, default: []].append(id); dirty.insert(chat) }
     mutating func update(_ chat: String, _ id: String) { updated[chat, default: []].insert(id); dirty.insert(chat) }
@@ -77,9 +81,24 @@ public actor IngestActor {
 
     /// Applies one bridge batch in a single transaction. Session-only events are ignored here.
     public func apply(_ events: [BridgeEvent]) throws {
+        _ = try applyBatch(events)
+    }
+
+    /// `apply`, returning the incoming messages read in the focused chat (per chat) to mark read.
+    func applyBatch(_ events: [BridgeEvent]) throws -> [String: [BridgeMessageKey]] {
         try perform { db, cs in
             for event in events { try self.handle(event, db, &cs) }
+            return cs.readWhileFocused
         }
+    }
+
+    /// Forgets our own identity after a logout, so the next launch starts unpaired.
+    public func forgetOwnIdentity() throws {
+        try perform { db, _ in try Self.deleteOwnIdentity(db) }
+    }
+
+    private static func deleteOwnIdentity(_ db: Database) throws {
+        try db.execute(sql: "DELETE FROM meta WHERE key IN ('ownPn', 'ownLid')")
     }
 
     /// Creates an empty local chat for `jid` (new DM from the command bar) so it appears in the
@@ -110,7 +129,8 @@ public actor IngestActor {
                     """, arguments: [jid, min(chat.unreadCount, 1000)]).map(\.key)
             }
             if chat.unreadCount > 0 || chat.markedUnread {
-                try db.execute(sql: "UPDATE chat SET unreadCount = 0, markedUnread = 0 WHERE jid = ?", arguments: [jid])
+                try db.execute(sql: "UPDATE chat SET unreadCount = 0, markedUnread = 0, stateAt = ? WHERE jid = ?",
+                               arguments: [Self.now, jid])
             }
             return OpenChatResult(unreadKeys: keys, wasMarkedUnread: chat.markedUnread)
         }
@@ -236,17 +256,28 @@ public actor IngestActor {
 
     // MARK: - Transaction plumbing
 
+    /// One write transaction. In-memory bookkeeping mutated inside it (aliases, sequence numbers,
+    /// pending count) is restored if the transaction rolls back.
     @discardableResult
     private func perform<T>(_ body: (Database, inout ChangeSet) throws -> T) throws -> T {
         var cs = ChangeSet()
-        let result = try database.pool.write { db -> T in
-            let r = try body(db, &cs)
-            try finish(db, &cs)
-            return r
+        let saved = (aliases, ingestSeq, persistedSeq, pendingCount)
+        let result: T
+        do {
+            result = try database.pool.write { db -> T in
+                let r = try body(db, &cs)
+                try finish(db, &cs)
+                return r
+            }
+        } catch {
+            (aliases, ingestSeq, persistedSeq, pendingCount) = saved
+            throw error
         }
         publish(cs)
         return result
     }
+
+    private static var now: Int64 { Int64(Date().timeIntervalSince1970) }
 
     private func finish(_ db: Database, _ cs: inout ChangeSet) throws {
         for (jid, name) in cs.pushNames {
@@ -323,6 +354,8 @@ public actor IngestActor {
             if let pn { try db.execute(sql: "INSERT OR REPLACE INTO meta (key, value) VALUES ('ownPn', ?)", arguments: [pn]) }
             if let lid { try db.execute(sql: "INSERT OR REPLACE INTO meta (key, value) VALUES ('ownLid', ?)", arguments: [lid]) }
             if let pn, let lid { try mergeAlias(lid: lid, pn: pn, db, &cs) }
+        case .pairing(.loggedOut):
+            try Self.deleteOwnIdentity(db)
         case .connection, .pairing, .chatPresence, .presence, .offlineSyncCompleted:
             break
         }
@@ -343,17 +376,20 @@ public actor IngestActor {
 
         if !m.fromMe, let name = m.pushName, !name.isEmpty, !sender.isEmpty { cs.pushNames[sender] = name }
 
-        let existing = try Row.fetchOne(db, sql: "SELECT status, editedAt, revoked FROM message WHERE chatJid = ? AND id = ?",
-                                        arguments: [chatJid, m.id])
+        let existing = try MessageRecord.fetchOne(db, sql: "SELECT * FROM message WHERE chatJid = ? AND id = ?",
+                                                  arguments: [chatJid, m.id])
         let incomingStatus = m.status.map { MessageStatus(rank: $0.rank) }
-        if let existing {
+        if var old = existing {
+            if old.kind == .undecryptable, m.kind != .undecryptable {
+                try upgradePlaceholder(&old, with: m, status: incomingStatus, db, &cs)
+                return
+            }
             // Re-delivery (history after live, or our own send echoed): merge forward-only fields.
-            let oldStatus: Int = existing["status"]
             var sets: [String] = []
             var args: [any DatabaseValueConvertible] = []
-            if let s = incomingStatus, s.rank > oldStatus { sets.append("status = ?"); args.append(s.rank) }
-            if m.revoked, !(existing["revoked"] as Bool) { sets.append("revoked = 1, text = NULL") }
-            if let e = m.editedAt, e > (existing["editedAt"] as Int64? ?? 0), !m.revoked {
+            if let s = incomingStatus, s.rank > old.status.rank { sets.append("status = ?"); args.append(s.rank) }
+            if m.revoked, !old.revoked { sets.append("revoked = 1, text = NULL") }
+            if let e = m.editedAt, e > (old.editedAt ?? 0), !m.revoked, !old.revoked {
                 sets.append("text = ?, editedAt = ?"); args.append(m.text); args.append(e)
             }
             if !sets.isEmpty {
@@ -361,7 +397,10 @@ public actor IngestActor {
                                arguments: StatementArguments(args + [chatJid, m.id]))
                 cs.update(chatJid, m.id)
             }
-            if let media = m.media, !m.revoked {
+            if m.revoked || old.revoked {
+                // Same as applyMutation(.revoke): a revoked message keeps no media.
+                try db.execute(sql: "DELETE FROM media WHERE chatJid = ? AND messageId = ?", arguments: [chatJid, m.id])
+            } else if let media = m.media {
                 try db.execute(sql: "DELETE FROM media WHERE chatJid = ? AND messageId = ? AND directPath = ''", arguments: [chatJid, m.id])
                 try Self.mediaRecord(media, chatJid: chatJid, messageId: m.id).insert(db, onConflict: .ignore)
             }
@@ -372,11 +411,7 @@ public actor IngestActor {
         }
 
         ingestSeq += 1
-        let extra = MessageExtra(
-            location: m.location.map { LocationInfo(latitude: $0.latitude, longitude: $0.longitude, name: $0.name, address: $0.address, isLive: $0.isLive) },
-            contact: m.contact.map { ContactCardInfo(displayName: $0.displayName, vcard: $0.vcard) },
-            poll: m.poll.map { PollInfo(question: $0.question, options: $0.options, selectableCount: Int($0.selectableCount)) }
-        )
+        let extra = Self.extra(m)
         var rec = MessageRecord(
             localId: nil, chatJid: chatJid, id: m.id, senderJid: sender, participant: m.participant, fromMe: m.fromMe,
             timestamp: m.timestamp, sortKey: SortKey.make(timestamp: m.timestamp, seq: ingestSeq), kind: m.kind,
@@ -384,7 +419,7 @@ public actor IngestActor {
             quotedId: m.quoted?.id, quotedSenderJid: m.quoted?.senderJid.map(canon), quotedKind: m.quoted?.kind, quotedSnippet: m.quoted?.snippet,
             status: incomingStatus ?? (m.fromMe ? .sent : .delivered),
             editedAt: m.editedAt, revoked: m.revoked, isForwarded: m.isForwarded, typeName: m.typeName, pushName: m.pushName,
-            extra: extra.isEmpty ? nil : extra
+            extra: extra
         )
         try rec.insert(db)
         if let media = m.media, !m.revoked {
@@ -396,10 +431,59 @@ public actor IngestActor {
         }
         cs.add(chatJid, m.id)
 
-        if live, !m.fromMe, m.kind != .system, !m.revoked, !focus.isReading(chatJid) {
-            try db.execute(sql: "UPDATE chat SET unreadCount = unreadCount + 1 WHERE jid = ?", arguments: [chatJid])
+        if live, !m.fromMe, m.kind != .system, !m.revoked {
+            if focus.isReading(chatJid) {
+                cs.readWhileFocused[chatJid, default: []].append(rec.key)
+            } else {
+                try db.execute(sql: "UPDATE chat SET unreadCount = unreadCount + 1 WHERE jid = ?", arguments: [chatJid])
+            }
         }
         try applyPending(db, chatJid, m.id, &cs)
+    }
+
+    private static func extra(_ m: BridgeMessage) -> MessageExtra? {
+        let extra = MessageExtra(
+            location: m.location.map { LocationInfo(latitude: $0.latitude, longitude: $0.longitude, name: $0.name, address: $0.address, isLive: $0.isLive) },
+            contact: m.contact.map { ContactCardInfo(displayName: $0.displayName, vcard: $0.vcard) },
+            poll: m.poll.map { PollInfo(question: $0.question, options: $0.options, selectableCount: Int($0.selectableCount)) }
+        )
+        return extra.isEmpty ? nil : extra
+    }
+
+    /// The real message replaced an undecryptable placeholder (live retry or history CIPHERTEXT
+    /// stub). Takes its content; keeps the row's position, a higher status, and mutations already
+    /// applied to the placeholder (revoke, a newer edit, reactions, votes). Unread was counted
+    /// when the placeholder arrived.
+    private func upgradePlaceholder(_ old: inout MessageRecord, with m: BridgeMessage, status: MessageStatus?,
+                                    _ db: Database, _ cs: inout ChangeSet) throws {
+        old.kind = m.kind
+        old.extra = Self.extra(m)
+        old.quotedId = m.quoted?.id
+        old.quotedSenderJid = m.quoted?.senderJid.map(canon)
+        old.quotedKind = m.quoted?.kind
+        old.quotedSnippet = m.quoted?.snippet
+        old.typeName = m.typeName
+        old.pushName = m.pushName ?? old.pushName
+        old.isForwarded = m.isForwarded
+        if let status, status.rank > old.status.rank { old.status = status }
+        old.revoked = old.revoked || m.revoked
+        if old.revoked {
+            old.text = nil
+        } else if let applied = old.editedAt, (m.editedAt ?? 0) <= applied {
+            // An edit already landed on the placeholder and is newer than this body.
+        } else {
+            old.text = m.text
+            old.editedAt = m.editedAt ?? old.editedAt
+        }
+        try old.update(db)
+        try db.execute(sql: "DELETE FROM media WHERE chatJid = ? AND messageId = ?", arguments: [old.chatJid, old.id])
+        if let media = m.media, !old.revoked {
+            try Self.mediaRecord(media, chatJid: old.chatJid, messageId: old.id).insert(db)
+        }
+        for r in m.reactions {
+            try applyMutation(db, old.chatJid, old.id, .reaction(senderJid: canon(r.senderJid), fromMe: r.fromMe, emoji: r.emoji, timestamp: r.timestamp), &cs)
+        }
+        cs.update(old.chatJid, old.id)
     }
 
     private func applyUpdate(_ u: BridgeMessageUpdate, _ db: Database, _ cs: inout ChangeSet) throws {
@@ -437,11 +521,35 @@ public actor IngestActor {
         for row in rows {
             let payload: String = row["payload"]
             if let mutation = try? JSONDecoder().decode(MessageMutation.self, from: Data(payload.utf8)) {
-                try applyMutation(db, chatJid, messageId, mutation, &cs)
+                try applyMutation(db, chatJid, messageId, canonicalised(mutation), &cs)
             }
         }
         try db.execute(sql: "DELETE FROM pending_mutation WHERE chatJid = ? AND messageId = ?", arguments: [chatJid, messageId])
         pendingCount = max(0, pendingCount - rows.count)
+    }
+
+    /// Parked mutations keep the sender JID they arrived with; an alias learned since then applies.
+    private func canonicalised(_ mutation: MessageMutation) -> MessageMutation {
+        switch mutation {
+        case .reaction(let sender, let fromMe, let emoji, let ts): .reaction(senderJid: canon(sender), fromMe: fromMe, emoji: emoji, timestamp: ts)
+        case .pollVote(let voter, let selected, let ts): .pollVote(voterJid: canon(voter), selected: selected, timestamp: ts)
+        case .edit, .revoke, .status: mutation
+        }
+    }
+
+    /// Votes on polls the bridge has not seen this session arrive as lowercase hex SHA-256 of the
+    /// option name; resolve them against the stored poll so stored votes are always names.
+    private func resolvePollOptions(_ selected: [String], _ db: Database, _ chatJid: String, _ id: String) throws -> [String] {
+        func isHash(_ s: String) -> Bool { s.utf8.count == 64 && s.utf8.allSatisfy { (48...57).contains($0) || (97...102).contains($0) } }
+        guard selected.contains(where: isHash),
+              let options = try MessageRecord.fetchOne(db, key: ["chatJid": chatJid, "id": id])?.extra?.poll?.options
+        else { return selected }
+        let byHash = Dictionary(options.map { (Self.sha256Hex($0), $0) }, uniquingKeysWith: { a, _ in a })
+        return selected.map { byHash[$0] ?? $0 }
+    }
+
+    static func sha256Hex(_ s: String) -> String {
+        SHA256.hash(data: Data(s.utf8)).map { String(format: "%02x", $0) }.joined()
     }
 
     /// Returns false when the target message does not exist (caller parks the mutation).
@@ -477,6 +585,7 @@ public actor IngestActor {
                 try db.execute(sql: "DELETE FROM poll_vote WHERE chatJid = ? AND messageId = ? AND voterJid = ? AND timestamp <= ?",
                                arguments: key + [voter, ts])
             } else {
+                let selected = try resolvePollOptions(selected, db, chatJid, id)
                 let json = String(decoding: try JSONEncoder().encode(selected), as: UTF8.self)
                 try db.execute(sql: """
                     INSERT INTO poll_vote (chatJid, messageId, voterJid, selected, timestamp) VALUES (?, ?, ?, ?, ?)
@@ -504,7 +613,7 @@ public actor IngestActor {
         case .delivered: status = .delivered
         case .read, .played: status = .read
         case .readSelf, .playedSelf:
-            try db.execute(sql: "UPDATE chat SET unreadCount = 0 WHERE jid = ?", arguments: [chatJid])
+            try db.execute(sql: "UPDATE chat SET unreadCount = 0, stateAt = ? WHERE jid = ?", arguments: [Self.now, chatJid])
             return
         case .retry, .other:
             return
@@ -531,8 +640,10 @@ public actor IngestActor {
 
     private func upsertHistoryChat(_ c: BridgeChat, _ db: Database) throws {
         let jid = canon(c.jid)
-        // A snapshot from the phone: authoritative for new rows; for existing rows it never erases
-        // state learned from live traffic or app-state actions.
+        // A snapshot from the phone. Its unread/marked-unread/pin/mute/archive state applies to new
+        // rows and to rows that only exist because live traffic created them first (`stateAt IS
+        // NULL`). Once a chat action or read has set that state here (`stateAt`), a later, possibly
+        // stale snapshot never re-applies it.
         try db.execute(sql: """
             INSERT INTO chat (jid, kind, name, lastActivityAt, unreadCount, markedUnread, pinnedAt, mutedUntil, archived, readOnly)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -542,11 +653,11 @@ public actor IngestActor {
                     WHEN excluded.lastActivityAt IS NULL THEN lastActivityAt
                     WHEN lastActivityAt IS NULL THEN excluded.lastActivityAt
                     ELSE MAX(lastActivityAt, excluded.lastActivityAt) END,
-                unreadCount = MAX(unreadCount, excluded.unreadCount),
-                markedUnread = markedUnread OR excluded.markedUnread,
-                pinnedAt = COALESCE(pinnedAt, excluded.pinnedAt),
-                mutedUntil = COALESCE(mutedUntil, excluded.mutedUntil),
-                archived = archived OR excluded.archived,
+                unreadCount = CASE WHEN stateAt IS NULL THEN MAX(unreadCount, excluded.unreadCount) ELSE unreadCount END,
+                markedUnread = CASE WHEN stateAt IS NULL THEN excluded.markedUnread ELSE markedUnread END,
+                pinnedAt = CASE WHEN stateAt IS NULL THEN excluded.pinnedAt ELSE pinnedAt END,
+                mutedUntil = CASE WHEN stateAt IS NULL THEN excluded.mutedUntil ELSE mutedUntil END,
+                archived = CASE WHEN stateAt IS NULL THEN excluded.archived ELSE archived END,
                 readOnly = excluded.readOnly
             """, arguments: [jid, c.kind, c.name, c.lastActivityAt, Int(c.unreadCount), c.markedUnread,
                              c.pinnedAt, c.mutedUntil, c.archived, c.readOnly])
@@ -557,38 +668,54 @@ public actor IngestActor {
         case .pin(let jid, let pinnedAt):
             let jid = canon(jid)
             try ensureChat(db, jid)
-            try db.execute(sql: "UPDATE chat SET pinnedAt = ? WHERE jid = ?", arguments: [pinnedAt, jid])
+            try db.execute(sql: "UPDATE chat SET pinnedAt = ?, stateAt = ? WHERE jid = ?", arguments: [pinnedAt, Self.now, jid])
         case .mute(let jid, let until):
             let jid = canon(jid)
             try ensureChat(db, jid)
-            try db.execute(sql: "UPDATE chat SET mutedUntil = ? WHERE jid = ?", arguments: [until, jid])
+            try db.execute(sql: "UPDATE chat SET mutedUntil = ?, stateAt = ? WHERE jid = ?", arguments: [until, Self.now, jid])
         case .archive(let jid, let archived):
             let jid = canon(jid)
             try ensureChat(db, jid)
-            try db.execute(sql: "UPDATE chat SET archived = ? WHERE jid = ?", arguments: [archived, jid])
+            try db.execute(sql: "UPDATE chat SET archived = ?, stateAt = ? WHERE jid = ?", arguments: [archived, Self.now, jid])
         case .markRead(let jid, let read):
             let jid = canon(jid)
             if read {
-                try db.execute(sql: "UPDATE chat SET unreadCount = 0, markedUnread = 0 WHERE jid = ?", arguments: [jid])
+                try db.execute(sql: "UPDATE chat SET unreadCount = 0, markedUnread = 0, stateAt = ? WHERE jid = ?", arguments: [Self.now, jid])
             } else {
-                try db.execute(sql: "UPDATE chat SET markedUnread = 1 WHERE jid = ?", arguments: [jid])
+                try db.execute(sql: "UPDATE chat SET markedUnread = 1, stateAt = ? WHERE jid = ?", arguments: [Self.now, jid])
             }
-        case .delete(let jid):
+        case .delete(let jid, let cutoff):
             let jid = canon(jid)
-            try db.execute(sql: "DELETE FROM chat WHERE jid = ?", arguments: [jid])
-            try db.execute(sql: "DELETE FROM pending_mutation WHERE chatJid = ?", arguments: [jid])
-            cs.reload.insert(jid)
-        case .clear(let jid):
-            let jid = canon(jid)
-            try db.execute(sql: "DELETE FROM message WHERE chatJid = ?", arguments: [jid])
-            try db.execute(sql: "UPDATE chat SET unreadCount = 0 WHERE jid = ?", arguments: [jid])
-            cs.reload.insert(jid)
-            cs.dirty.insert(jid)
+            // Messages newer than the synced range arrived after the delete: keep them and the chat.
+            let newer = try cutoff.map {
+                try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM message WHERE chatJid = ? AND timestamp > ?", arguments: [jid, $0]) ?? 0
+            } ?? 0
+            if let cutoff, newer > 0 {
+                try clearMessages(jid, upTo: cutoff, db, &cs)
+            } else {
+                try db.execute(sql: "DELETE FROM chat WHERE jid = ?", arguments: [jid])
+                try db.execute(sql: "DELETE FROM pending_mutation WHERE chatJid = ?", arguments: [jid])
+                cs.reload.insert(jid)
+            }
+        case .clear(let jid, let cutoff):
+            try clearMessages(canon(jid), upTo: cutoff, db, &cs)
         case .deleteMessageForMe(let target):
             let jid = canon(target.chatJid)
             try db.execute(sql: "DELETE FROM message WHERE chatJid = ? AND id = ?", arguments: [jid, target.id])
             if db.changesCount > 0 { cs.delete(jid, target.id) }
         }
+    }
+
+    /// Deletes messages at or before `cutoff` (all when nil); unread never exceeds what is left.
+    private func clearMessages(_ jid: String, upTo cutoff: Int64?, _ db: Database, _ cs: inout ChangeSet) throws {
+        try db.execute(sql: "DELETE FROM message WHERE chatJid = ? AND (? IS NULL OR timestamp <= ?)", arguments: [jid, cutoff, cutoff])
+        try db.execute(sql: """
+            UPDATE chat SET unreadCount = MIN(unreadCount,
+                (SELECT COUNT(*) FROM message WHERE chatJid = ? AND fromMe = 0 AND kind != 'system'))
+            WHERE jid = ?
+            """, arguments: [jid, jid])
+        cs.reload.insert(jid)
+        cs.dirty.insert(jid)
     }
 
     private func handleGroup(_ g: BridgeGroup, _ db: Database) throws {
@@ -650,9 +777,23 @@ public actor IngestActor {
         // Chat and its messages
         if let lidChat = try ChatRecord.fetchOne(db, key: lid) {
             if let pnChat = try ChatRecord.fetchOne(db, key: pn) {
+                // Messages present under both JIDs are counted in both unread windows; count once.
+                let overlap = try Int.fetchOne(db, sql: """
+                    SELECT COUNT(*) FROM
+                        (SELECT id FROM message WHERE chatJid = ? AND fromMe = 0 AND kind != 'system' ORDER BY sortKey DESC LIMIT ?) l
+                    JOIN
+                        (SELECT id FROM message WHERE chatJid = ? AND fromMe = 0 AND kind != 'system' ORDER BY sortKey DESC LIMIT ?) p
+                    USING (id)
+                    """, arguments: [lid, lidChat.unreadCount, pn, pnChat.unreadCount]) ?? 0
+                let dupIds = try String.fetchAll(db, sql: """
+                    SELECT l.id FROM message l JOIN message p ON p.chatJid = ? AND p.id = l.id WHERE l.chatJid = ?
+                    """, arguments: [pn, lid])
+                for id in dupIds { try reconcileDuplicate(id, from: lid, into: pn, db) }
+                let lidStateAt = try Int64.fetchOne(db, sql: "SELECT stateAt FROM chat WHERE jid = ?", arguments: [lid])
                 try db.execute(sql: """
                     UPDATE chat SET
                         name = COALESCE(name, ?),
+                        stateAt = CASE WHEN ? IS NULL THEN stateAt ELSE MAX(COALESCE(stateAt, 0), ?) END,
                         unreadCount = unreadCount + ?,
                         markedUnread = markedUnread OR ?,
                         pinnedAt = COALESCE(pinnedAt, ?),
@@ -661,10 +802,11 @@ public actor IngestActor {
                         avatarPath = COALESCE(avatarPath, ?),
                         lastActivityAt = MAX(COALESCE(lastActivityAt, 0), COALESCE(?, 0))
                     WHERE jid = ?
-                    """, arguments: [lidChat.name, lidChat.unreadCount, lidChat.markedUnread, lidChat.pinnedAt,
+                    """, arguments: [lidChat.name, lidStateAt, lidStateAt, max(0, lidChat.unreadCount - overlap), lidChat.markedUnread, lidChat.pinnedAt,
                                      lidChat.mutedUntil, pnChat.archived && lidChat.archived, lidChat.avatarPath,
                                      lidChat.lastActivityAt, pn])
-                // Duplicates (same id under both JIDs) stay behind and are deleted with the LID chat.
+                // Duplicates (same id under both JIDs), now reconciled into the PN copy, stay behind
+                // and are deleted with the LID chat.
                 try db.execute(sql: "UPDATE OR IGNORE message SET chatJid = ? WHERE chatJid = ?", arguments: [pn, lid])
                 try db.execute(sql: "UPDATE OR IGNORE chat_tag SET chatJid = ? WHERE chatJid = ?", arguments: [pn, lid])
                 try db.execute(sql: "DELETE FROM chat WHERE jid = ?", arguments: [lid])
@@ -692,6 +834,53 @@ public actor IngestActor {
                 """, arguments: [pn])
             for id in targets { try applyPending(db, pn, id, &cs) }
         }
+    }
+
+    /// Folds the LID copy of a message that also exists under the PN chat into the PN copy:
+    /// real content over a placeholder, revoked if either is, the newest edit, the higher status,
+    /// and the union of reactions and votes (newest per sender).
+    private func reconcileDuplicate(_ id: String, from lid: String, into pn: String, _ db: Database) throws {
+        guard let l = try MessageRecord.fetchOne(db, key: ["chatJid": lid, "id": id]),
+              var p = try MessageRecord.fetchOne(db, key: ["chatJid": pn, "id": id]) else { return }
+        let original = p
+        var takeMedia = false
+        if p.kind == .undecryptable, l.kind != .undecryptable {
+            p.kind = l.kind; p.text = l.text; p.extra = l.extra; p.editedAt = l.editedAt
+            p.quotedId = l.quotedId; p.quotedSenderJid = l.quotedSenderJid; p.quotedKind = l.quotedKind; p.quotedSnippet = l.quotedSnippet
+            p.typeName = l.typeName; p.isForwarded = l.isForwarded; p.pushName = p.pushName ?? l.pushName
+            takeMedia = true
+        }
+        if l.status.rank > p.status.rank { p.status = l.status }
+        if l.revoked || p.revoked {
+            p.revoked = true
+            p.text = nil
+        } else if let e = l.editedAt, e > (p.editedAt ?? 0) {
+            p.text = l.text
+            p.editedAt = e
+        }
+        if p != original { try p.update(db) }
+        let pnKey: StatementArguments = [pn, id]
+        if p.revoked {
+            try db.execute(sql: "DELETE FROM media WHERE chatJid = ? AND messageId = ?", arguments: pnKey)
+        } else if var media = try MediaRecord.fetchOne(db, key: ["chatJid": lid, "messageId": id]) {
+            if takeMedia { try db.execute(sql: "DELETE FROM media WHERE chatJid = ? AND messageId = ?", arguments: pnKey) }
+            media.chatJid = pn
+            try media.insert(db, onConflict: .ignore)
+        }
+        try db.execute(sql: """
+            INSERT INTO reaction (chatJid, messageId, senderJid, emoji, fromMe, timestamp)
+            SELECT ?, messageId, senderJid, emoji, fromMe, timestamp FROM reaction WHERE chatJid = ? AND messageId = ?
+            ON CONFLICT(chatJid, messageId, senderJid) DO UPDATE SET
+                emoji = excluded.emoji, fromMe = excluded.fromMe, timestamp = excluded.timestamp
+            WHERE excluded.timestamp > reaction.timestamp
+            """, arguments: [pn, lid, id])
+        try db.execute(sql: """
+            INSERT INTO poll_vote (chatJid, messageId, voterJid, selected, timestamp)
+            SELECT ?, messageId, voterJid, selected, timestamp FROM poll_vote WHERE chatJid = ? AND messageId = ?
+            ON CONFLICT(chatJid, messageId, voterJid) DO UPDATE SET
+                selected = excluded.selected, timestamp = excluded.timestamp
+            WHERE excluded.timestamp > poll_vote.timestamp
+            """, arguments: [pn, lid, id])
     }
 
     // MARK: Mapping
