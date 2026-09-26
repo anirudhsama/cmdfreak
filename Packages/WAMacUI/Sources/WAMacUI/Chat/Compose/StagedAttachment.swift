@@ -10,9 +10,11 @@ struct StagedAttachment {
     let task: Task<PreparedAttachment, any Error>
     var result: Result<PreparedAttachment, any Error>?
 
-    /// Removes a converted copy (GIF→MP4, HEIC→JPEG, pasted image) that will never be sent.
+    /// Cancels preparation (e.g. a video transcode) and removes a converted copy (GIF→MP4, HEIC→JPEG,
+    /// pasted image) that will never be sent. The owner ignores the result of a discarded item.
     func discard() {
         let task = task
+        task.cancel()
         let source = source
         Task.detached {
             if let p = try? await task.value, p.isConverted { try? FileManager.default.removeItem(at: p.fileURL) }

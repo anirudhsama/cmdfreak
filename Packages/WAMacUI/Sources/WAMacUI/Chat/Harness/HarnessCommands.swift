@@ -23,6 +23,7 @@ import UniformTypeIdentifiers
 ///   reply N | react N E  reply to / react E on the message at row N
 ///   click N              click the media of the message at row N (download / Quick Look)
 ///   ql                   Quick Look the selected row
+///   reload               push a `.reload` change through the list pipeline
 ///   focuslist            make the table first responder
 @MainActor
 enum HarnessCommands {
@@ -85,6 +86,7 @@ enum HarnessCommands {
             if p.count == 2, let n = Int(p[0]), let item = list.rows.item(atRow: n) { controller.toggleReaction(p[1], on: item) }
         case "click": if let n = Int(arg), let item = list.rows.item(atRow: n) { list.open(item) }
         case "ql": list.quickLookSelection()
+        case "reload": list.debugInjectReload()
         case "focuslist": window.makeFirstResponder(list.tableView)
         case "play":
             if let n = Int(arg), let item = list.rows.item(atRow: n) {
@@ -100,6 +102,7 @@ enum HarnessCommands {
             ql=\(QLPreviewPanel.sharedPreviewPanelExists() && QLPreviewPanel.shared().isVisible)
             audio=\(audio.map { "\($0.messageId) playing=\($0.isPlaying) loading=\($0.isLoading) elapsed=\($0.elapsed) dur=\($0.duration) rate=\($0.rate)" } ?? "nil")
             compose=\(controller.isComposeFocused) bar=\(String(describing: controller.debugBar)) text=\(controller.debugComposeText)
+            syncPlanFallbacks=\(list.debugSyncPlanFallbacks) loadingOlder=\(list.debugLoadingFlags.older) loadingNewer=\(list.debugLoadingFlags.newer)
             """
             try? s.write(toFile: "/tmp/wa-harness-status.txt", atomically: true, encoding: .utf8)
         case "rows":

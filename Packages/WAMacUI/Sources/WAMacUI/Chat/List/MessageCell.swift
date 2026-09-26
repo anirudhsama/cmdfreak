@@ -39,6 +39,10 @@ final class MessageCell: NSTableCellView {
     private var fullTask: Task<Void, Never>?
     private var animatedStop = false
     private var animating = false
+    /// GIF loop / animated sticker waiting to start once the row is on screen.
+    private var pendingMotion: (url: URL, isGif: Bool)?
+    /// Bumped on reuse so a scheduled motion start for the previous message is dropped.
+    private var motionToken = 0
     private var downloadFraction: Double?
     private var audioState: AudioPlaybackController.State?
     private var showsFullImage = false
@@ -98,6 +102,8 @@ final class MessageCell: NSTableCellView {
         fullTask = nil
         stopAnimation()
         stopPlayer()
+        pendingMotion = nil
+        motionToken &+= 1
         showsFullImage = false
         downloadFraction = nil
         mediaLayer?.contents = nil
@@ -171,8 +177,9 @@ final class MessageCell: NSTableCellView {
                     self.showFull(img)
                 }
             }
-            if isGif { startPlayer(url: localURL, in: frame) }
-            if animatedSticker { startAnimation(url: localURL) }
+            // Player / animation setup is deferred until the row is displayed, not done in `viewFor`.
+            if isGif, playerLayer == nil { scheduleMotion(url: localURL, isGif: true) }
+            if animatedSticker, !animating { scheduleMotion(url: localURL, isGif: false) }
         } else {
             showThumb(cache: cache, key: thumbKey, data: media?.jpegThumbnail)
         }
@@ -206,11 +213,45 @@ final class MessageCell: NSTableCellView {
         overlay.needsDisplay = true
     }
 
-    private func startPlayer(url: URL, in frame: CGRect) {
-        guard playerLayer == nil else { return }
+    private func scheduleMotion(url: URL, isGif: Bool) {
+        pendingMotion = (url, isGif)
+        guard window != nil else { return }  // `viewDidMoveToWindow` picks it up
+        let token = motionToken
+        DispatchQueue.main.async { [weak self] in
+            MainActor.assumeIsolated { self?.startPendingMotion(token: token) }
+        }
+    }
+
+    private func startPendingMotion(token: Int) {
+        guard token == motionToken, window != nil, let motion = pendingMotion else { return }
+        pendingMotion = nil
+        if motion.isGif {
+            if case .media(let m) = plan?.content { startPlayer(url: motion.url, in: m.frame) }
+        } else {
+            startAnimation(url: motion.url)
+        }
+    }
+
+    /// A few idle muted players shared by GIF rows; creating one per configure is wasteful.
+    private static var playerPool: [AVQueuePlayer] = []
+
+    private static func dequeuePlayer() -> AVQueuePlayer {
+        if let p = playerPool.popLast() { return p }
         let player = AVQueuePlayer()
         player.isMuted = true
         player.preventsDisplaySleepDuringVideoPlayback = false
+        return player
+    }
+
+    private static func recycle(_ player: AVQueuePlayer) {
+        player.pause()
+        player.removeAllItems()
+        if playerPool.count < 4 { playerPool.append(player) }
+    }
+
+    private func startPlayer(url: URL, in frame: CGRect) {
+        guard playerLayer == nil else { return }
+        let player = Self.dequeuePlayer()
         let pl = AVPlayerLayer(player: player)
         pl.videoGravity = .resizeAspectFill
         pl.frame = frame
@@ -224,11 +265,13 @@ final class MessageCell: NSTableCellView {
     }
 
     private func stopPlayer() {
-        queuePlayer?.pause()
+        looper?.disableLooping()
         looper = nil
-        queuePlayer = nil
+        playerLayer?.player = nil
         playerLayer?.removeFromSuperlayer()
         playerLayer = nil
+        if let queuePlayer { Self.recycle(queuePlayer) }
+        queuePlayer = nil
     }
 
     private func startAnimation(url: URL) {
@@ -261,8 +304,10 @@ final class MessageCell: NSTableCellView {
             queuePlayer?.pause()
         } else {
             queuePlayer?.play()
-            if case .sticker(_, _, _, true) = plan?.content, let p = item?.media?.localPath, item?.media?.downloadState == .downloaded {
-                startAnimation(url: URL(filePath: p))
+            if let motion = pendingMotion {
+                scheduleMotion(url: motion.url, isGif: motion.isGif)
+            } else if case .sticker(_, _, _, true) = plan?.content, !animating, let p = item?.media?.localPath, item?.media?.downloadState == .downloaded {
+                scheduleMotion(url: URL(filePath: p), isGif: false)
             }
         }
     }
