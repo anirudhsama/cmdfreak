@@ -1,5 +1,6 @@
 import AppKit
 import Quartz
+import Synchronization
 import UniformTypeIdentifiers
 import WAKit
 import os
@@ -35,10 +36,19 @@ final class MessageListController: NSViewController {
     private var peerName: String?
     var chatName: String? { peerName }
     private var loader: ChatWindowLoader?
+    /// Bumped on every chat switch; async work captured under an older generation is dropped.
+    private var generation = 0
+    /// Bumped whenever `rows` is replaced or mutated; background plan batches validate against it.
+    private var rowsVersion = 0
+    /// Every mutation of `rows` (feed changes, paging, jumps, reloads) runs through this serial queue,
+    /// so plans can be computed off-main against a snapshot that is still current when installed.
+    private var ops: AsyncStream<ListOp>.Continuation?
+    private var pipelineTask: Task<Void, Never>?
     private var feedTask: Task<Void, Never>?
     private var loadingOlder = false
     private var loadingNewer = false
     private var warmupTask: Task<Void, Never>?
+    private var recomputeTask: Task<Void, Never>?
     private var progressTask: Task<Void, Never>?
     private var bottomInset: CGFloat = 0
     private var needsInitialScroll = false
@@ -48,6 +58,14 @@ final class MessageListController: NSViewController {
     private var highlightedRow: Int?
     private var previewItems: [PreviewItem] = []
     private var previewIndex = 0
+    private var openedPreviewPanel = false
+
+    private enum ListOp: Sendable {
+        case change(MessageChange)
+        case older
+        case newer
+        case jump(String)
+    }
 
     static let bottomTolerance: CGFloat = 8
 
@@ -62,7 +80,10 @@ final class MessageListController: NSViewController {
 
     deinit {
         feedTask?.cancel()
+        pipelineTask?.cancel()
+        ops?.finish()
         warmupTask?.cancel()
+        recomputeTask?.cancel()
         progressTask?.cancel()
     }
 
@@ -140,23 +161,38 @@ final class MessageListController: NSViewController {
     // MARK: - Chat lifecycle
 
     func clear() {
-        feedTask?.cancel()
-        feedTask = nil
-        warmupTask?.cancel()
+        resetForChatSwitch()
         rows = ChatRows(chatJid: "", isGroupChat: false)
+        rowsVersion &+= 1
         plans = [:]
         loader = nil
-        previewItems = []
         tableView.reloadData()
+    }
+
+    /// Cancels everything tied to the previous chat.
+    private func resetForChatSwitch() {
+        generation &+= 1
+        feedTask?.cancel()
+        feedTask = nil
+        pipelineTask?.cancel()
+        pipelineTask = nil
+        ops?.finish()
+        ops = nil
+        warmupTask?.cancel()
+        recomputeTask?.cancel()
+        recomputeTask = nil
+        loadingOlder = false
+        loadingNewer = false
+        closePreviewPanel()
     }
 
     /// Installs a prepared window and renders it in the current runloop turn.
     func show(_ prepared: PreparedChat, changes: AsyncStream<MessageChange>) {
         let state = Signposts.poi.beginInterval("OpenChatRender", id: Signposts.poi.makeSignpostID())
         defer { Signposts.poi.endInterval("OpenChatRender", state) }
-        feedTask?.cancel()
-        warmupTask?.cancel()
+        resetForChatSwitch()
         rows = prepared.rows
+        rowsVersion &+= 1
         ownJid = prepared.ownJid
         peerName = prepared.chat?.name
         loader = client.windowLoader(for: prepared.chatJid)
@@ -170,19 +206,59 @@ final class MessageListController: NSViewController {
         scrollToBottom()
         needsInitialScroll = false
         scheduleWarmup()
+        startPipeline(changes: changes)
+    }
 
-        feedTask = Task { [weak self] in
+    private func startPipeline(changes: AsyncStream<MessageChange>) {
+        let (stream, continuation) = AsyncStream.makeStream(of: ListOp.self)
+        ops = continuation
+        feedTask = Task {
             for await change in changes {
-                guard let self, !Task.isCancelled else { return }
-                self.apply(change)
+                if Task.isCancelled { break }
+                continuation.yield(.change(change))
             }
+        }
+        let gen = generation
+        pipelineTask = Task { [weak self] in
+            for await op in stream {
+                if Task.isCancelled { return }
+                // `self` is only held while one op runs, never across the wait for the next one.
+                guard let self, self.generation == gen else { return }
+                await self.run(op, gen: gen)
+            }
+        }
+    }
+
+    #if DEBUG
+    /// Harness: plan cache misses served synchronously on main.
+    private(set) var debugSyncPlanFallbacks = 0
+    /// Harness: feed a `.reload` through the pipeline as the change feed would.
+    func debugInjectReload() { ops?.yield(.change(.reload)) }
+    var debugLoadingFlags: (older: Bool, newer: Bool) { (loadingOlder, loadingNewer) }
+    #endif
+
+    private func run(_ op: ListOp, gen: Int) async {
+        switch op {
+        case .change(.reload): await runReload(gen: gen)
+        case .change(let change): await runChange(change, gen: gen)
+        case .older: await runLoadOlder(gen: gen)
+        case .newer: await runLoadNewer(gen: gen)
+        case .jump(let id): await runJump(to: id, gen: gen)
         }
     }
 
     // MARK: - Plans
 
+    /// Lookup for `heightOfRow` / `viewFor`. Plans are precomputed off-main by the pipeline; a miss
+    /// (rows scrolled in during live resize, or a width change racing a batch) is computed here as a
+    /// last resort and signposted so it shows up in Instruments.
     private func plan(for id: String) -> LayoutPlan {
         if let p = plans[id], abs(p.width - width) < 0.5 { return p }
+        #if DEBUG
+        debugSyncPlanFallbacks += 1
+        #endif
+        let state = Signposts.poi.beginInterval("PlanSyncFallback", id: Signposts.poi.makeSignpostID())
+        defer { Signposts.poi.endInterval("PlanSyncFallback", state) }
         guard let i = rows.messageIndex[id] else {
             // Should not happen; a zero-height plan keeps the table consistent.
             return plans[id] ?? LayoutPlanner.plan(rows.messages[0], rows.context(forMessageAt: 0, width: width, ownJid: ownJid, peerName: peerName))
@@ -193,19 +269,34 @@ final class MessageListController: NSViewController {
         return p
     }
 
-    private func invalidatePlans(for ids: some Sequence<String>) {
-        for id in ids { plans[id] = nil }
-    }
-
-    /// Computes plans for `items` at `width` off the main thread.
-    private nonisolated static func computePlans(_ rows: ChatRows, width: CGFloat, ownJid: String?, peerName: String?) -> [String: LayoutPlan] {
+    /// Computes plans for `ids` (all messages when nil) in `rows` at `width`. Runs off the main thread.
+    private nonisolated static func computePlans(_ rows: ChatRows, ids: Set<String>?, width: CGFloat, ownJid: String?, peerName: String?) -> [String: LayoutPlan] {
         var out: [String: LayoutPlan] = [:]
-        out.reserveCapacity(rows.messages.count)
-        for i in rows.messages.indices {
+        out.reserveCapacity(ids?.count ?? rows.messages.count)
+        func add(_ i: Int) {
             let ctx = rows.context(forMessageAt: i, width: width, ownJid: ownJid, peerName: peerName)
             out[rows.messages[i].id] = LayoutPlanCache.shared.plan(for: rows.messages[i], context: ctx)
         }
+        if let ids {
+            for id in ids { if let i = rows.messageIndex[id] { add(i) } }
+        } else {
+            for i in rows.messages.indices { add(i) }
+        }
         return out
+    }
+
+    /// Off-main plan computation for a pipeline op. Retries once if the width moved meanwhile, so
+    /// the installed plans match the width `heightOfRow` will ask for.
+    private func plansOffMain(_ rows: ChatRows, ids: Set<String>?) async -> [String: LayoutPlan] {
+        var result: [String: LayoutPlan] = [:]
+        for _ in 0..<2 {
+            let w = width, own = ownJid, peer = peerName
+            result = await Task.detached(priority: .userInitiated) {
+                Self.computePlans(rows, ids: ids, width: w, ownJid: own, peerName: peer)
+            }.value
+            if abs(width - w) < 0.5 { break }
+        }
+        return result
     }
 
     // MARK: - Width changes
@@ -242,16 +333,31 @@ final class MessageListController: NSViewController {
     }
 
     private func recomputeAllPlans() {
+        recomputeTask?.cancel()
         let snapshot = rows
+        let version = rowsVersion
+        let gen = generation
         let w = width
         let own = ownJid
         let peer = peerName
-        Task { [weak self] in
+        recomputeTask = Task { [weak self] in
             let computed = await Task.detached(priority: .userInitiated) {
-                Self.computePlans(snapshot, width: w, ownJid: own, peerName: peer)
+                Self.computePlans(snapshot, ids: nil, width: w, ownJid: own, peerName: peer)
             }.value
-            guard let self, self.width == w, self.rows.chatJid == snapshot.chatJid else { return }
-            for (id, p) in computed where self.rows.messageIndex[id] != nil { self.plans[id] = p }
+            guard !Task.isCancelled, let self, self.generation == gen, self.width == w else { return }
+            if self.rowsVersion == version {
+                for (id, p) in computed { self.plans[id] = p }
+            } else {
+                // Rows changed while computing (edit, revoke, paging): only install plans whose content
+                // and row context are unchanged; the pipeline already planned the rest.
+                for (id, p) in computed {
+                    guard let i = self.rows.messageIndex[id], let si = snapshot.messageIndex[id],
+                          self.rows.messages[i] == snapshot.messages[si],
+                          self.rows.context(forMessageAt: i, width: w, ownJid: self.ownJid, peerName: self.peerName)
+                            == snapshot.context(forMessageAt: si, width: w, ownJid: own, peerName: peer) else { continue }
+                    self.plans[id] = p
+                }
+            }
             let atBottom = self.isAtBottom
             self.maintainingBottomDistance(unless: atBottom) {
                 self.withoutAnimation {
@@ -263,26 +369,102 @@ final class MessageListController: NSViewController {
         }
     }
 
-    // MARK: - Applying changes
+    // MARK: - Applying changes (pipeline ops)
 
-    private func apply(_ change: MessageChange) {
+    private func runChange(_ change: MessageChange, gen: Int) async {
         let state = Signposts.poi.beginInterval("ApplyChange", id: Signposts.poi.makeSignpostID())
         defer { Signposts.poi.endInterval("ApplyChange", state) }
+        var next = rows
+        let update = next.apply(change)
+        guard !update.isEmpty else {
+            if next.messages != rows.messages { rows = next; rowsVersion &+= 1 }
+            return
+        }
+        var ids = Set(change.ids)
+        for i in update.inserted.union(update.reloaded) { if case .message(let id) = next.row(at: i) { ids.insert(id) } }
+        let computed = await plansOffMain(next, ids: ids)
+        guard generation == gen else { return }
         let atBottom = isAtBottom
-        let update = rows.apply(change)
-        invalidatePlans(for: change.ids)
-        if case .replace(let old, _) = change { plans[old] = nil }
+        rows = next
+        rowsVersion &+= 1
+        for id in change.ids where rows.messageIndex[id] == nil { plans[id] = nil }
+        if case .replace(let old, let item) = change, old != item.id { plans[old] = nil }
+        for (id, p) in computed { plans[id] = p }
         applyUpdate(update, scrollToBottomIfWasAtBottom: atBottom)
     }
 
-    private func applyUpdate(_ update: ChatRows.Update, scrollToBottomIfWasAtBottom atBottom: Bool) {
+    /// `.reload`: re-fetch the window around what the user is looking at (or the newest page when
+    /// pinned to the bottom), plan it off-main, then swap it in keeping the visible position.
+    private func runReload(gen: Int) async {
+        guard let loader else { return }
+        let state = Signposts.poi.beginInterval("ReloadWindow", id: Signposts.poi.makeSignpostID())
+        defer { Signposts.poi.endInterval("ReloadWindow", state) }
+        let limit = min(max(rows.messages.count, ChatOpenPreloader.initialPageSize), 300)
+        let anchor = isAtBottom ? nil : topVisibleAnchor()
+        let page: MessagePage
+        do {
+            if let anchor, let around = try await loader.around(messageId: anchor.id, limit: limit) {
+                page = around
+            } else {
+                page = try await loader.initial(limit: limit)
+            }
+        } catch {
+            Signposts.log.error("reload failed: \(error)")
+            return
+        }
+        guard generation == gen else { return }
+        var next = rows
+        next.replace(with: page)
+        let computed = await plansOffMain(next, ids: nil)
+        guard generation == gen else { return }
+
+        // Re-sample: the user may have scrolled while the page loaded.
+        let atBottom = isAtBottom
+        let liveAnchor = atBottom ? nil : topVisibleAnchor()
+        let gap = bottomGap
+        rows = next
+        rowsVersion &+= 1
+        plans = computed
+        withoutAnimation { tableView.reloadData() }
+        view.layoutSubtreeIfNeeded()
+        if atBottom {
+            scrollToBottom()
+        } else if let liveAnchor, let row = rows.rowIndex[liveAnchor.id] {
+            setClipOrigin(y: tableView.rect(ofRow: row).minY - liveAnchor.offset)
+        } else {
+            setClipOrigin(y: tableView.frame.height + scrollView.contentInsets.bottom - gap - clip.bounds.height)
+        }
+        scheduleWarmup()
+        refreshSelectionHighlight()
+    }
+
+    /// The first message row at least partly visible, and its top's offset from the clip's top.
+    private func topVisibleAnchor() -> (id: String, offset: CGFloat)? {
+        let visible = tableView.rows(in: tableView.visibleRect)
+        guard visible.length > 0 else { return nil }
+        for r in visible.location..<(visible.location + visible.length) {
+            if case .message(let id) = rows.row(at: r) {
+                return (id, tableView.rect(ofRow: r).minY - clip.bounds.minY)
+            }
+        }
+        return nil
+    }
+
+    private func setClipOrigin(y: CGFloat) {
+        withoutAnimation {
+            clip.setBoundsOrigin(NSPoint(x: 0, y: max(-scrollView.contentInsets.top, y)))
+            scrollView.reflectScrolledClipView(clip)
+        }
+        wasAtBottom = isAtBottom
+    }
+
+    /// `keepTop`: rows were appended below the viewport (newer page); the flipped table keeps the
+    /// visible rows in place by itself, so the bottom distance must not be preserved.
+    private func applyUpdate(_ update: ChatRows.Update, scrollToBottomIfWasAtBottom atBottom: Bool, keepTop: Bool = false) {
         guard !update.isEmpty else { return }
-        // Neighbour rows whose grouping changed need fresh plans.
-        for i in update.reloaded { if case .message(let id) = rows.row(at: i) { plans[id] = nil } }
-        maintainingBottomDistance(unless: atBottom) {
+        maintainingBottomDistance(unless: atBottom || keepTop) {
             withoutAnimation {
                 if update.reloadAll {
-                    plans = [:]
                     tableView.reloadData()
                 } else {
                     tableView.beginUpdates()
@@ -361,49 +543,60 @@ final class MessageListController: NSViewController {
     // MARK: - Paging
 
     private func loadOlderIfNeeded() {
-        guard !loadingOlder, rows.hasOlder, let loader, let oldest = rows.oldestSortKey else { return }
+        guard !loadingOlder, rows.hasOlder, loader != nil, let ops else { return }
         loadingOlder = true
-        let snapshotJid = rows.chatJid
-        let w = width
-        let own = ownJid, peer = peerName
-        Task { [weak self] in
-            let state = Signposts.poi.beginInterval("LoadOlder", id: Signposts.poi.makeSignpostID())
-            defer { Signposts.poi.endInterval("LoadOlder", state) }
-            do {
-                let page = try await loader.older(before: oldest, limit: 80)
-                var probe = ChatRows(chatJid: snapshotJid, isGroupChat: ChatKind(jid: snapshotJid) == .group)
-                probe.replace(with: page)
-                let computed = await Task.detached(priority: .userInitiated) {
-                    Self.computePlans(probe, width: w, ownJid: own, peerName: peer)
-                }.value
-                guard let self, self.rows.chatJid == snapshotJid else { return }
-                self.loadingOlder = false
-                // Plans from the probe have no neighbour context at the seam; those rows get re-planned lazily.
-                for (id, p) in computed { self.plans[id] = p }
-                let update = self.rows.prepend(page)
-                self.applyUpdate(update, scrollToBottomIfWasAtBottom: false)
-            } catch {
-                self?.loadingOlder = false
-                Signposts.log.error("older page failed: \(error)")
-            }
-        }
+        ops.yield(.older)
     }
 
     private func loadNewerIfNeeded() {
-        guard !loadingNewer, rows.hasNewer, let loader, let newest = rows.newestSortKey else { return }
+        guard !loadingNewer, rows.hasNewer, loader != nil, let ops else { return }
         loadingNewer = true
-        let snapshotJid = rows.chatJid
-        Task { [weak self] in
-            do {
-                let page = try await loader.newer(after: newest, limit: 80)
-                guard let self, self.rows.chatJid == snapshotJid else { return }
-                self.loadingNewer = false
-                let update = self.rows.append(page)
-                self.applyUpdate(update, scrollToBottomIfWasAtBottom: false)
-            } catch {
-                self?.loadingNewer = false
-            }
+        ops.yield(.newer)
+    }
+
+    private func runLoadOlder(gen: Int) async {
+        defer { if generation == gen { loadingOlder = false } }
+        guard rows.hasOlder, let loader, let oldest = rows.oldestSortKey else { return }
+        let state = Signposts.poi.beginInterval("LoadOlder", id: Signposts.poi.makeSignpostID())
+        defer { Signposts.poi.endInterval("LoadOlder", state) }
+        do {
+            let page = try await loader.older(before: oldest, limit: 80)
+            guard generation == gen else { return }
+            await installPage(gen: gen, keepTop: false) { $0.prepend(page) }
+        } catch {
+            Signposts.log.error("older page failed: \(error)")
         }
+    }
+
+    private func runLoadNewer(gen: Int) async {
+        defer { if generation == gen { loadingNewer = false } }
+        guard rows.hasNewer, let loader, let newest = rows.newestSortKey else { return }
+        do {
+            let page = try await loader.newer(after: newest, limit: 80)
+            guard generation == gen else { return }
+            await installPage(gen: gen, keepTop: true) { $0.append(page) }
+        } catch {
+            Signposts.log.error("newer page failed: \(error)")
+        }
+    }
+
+    /// Applies a prepend/append to a copy, plans the new rows and the seam neighbours off-main, then
+    /// installs both keeping the visible rows in place.
+    private func installPage(gen: Int, keepTop: Bool, _ mutate: (inout ChatRows) -> ChatRows.Update) async {
+        var next = rows
+        let update = mutate(&next)
+        guard !update.isEmpty else {
+            rows = next  // hasOlder / hasNewer flags
+            return
+        }
+        var ids = Set<String>()
+        for i in update.inserted.union(update.reloaded) { if case .message(let id) = next.row(at: i) { ids.insert(id) } }
+        let computed = await plansOffMain(next, ids: ids)
+        guard generation == gen else { return }
+        rows = next
+        rowsVersion &+= 1
+        for (id, p) in computed { plans[id] = p }
+        applyUpdate(update, scrollToBottomIfWasAtBottom: false, keepTop: keepTop)
     }
 
     /// Scrolls to `messageId`, loading a window around it if it is not loaded.
@@ -412,16 +605,26 @@ final class MessageListController: NSViewController {
             scrollAndFlash(row: row)
             return
         }
-        guard let loader else { return }
-        let jid = rows.chatJid
-        Task { [weak self] in
-            guard let page = try? await loader.around(messageId: messageId, limit: 80), let self, self.rows.chatJid == jid else { return }
-            self.rows.replace(with: page)
-            self.plans = [:]
-            self.withoutAnimation { self.tableView.reloadData() }
-            self.view.layoutSubtreeIfNeeded()
-            if let row = self.rows.rowIndex[messageId] { self.scrollAndFlash(row: row) }
+        ops?.yield(.jump(messageId))
+    }
+
+    private func runJump(to messageId: String, gen: Int) async {
+        if let row = rows.rowIndex[messageId] {
+            scrollAndFlash(row: row)
+            return
         }
+        guard let loader, let page = try? await loader.around(messageId: messageId, limit: 80), generation == gen else { return }
+        var next = rows
+        next.replace(with: page)
+        let computed = await plansOffMain(next, ids: nil)
+        guard generation == gen else { return }
+        rows = next
+        rowsVersion &+= 1
+        plans = computed
+        withoutAnimation { tableView.reloadData() }
+        view.layoutSubtreeIfNeeded()
+        scheduleWarmup()
+        if let row = rows.rowIndex[messageId] { scrollAndFlash(row: row) }
     }
 
     private func scrollAndFlash(row: Int) {
@@ -476,19 +679,32 @@ final class MessageListController: NSViewController {
 
     private func startProgressObservation() {
         progressTask?.cancel()
+        let center = client.media.progress
         progressTask = Task { [weak self] in
             while !Task.isCancelled {
-                guard let self else { return }
-                let center = self.client.media.progress
-                await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
-                    withObservationTracking {
-                        _ = center.fractions
-                    } onChange: {
-                        c.resume()
-                    }
-                }
-                self.pushProgressToVisibleCells()
+                await Self.nextChange(of: center)
+                if Task.isCancelled { return }
+                // No strong `self` across the wait: a released controller ends the loop here.
+                guard let controller = self else { return }
+                controller.pushProgressToVisibleCells()
             }
+        }
+    }
+
+    /// Suspends until `center.fractions` changes or the task is cancelled.
+    private static func nextChange(of center: MediaProgressCenter) async {
+        let once = ResumeOnce()
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
+                once.install(c)
+                withObservationTracking {
+                    _ = center.fractions
+                } onChange: {
+                    once.resume()
+                }
+            }
+        } onCancel: {
+            once.resume()
         }
     }
 
@@ -582,7 +798,22 @@ final class MessageListController: NSViewController {
             panel.currentPreviewItemIndex = previewIndex
         } else {
             panel.makeKeyAndOrderFront(nil)
+            openedPreviewPanel = true
         }
+    }
+
+    /// The preview items belong to the chat being left; close the panel rather than let it step
+    /// through a list that no longer matches.
+    private func closePreviewPanel() {
+        previewItems = []
+        previewIndex = 0
+        guard openedPreviewPanel, QLPreviewPanel.sharedPreviewPanelExists(), let panel = QLPreviewPanel.shared() else { return }
+        openedPreviewPanel = false
+        // When the chat window isn't key, QL has ended our control and the data source is nil; it
+        // re-attaches on the next key change, so the panel must not outlive the old item list.
+        guard panel.dataSource == nil || panel.dataSource === self else { return }
+        if panel.dataSource === self { panel.reloadData() }
+        if panel.isVisible { panel.orderOut(nil) }
     }
 
     override func acceptsPreviewPanelControl(_ panel: QLPreviewPanel!) -> Bool { true }
@@ -859,7 +1090,7 @@ extension MessageListController: @preconcurrency QLPreviewPanelDataSource, @prec
     func numberOfPreviewItems(in panel: QLPreviewPanel!) -> Int { previewItems.count }
 
     func previewPanel(_ panel: QLPreviewPanel!, previewItemAt index: Int) -> (any QLPreviewItem)! {
-        previewItems[index]
+        previewItems.indices.contains(index) ? previewItems[index] : nil
     }
 
     func previewPanel(_ panel: QLPreviewPanel!, sourceFrameOnScreenFor item: (any QLPreviewItem)!) -> NSRect {
@@ -874,5 +1105,28 @@ extension MessageListController: @preconcurrency QLPreviewPanelDataSource, @prec
     func previewPanel(_ panel: QLPreviewPanel!, handle event: NSEvent!) -> Bool {
         // Let ↑/↓ fall through to the table so the selection follows the preview.
         false
+    }
+}
+
+/// Resumes a continuation exactly once, whichever of change / cancellation comes first.
+private final class ResumeOnce: Sendable {
+    private let state = Mutex<(continuation: CheckedContinuation<Void, Never>?, fired: Bool)>((nil, false))
+
+    func install(_ c: CheckedContinuation<Void, Never>) {
+        let fireNow = state.withLock { s -> Bool in
+            if s.fired { return true }
+            s.continuation = c
+            return false
+        }
+        if fireNow { c.resume() }
+    }
+
+    func resume() {
+        let c = state.withLock { s -> CheckedContinuation<Void, Never>? in
+            s.fired = true
+            defer { s.continuation = nil }
+            return s.continuation
+        }
+        c?.resume()
     }
 }

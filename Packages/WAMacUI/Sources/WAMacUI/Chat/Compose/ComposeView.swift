@@ -198,12 +198,13 @@ final class ComposeView: NSView, NSTextViewDelegate {
 
     // MARK: - Public
 
+    /// Programmatic (draft restore, edit prefill): does not count as typing, so no `composing` presence.
     var text: String {
         get { textView.string }
         set {
             textView.string = newValue
             textView.setSelectedRange(NSRange(location: (newValue as NSString).length, length: 0))
-            textDidChange(Notification(name: NSText.didChangeNotification))
+            contentDidChange()
         }
     }
 
@@ -275,15 +276,20 @@ final class ComposeView: NSView, NSTextViewDelegate {
         textView.string = ""
         textView.undoManager?.removeAllActions()
         setBar(nil)
-        textDidChange(Notification(name: NSText.didChangeNotification))
+        contentDidChange()
     }
 
     // MARK: - NSTextViewDelegate
 
+    /// Only user edits reach this; programmatic `string` assignments don't post the notification.
     func textDidChange(_ notification: Notification) {
+        contentDidChange()
+        onTyping?()
+    }
+
+    private func contentDidChange() {
         updateSendEnabled()
         updateHeight()
-        onTyping?()
     }
 
     private func updateSendEnabled() {
