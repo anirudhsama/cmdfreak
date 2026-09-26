@@ -7,16 +7,20 @@ import Synchronization
 final class EventRouter: EventSink, Sendable {
     private let ingest: AsyncStream<[BridgeEvent]>.Continuation
     private let session: AsyncStream<[SessionEvent]>.Continuation
+    private let presence: AsyncStream<BridgeChatPresence>.Continuation
 
-    init(ingest: AsyncStream<[BridgeEvent]>.Continuation, session: AsyncStream<[SessionEvent]>.Continuation) {
+    init(ingest: AsyncStream<[BridgeEvent]>.Continuation, session: AsyncStream<[SessionEvent]>.Continuation,
+         presence: AsyncStream<BridgeChatPresence>.Continuation) {
         self.ingest = ingest
         self.session = session
+        self.presence = presence
     }
 
     func onEvents(events: [BridgeEvent]) {
         ingest.yield(events)
         let s = events.compactMap(SessionEvent.init)
         if !s.isEmpty { session.yield(s) }
+        for case .chatPresence(let p) in events { presence.yield(p) }
     }
 }
 
@@ -62,6 +66,8 @@ public final class WAClient: Sendable {
     public let avatars: AvatarService
     public var feed: MessageChangeFeed { ingest.feed }
     public var focus: ChatFocus { ingest.focus }
+    /// Typing/recording/paused notifications, not persisted. Single consumer (the chat list).
+    public let chatPresence: AsyncStream<BridgeChatPresence>
 
     private let router: EventRouter
     private let ownJidState: Mutex<String?>
@@ -82,7 +88,9 @@ public final class WAClient: Sendable {
 
         let (ingestStream, ingestCont) = AsyncStream<[BridgeEvent]>.makeStream(bufferingPolicy: .unbounded)
         let (sessionStream, sessionCont) = AsyncStream<[SessionEvent]>.makeStream(bufferingPolicy: .unbounded)
-        router = EventRouter(ingest: ingestCont, session: sessionCont)
+        let (presenceStream, presenceCont) = AsyncStream<BridgeChatPresence>.makeStream(bufferingPolicy: .bufferingNewest(64))
+        chatPresence = presenceStream
+        router = EventRouter(ingest: ingestCont, session: sessionCont, presence: presenceCont)
         let bridge = try makeBridge(router)
         self.bridge = bridge
 
