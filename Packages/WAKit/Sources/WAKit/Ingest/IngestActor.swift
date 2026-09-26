@@ -151,7 +151,8 @@ public actor IngestActor {
     }
 
     /// Swaps the optimistic row for the server's id and marks it sent.
-    public func completeSend(localId: String, chatJid: String, result: BridgeSendResult) throws {
+    /// `storedPath` is where the sent file now lives (the media store's copy); defaults to the source.
+    public func completeSend(localId: String, chatJid: String, result: BridgeSendResult, storedPath: String? = nil) throws {
         let jid = canon(chatJid)
         try perform { db, cs in
             let newId = result.messageId
@@ -162,7 +163,8 @@ public actor IngestActor {
                 try self.applyMutation(db, jid, newId, .status(rank: MessageStatus.sent.rank), &cs)
                 return
             }
-            let localPath = try String.fetchOne(db, sql: "SELECT localPath FROM media WHERE chatJid = ? AND messageId = ?", arguments: [jid, localId])
+            let localPath = try storedPath
+                ?? String.fetchOne(db, sql: "SELECT localPath FROM media WHERE chatJid = ? AND messageId = ?", arguments: [jid, localId])
             try db.execute(sql: """
                 UPDATE message SET id = ?, timestamp = ?, status = MAX(status, ?) WHERE chatJid = ? AND id = ?
                 """, arguments: [newId, result.timestamp, MessageStatus.sent.rank, jid, localId])

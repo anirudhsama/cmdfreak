@@ -2335,6 +2335,7 @@ name = "wa-bridge"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bytes",
  "flate2",
  "hex",
  "log",

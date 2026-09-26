@@ -1,6 +1,7 @@
 import AppKit
 
-/// Liquid-glass compose pill: reply/edit bar, attach seam, TextKit 2 editor, send button.
+/// Liquid-glass compose pill: reply/edit bar, attachment tray, TextKit 2 editor, send button.
+/// With attachments staged, the editor text is their caption and Enter sends even when it's empty.
 /// Enter sends, ⇧Enter inserts a newline, ↑ in an empty editor asks to edit the last message,
 /// Esc clears the bar first and then escalates to `onEscape`.
 final class ComposeView: NSView, NSTextViewDelegate {
@@ -17,6 +18,7 @@ final class ComposeView: NSView, NSTextViewDelegate {
     var onPasteFiles: (([URL]) -> Void)?
     var onHeightChange: ((CGFloat) -> Void)?
     var onCancelBar: (() -> Void)?
+    var onRemoveAttachment: ((UUID) -> Void)?
 
     private(set) var bar: Bar?
 
@@ -32,6 +34,9 @@ final class ComposeView: NSView, NSTextViewDelegate {
     private let barTitle = NSTextField(labelWithString: "")
     private let barSnippet = NSTextField(labelWithString: "")
     private let barClose = NSButton()
+    private let tray = AttachmentTrayView()
+    private var trayHeight: NSLayoutConstraint!
+    private(set) var hasAttachments = false
     private var textHeight: NSLayoutConstraint!
     private var barHeight: NSLayoutConstraint!
 
@@ -88,7 +93,12 @@ final class ComposeView: NSView, NSTextViewDelegate {
         barView.isHidden = true
         pillContent.addSubview(barView)
 
-        // Attach (M5 fills this in)
+        tray.translatesAutoresizingMaskIntoConstraints = false
+        tray.isHidden = true
+        tray.onRemove = { [weak self] id in self?.onRemoveAttachment?(id) }
+        pillContent.addSubview(tray)
+
+        // Attach
         attachButton.translatesAutoresizingMaskIntoConstraints = false
         attachButton.bezelStyle = .accessoryBarAction
         attachButton.isBordered = false
@@ -126,6 +136,7 @@ final class ComposeView: NSView, NSTextViewDelegate {
 
         textHeight = scroll.heightAnchor.constraint(equalToConstant: 30)
         barHeight = barView.heightAnchor.constraint(equalToConstant: 0)
+        trayHeight = tray.heightAnchor.constraint(equalToConstant: 0)
         let o = Self.outerInsets
         NSLayoutConstraint.activate([
             container.leadingAnchor.constraint(equalTo: leadingAnchor, constant: o.left),
@@ -170,7 +181,11 @@ final class ComposeView: NSView, NSTextViewDelegate {
             attachButton.heightAnchor.constraint(equalToConstant: 28),
             scroll.leadingAnchor.constraint(equalTo: attachButton.trailingAnchor, constant: 4),
             scroll.trailingAnchor.constraint(equalTo: sendButton.leadingAnchor, constant: -4),
-            scroll.topAnchor.constraint(equalTo: barView.bottomAnchor, constant: 5),
+            tray.leadingAnchor.constraint(equalTo: pillContent.leadingAnchor, constant: 10),
+            tray.trailingAnchor.constraint(equalTo: pillContent.trailingAnchor, constant: -10),
+            tray.topAnchor.constraint(equalTo: barView.bottomAnchor),
+            trayHeight,
+            scroll.topAnchor.constraint(equalTo: tray.bottomAnchor, constant: 5),
             scroll.bottomAnchor.constraint(equalTo: pillContent.bottomAnchor, constant: -5),
             textHeight,
             sendButton.trailingAnchor.constraint(equalTo: pillContent.trailingAnchor, constant: -8),
@@ -222,6 +237,17 @@ final class ComposeView: NSView, NSTextViewDelegate {
         updateHeight()
     }
 
+    func setAttachments(_ items: [AttachmentTrayView.Item]) {
+        hasAttachments = !items.isEmpty
+        tray.set(items)
+        tray.isHidden = items.isEmpty
+        trayHeight.constant = items.isEmpty ? 0 : AttachmentTrayView.height
+        textView.placeholder = items.isEmpty ? "Message" : "Add a caption…"
+        textView.needsDisplay = true
+        updateSendEnabled()
+        updateHeight()
+    }
+
     /// Esc: clears the bar (and edit text) first; returns false when there was nothing to clear.
     @discardableResult
     func handleEscape() -> Bool {
@@ -240,7 +266,7 @@ final class ComposeView: NSView, NSTextViewDelegate {
 
     private func send() {
         let t = textView.string.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !t.isEmpty else { return }
+        guard !t.isEmpty || hasAttachments else { return }
         onSend?(t)
     }
 
@@ -255,9 +281,13 @@ final class ComposeView: NSView, NSTextViewDelegate {
     // MARK: - NSTextViewDelegate
 
     func textDidChange(_ notification: Notification) {
-        sendButton.isEnabled = !textView.isEmpty
+        updateSendEnabled()
         updateHeight()
         onTyping?()
+    }
+
+    private func updateSendEnabled() {
+        sendButton.isEnabled = !textView.isEmpty || hasAttachments
     }
 
     func textView(_ textView: NSTextView, doCommandBy selector: Selector) -> Bool {
@@ -285,7 +315,7 @@ final class ComposeView: NSView, NSTextViewDelegate {
         if abs(textHeight.constant - h) > 0.5 {
             textHeight.constant = h
         }
-        let total = Self.outerInsets.top + Self.outerInsets.bottom + 10 + h + barHeight.constant + (bar == nil ? 0 : 5)
+        let total = Self.outerInsets.top + Self.outerInsets.bottom + 10 + h + barHeight.constant + (bar == nil ? 0 : 5) + trayHeight.constant
         onHeightChange?(ceil(total))
     }
 }
