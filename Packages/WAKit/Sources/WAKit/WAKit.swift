@@ -1,6 +1,7 @@
 import Foundation
 import os
-import WACoreFFI
+@_exported import GRDB
+@_exported import WACoreFFI
 
 public enum WAKit {
     public static let log = Logger(subsystem: "live.gosupernova.BetterWA", category: "WAKit")
