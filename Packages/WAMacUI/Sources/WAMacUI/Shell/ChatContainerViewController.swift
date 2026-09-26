@@ -16,6 +16,9 @@ public final class ChatContainerViewController: NSViewController {
         set { chatView.onEscapeWithNothingToClear = newValue }
     }
 
+    /// Debug override for the shortcut self-test; when set, type-ahead text goes here instead of compose.
+    public var composeTextSink: ((String) -> Void)?
+
     private let emptyState = NSHostingView(rootView: EmptyChatView())
 
     public init(client: WAClient) {
@@ -61,13 +64,28 @@ public final class ChatContainerViewController: NSViewController {
 
     /// Forwarded from the chat list when the user starts typing while it has focus.
     public func beginComposing(with text: String) {
+        if let composeTextSink { return composeTextSink(text) }
         guard chatJid != nil else { return }
         chatView.insertComposeText(text)
         chatView.focusCompose()
     }
 
-    @objc public func attachFile(_ sender: Any?) { chatView.attachFile() }
-    @objc public func quickLookSelection(_ sender: Any?) { chatView.quickLookSelection() }
+    // Keyboard seam for the shell's menu shortcuts (Esc, ⇧⌘O, Space, command-bar focus).
+
+    /// Esc. Returns true when the chat view consumed it (cleared reply/edit state).
+    public func cancelTransientState() -> Bool { chatJid != nil && chatView.handleEscape() }
+    /// Menu title for Esc while there is something to cancel ("Cancel Reply"), else nil.
+    public var transientStateTitle: String? { chatJid == nil ? nil : chatView.transientStateTitle }
+    public var canAttach: Bool { chatJid != nil }
+    public func attachFile() { chatView.attachFile() }
+    public var canQuickLook: Bool { chatJid != nil && chatView.canQuickLookSelection }
+    public func quickLook() { chatView.quickLookSelection() }
+    /// After the command bar opens a chat. Returns false when there is no chat to compose in.
+    public func focusCompose() -> Bool {
+        guard chatJid != nil else { return false }
+        chatView.focusCompose()
+        return true
+    }
 }
 
 private struct EmptyChatView: View {

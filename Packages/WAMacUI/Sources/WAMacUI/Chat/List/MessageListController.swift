@@ -555,6 +555,10 @@ final class MessageListController: NSViewController {
         }
     }
 
+    var canQuickLookSelection: Bool {
+        tableView.window?.firstResponder === tableView && selectedItem?.media != nil
+    }
+
     func quickLookSelection() {
         guard let item = selectedItem else { return }
         if let media = item.media, media.downloadState == .downloaded, let path = media.localPath {

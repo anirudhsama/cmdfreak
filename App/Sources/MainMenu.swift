@@ -46,6 +46,7 @@ enum MainMenu {
     private static func file() -> NSMenu {
         let menu = NSMenu(title: "File")
         menu.addItem(item("New Chat…", #selector(MainWindowController.newChat(_:)), "n"))
+        menu.addItem(item("Attach File…", #selector(MainWindowController.attachFile(_:)), "o", [.command, .shift]))
         menu.addItem(.separator())
         menu.addItem(item("Close", #selector(NSWindow.performClose(_:)), "w"))
         return menu
@@ -91,13 +92,6 @@ enum MainMenu {
         let menu = NSMenu(title: "Chat")
         menu.addItem(item("Next Chat", #selector(MainWindowController.nextChat(_:)), "]"))
         menu.addItem(item("Previous Chat", #selector(MainWindowController.previousChat(_:)), "["))
-        // ⌃Tab / ⌃⇧Tab: same actions, kept out of the visible menu.
-        let nextTab = item("Next Chat", #selector(MainWindowController.nextChat(_:)), "\t", [.control])
-        nextTab.isHidden = true
-        menu.addItem(nextTab)
-        let previousTab = item("Previous Chat", #selector(MainWindowController.previousChat(_:)), "\t", [.control, .shift])
-        previousTab.isHidden = true
-        menu.addItem(previousTab)
         menu.addItem(item("Next Unread Chat", #selector(MainWindowController.nextUnreadChat(_:)), key(NSDownArrowFunctionKey), [.option]))
         menu.addItem(item("Previous Unread Chat", #selector(MainWindowController.previousUnreadChat(_:)), key(NSUpArrowFunctionKey), [.option]))
         menu.addItem(.separator())
@@ -105,6 +99,13 @@ enum MainMenu {
         menu.addItem(item("Pin", #selector(MainWindowController.togglePin(_:)), "p", [.command, .shift]))
         menu.addItem(item("Mute", #selector(MainWindowController.toggleMute(_:)), "m", [.command, .shift]))
         menu.addItem(item("Archive", #selector(MainWindowController.toggleArchive(_:)), "a", [.command, .shift]))
+        menu.addItem(.separator())
+        // Esc and Space have no modifier, so they are armed only while live (see PlainKeyEquivalents).
+        let escape = item("Focus Chat List", #selector(MainWindowController.cancelOrFocusChatList(_:)), "\u{1b}", [])
+        let quickLook = item("Quick Look", #selector(MainWindowController.quickLookSelection(_:)), " ", [])
+        menu.addItem(escape)
+        menu.addItem(quickLook)
+        PlainKeyEquivalents.shared.manage([escape, quickLook], in: menu)
         menu.addItem(.separator())
         let pinned = NSMenu(title: "Pinned Chats")
         for n in 1...9 {
@@ -122,6 +123,15 @@ enum MainMenu {
         let menu = NSMenu(title: "Window")
         menu.addItem(item("Minimize", #selector(NSWindow.performMiniaturize(_:)), "m"))
         menu.addItem(item("Zoom", #selector(NSWindow.performZoom(_:))))
+        menu.addItem(.separator())
+        // Tab-style chat switching, as Safari's Show Next/Previous Tab.
+        menu.addItem(item("Show Next Chat", #selector(MainWindowController.nextChat(_:)), "\t", [.control]))
+        menu.addItem(item("Show Previous Chat", #selector(MainWindowController.previousChat(_:)), "\t", [.control, .shift]))
+        // Shift turns Tab into backtab (U+0019) in some event paths; catch that form too.
+        let backtab = item("Show Previous Chat", #selector(MainWindowController.previousChat(_:)), "\u{19}", [.control, .shift])
+        backtab.isHidden = true
+        backtab.allowsKeyEquivalentWhenHidden = true
+        menu.addItem(backtab)
         menu.addItem(.separator())
         menu.addItem(item("Bring All to Front", #selector(NSApplication.arrangeInFront(_:))))
         return menu

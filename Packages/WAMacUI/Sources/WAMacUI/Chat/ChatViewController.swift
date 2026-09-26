@@ -199,6 +199,16 @@ public final class ChatViewController: NSViewController {
         return false
     }
 
+    /// Esc menu title while a reply or edit is pending.
+    public var transientStateTitle: String? {
+        if editTarget != nil { return "Cancel Edit" }
+        if replyTarget != nil { return "Cancel Reply" }
+        return nil
+    }
+
+    /// Space is only claimed when the message list has focus and a media message is selected.
+    public var canQuickLookSelection: Bool { list.canQuickLookSelection }
+
     /// Space with the list focused: Quick Look on the selected media message.
     public func quickLookSelection() {
         list.quickLookSelection()

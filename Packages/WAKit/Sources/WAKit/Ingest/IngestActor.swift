@@ -82,6 +82,19 @@ public actor IngestActor {
         }
     }
 
+    /// Creates an empty local chat for `jid` (new DM from the command bar) so it appears in the
+    /// chat list; an existing chat is left alone. Returns the canonical JID.
+    @discardableResult
+    public func createLocalChat(_ jid: String, now: Int64 = Int64(Date().timeIntervalSince1970)) throws -> String {
+        let jid = canon(jid)
+        try perform { db, _ in
+            try self.ensureChat(db, jid)
+            try db.execute(sql: "UPDATE chat SET lastActivityAt = ? WHERE jid = ? AND lastActivityAt IS NULL AND pinnedAt IS NULL",
+                           arguments: [now, jid])
+        }
+        return jid
+    }
+
     /// The UI opened `chatJid`: clears unread and marked-unread, returns what to mark read remotely.
     public func chatOpened(_ chatJid: String) throws -> OpenChatResult {
         let jid = canon(chatJid)

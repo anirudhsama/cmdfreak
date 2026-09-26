@@ -7,6 +7,8 @@ import WAMacUI
 /// Debug-only launch controls, all via environment variables:
 /// - `BETTERWA_SEED=N`: use a throwaway database under Caches and fill it with N synthetic chats.
 /// - `BETTERWA_SEED_LIVE=1`: with a seed, keep ingesting new messages and typing events.
+/// - `BETTERWA_SELFTEST=1`: with a seed, drive every menu shortcut and the command bar with
+///   synthetic key events and print PASS/FAIL lines (`ShortcutSelfTest`).
 /// - `BETTERWA_ONBOARDING=qr|phone|code|syncing|loggedout`: force an onboarding state with no bridge calls.
 enum DevSupport {
     static let env = ProcessInfo.processInfo.environment
@@ -106,6 +108,9 @@ enum Seed {
     ]
     private static let captions = ["", "", "Look at this!", "From yesterday", "🔥", "For the report"]
 
+    static let newContactNames = ["Quinn Harper", "Quincy Adeyemi", "Rosa Lindqvist"]
+    static func newContactJid(_ n: Int) -> String { "1555999000\(n)@s.whatsapp.net" }
+
     struct RNG: RandomNumberGenerator {
         var state: UInt64
         mutating func next() -> UInt64 {
@@ -171,6 +176,12 @@ enum Seed {
             messages.append(message(id: "SEED\(i)", chat: jid, sender: sender, isGroup: isGroup, ts: activity, rng: &rng))
         }
 
+        // Saved contacts with no chat yet, for ⌘N → start a DM.
+        for (n, name) in newContactNames.enumerated() {
+            contacts.append(BridgeContact(jid: newContactJid(n), fullName: name, firstName: nil, pushName: nil,
+                                          phone: String(newContactJid(n).prefix { $0 != "@" })))
+        }
+
         let chunkSize = 200
         var events: [BridgeEvent] = []
         for start in stride(from: 0, to: count, by: chunkSize) {
@@ -178,7 +189,8 @@ enum Seed {
             events.append(.historyChunk(chunk: BridgeHistoryChunk(
                 syncType: .recent, chunkOrder: UInt32(start / chunkSize), progress: UInt32(end * 100 / count),
                 chats: Array(chats[start..<end]), messages: Array(messages[start..<end]), updates: [],
-                contacts: Array(contacts.filter { c in chats[start..<end].contains { $0.jid == c.jid } }),
+                contacts: Array(contacts.filter { c in chats[start..<end].contains { $0.jid == c.jid } })
+                    + (start == 0 ? contacts.filter { $0.jid.hasPrefix("1555999") } : []),
                 aliases: [], isLastInPayload: end == count)))
         }
         events.append(contentsOf: groups.map { BridgeEvent.group(group: $0) })
