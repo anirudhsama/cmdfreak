@@ -3,7 +3,9 @@ resolver = "3"
 members = ["wa-bridge", "wa-link", "uniffi-bindgen"]
 
 [workspace.dependencies]
-whatsapp-rust = { git = "https://github.com/oxidezap/whatsapp-rust", rev = "f9811768bdc61340222268bce279c39e962a9638" }
+# Not `sqlite-storage-bundled`: the app process also links the system SQLite (GRDB), and two
+# copies exporting the same `sqlite3_*` symbols get mixed at link time.
+whatsapp-rust = { git = "https://github.com/oxidezap/whatsapp-rust", rev = "f9811768bdc61340222268bce279c39e962a9638", default-features = false, features = ["sqlite-storage", "tokio-transport", "tokio-runtime", "ureq-client", "tokio-native", "signal"] }
 uniffi = "0.32.2"
 
 [profile.release]

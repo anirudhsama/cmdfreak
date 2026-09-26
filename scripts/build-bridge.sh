@@ -21,6 +21,8 @@ fi
 
 # Xcode's build environment leaks SDK/arch settings that confuse cargo's host builds.
 unset SDKROOT MACOSX_DEPLOYMENT_TARGET ARCHS CC CXX LD
+# C dependencies (sqlite, ring) must target the app's minimum OS, not the build host's.
+export MACOSX_DEPLOYMENT_TARGET=26.0
 
 cd "$RUST"
 PROFILE_FLAG=$([[ "$PROFILE" == release ]] && echo --release || echo "")

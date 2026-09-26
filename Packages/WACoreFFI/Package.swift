@@ -16,6 +16,7 @@ let package = Package(
                 .linkedFramework("Security"),
                 .linkedFramework("SystemConfiguration"),
                 .linkedFramework("CoreFoundation"),
+                .linkedLibrary("sqlite3"),
             ]
         ),
     ]
