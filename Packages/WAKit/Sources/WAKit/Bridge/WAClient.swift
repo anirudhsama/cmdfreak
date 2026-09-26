@@ -157,6 +157,11 @@ public final class WAClient: Sendable {
         }
     }
 
+    /// Makes sure a chat exists for `jid` (a contact with no chat yet) and returns its canonical JID.
+    public func startChat(with jid: String) async throws -> String {
+        try await ingest.createLocalChat(jid)
+    }
+
     // MARK: Sending (optimistic)
 
     /// Inserts a pending row, sends, then marks it sent (server id) or failed. Returns the local id.

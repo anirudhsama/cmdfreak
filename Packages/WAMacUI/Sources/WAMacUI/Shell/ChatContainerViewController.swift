@@ -2,6 +2,33 @@ import AppKit
 import SwiftUI
 import WAKit
 
+/// Keyboard seam between the shell's menu shortcuts and the chat view. The chat view adopts this
+/// and sets itself as `ChatContainerViewController.content`; every member has a no-op default.
+@MainActor
+public protocol ChatContentKeyboardHandling: AnyObject {
+    /// Esc: clear reply or edit state. Return false when there was nothing to clear, so the shell
+    /// moves focus to the chat list instead.
+    func cancelTransientState() -> Bool
+    /// Menu title for Esc while there is something to cancel ("Cancel Reply"), else nil.
+    var transientStateTitle: String? { get }
+    /// ⇧⌘O.
+    func attachFile()
+    /// Space with the message list focused: whether a media message is selected.
+    var canQuickLookSelection: Bool { get }
+    func quickLookSelection()
+    /// After the command bar opens a chat. Return false to leave focus on the chat list.
+    func focusCompose() -> Bool
+}
+
+public extension ChatContentKeyboardHandling {
+    func cancelTransientState() -> Bool { false }
+    var transientStateTitle: String? { nil }
+    func attachFile() {}
+    var canQuickLookSelection: Bool { false }
+    func quickLookSelection() {}
+    func focusCompose() -> Bool { false }
+}
+
 /// Content side of the split view. Owns the seam the chat view plugs into: `show(chatJid:)` swaps
 /// the displayed conversation; `beginComposing(with:)` receives text typed while the chat list
 /// had focus. Until the real chat view lands it shows an empty state.
@@ -12,6 +39,8 @@ public final class ChatContainerViewController: NSViewController {
 
     /// Set by the chat view once it exists; receives printable characters typed in the chat list.
     public var composeTextSink: ((String) -> Void)?
+    /// Set by the chat view once it exists; receives Esc, ⇧⌘O, Space and focus requests from the shell.
+    public weak var content: (any ChatContentKeyboardHandling)?
 
     private let emptyState = NSHostingView(rootView: EmptyChatView())
 
@@ -43,6 +72,15 @@ public final class ChatContainerViewController: NSViewController {
         self.chatJid = chatJid
         emptyState.rootView = EmptyChatView(chatJid: chatJid)
     }
+
+    /// Esc. Returns true when the chat view consumed it (cleared reply/edit state).
+    public func cancelTransientState() -> Bool { content?.cancelTransientState() ?? false }
+    public var transientStateTitle: String? { content?.transientStateTitle }
+    public var canAttach: Bool { chatJid != nil && content != nil }
+    public func attachFile() { content?.attachFile() }
+    public var canQuickLook: Bool { content?.canQuickLookSelection ?? false }
+    public func quickLook() { content?.quickLookSelection() }
+    public func focusCompose() -> Bool { content?.focusCompose() ?? false }
 
     /// Forwarded from the chat list when the user starts typing while it has focus.
     public func beginComposing(with text: String) {

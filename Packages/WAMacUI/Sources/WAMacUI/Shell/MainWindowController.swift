@@ -17,6 +17,16 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, N
     let split = NSSplitViewController()
     private var presenceTask: Task<Void, Never>?
     private var didPlaceDivider = false
+    /// Chat and action commands shown in the command bar; `register` more providers to extend it.
+    public let commands = CommandRegistry.standard()
+    let usage: QuickSearchUsageStore
+    private var commandBarIfLoaded: CommandBarPanelController?
+    var commandBar: CommandBarPanelController {
+        if let commandBarIfLoaded { return commandBarIfLoaded }
+        let bar = makeCommandBar()
+        commandBarIfLoaded = bar
+        return bar
+    }
 
     public private(set) var selectedChatJid: String?
     private static let defaultContentSize = NSSize(width: 1100, height: 720)
@@ -27,6 +37,8 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, N
         rail = RailViewController(model: railModel)
         chatList = ChatListViewController(client: client, filter: railModel.selection.filter())
         sidebar = SidebarViewController(rail: rail, chatList: chatList, session: client.session)
+        usage = QuickSearchUsageStore(url: URL(filePath: client.database.pool.path)
+            .deletingLastPathComponent().appending(path: "quick-search-usage.json"))
 
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1100, height: 720),
@@ -110,6 +122,7 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, N
             client.setFocus(chatJid: nil, windowIsKey: window?.isKeyWindow ?? false)
             return
         }
+        usage.recordVisit(of: jid)
         if window?.isKeyWindow == true {
             Task { await client.openChat(jid) }
         } else {
@@ -193,19 +206,121 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, N
         chatList.items.prefix(limit).map(\.id)
     }
 
-    /// M6 lands the command bar here.
+    // MARK: Command bar
+
+    /// ⌘K: toggles the command bar over chats, contacts and actions.
     @objc public func showCommandBar(_ sender: Any?) {
-        WAKit.log.info("command bar requested (not implemented until M6)")
+        if commandBar.isVisible, commandBar.model.scope == .all {
+            commandBar.hide()
+        } else {
+            commandBar.show(scope: .all, context: commandContext)
+        }
     }
 
-    /// M6: opens the command bar scoped to contacts.
+    /// ⌘N: the command bar scoped to contacts; picking one without a chat starts a DM.
     @objc public func newChat(_ sender: Any?) {
-        WAKit.log.info("new chat requested (not implemented until M6)")
+        commandBar.show(scope: .contacts, context: commandContext)
+    }
+
+    public var isCommandBarVisible: Bool { commandBarIfLoaded?.isVisible ?? false }
+
+    private var commandContext: CommandContext {
+        CommandContext(chat: selectedChatItem)
+    }
+
+    private var selectedChatItem: ChatListItem? {
+        chatList.selectedItem ?? selectedChatJid.flatMap { jid in chatList.items.first { $0.id == jid } }
+    }
+
+    private func makeCommandBar() -> CommandBarPanelController {
+        let model = CommandBarModel(database: client.database, usage: usage, registry: commands)
+        model.onOpenChat = { [weak self] candidate in self?.open(candidate) }
+        model.onPerform = { [weak self] action in
+            // After the panel has closed, so the main window is key again (Log Out shows an alert).
+            DispatchQueue.main.async { action.perform(self?.window) }
+        }
+        return CommandBarPanelController(model: model, owner: window!)
+    }
+
+    /// Opens a command-bar pick: switches the rail if the chat is outside the current filter,
+    /// creates the chat first for a contact without one, then selects it like a click would.
+    func open(_ candidate: QuickSearchCandidate) {
+        guard candidate.hasChat else {
+            Task { [weak self, client] in
+                do {
+                    let jid = try await client.startChat(with: candidate.jid)
+                    await self?.reveal(jid, archived: false, waitForList: true)
+                } catch {
+                    WAKit.log.error("start chat failed: \(error)")
+                }
+            }
+            return
+        }
+        Task { await reveal(candidate.jid, archived: candidate.archived, waitForList: false) }
+    }
+
+    private func reveal(_ jid: String, archived: Bool, waitForList: Bool) async {
+        if chatList.filter.archived != nil, chatList.filter.archived != archived {
+            selectRail(archived ? .archived : .chats)
+        }
+        // A just-created chat reaches the list through its observation a moment after the write.
+        if waitForList {
+            for _ in 0..<60 where !chatList.items.contains(where: { $0.id == jid }) {
+                try? await Task.sleep(for: .milliseconds(16))
+            }
+        }
+        chatList.select(jid)
+        if !chatContainer.focusCompose() { chatList.focus() }
+    }
+
+    // MARK: Chat-view seams (Esc, ⇧⌘O, Space)
+
+    private var windowIsKeyForMenus: Bool {
+        #if DEBUG
+        if Self.debugAssumeKeyWindow { return true }
+        #endif
+        return window?.isKeyWindow == true
+    }
+
+    #if DEBUG
+    /// Self-test only: the test session may have no key window (locked screen).
+    public static var debugAssumeKeyWindow = false
+    #endif
+
+    private var isComposingMarkedText: Bool {
+        (window?.firstResponder as? NSTextInputClient)?.hasMarkedText() ?? false
+    }
+
+    /// Esc: the chat view clears reply/edit state first; otherwise focus moves to the chat list.
+    @objc public func cancelOrFocusChatList(_ sender: Any?) {
+        if chatContainer.cancelTransientState() { return }
+        chatList.focus()
+    }
+
+    /// ⇧⌘O: forwarded to the chat view's attach flow.
+    @objc public func attachFile(_ sender: Any?) {
+        chatContainer.attachFile()
+    }
+
+    /// Space with the message list focused: Quick Look on the selected media.
+    @objc public func quickLookSelection(_ sender: Any?) {
+        chatContainer.quickLook()
     }
 
     public func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         let chat = chatList.selectedItem?.chat
         switch menuItem.action {
+        case #selector(cancelOrFocusChatList(_:)):
+            menuItem.title = chatContainer.transientStateTitle ?? "Focus Chat List"
+            // Disabled items do not claim the key, so Esc still reaches other windows and input methods.
+            return windowIsKeyForMenus && !isComposingMarkedText
+        case #selector(attachFile(_:)):
+            return windowIsKeyForMenus && chatContainer.canAttach
+        case #selector(quickLookSelection(_:)):
+            return windowIsKeyForMenus && chatContainer.canQuickLook
+        case #selector(showCommandBar(_:)):
+            menuItem.title = isCommandBarVisible ? "Hide Command Bar" : "Command Bar"
+            return true
         case #selector(toggleUnread(_:)):
             menuItem.title = (chat.map { $0.unreadCount > 0 || $0.markedUnread } ?? false) ? "Mark as Read" : "Mark as Unread"
             return chat != nil

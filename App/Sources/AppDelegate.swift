@@ -143,6 +143,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             liveSeedTask = Task { await Seed.runLiveTraffic(client, window: window, count: count) }
         }
         await DevSupport.runSnapshots(main: mainWindow)
+        if DevSupport.env["BETTERWA_SELFTEST"] == "1", let window = mainWindow {
+            await ShortcutSelfTest.run(window, client: client, snapshotDir: DevSupport.snapshotDirectory)
+        }
     }
     #endif
 }
