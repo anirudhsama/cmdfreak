@@ -1,0 +1,60 @@
+name: BetterWA
+options:
+  bundleIdPrefix: live.gosupernova
+  deploymentTarget:
+    macOS: "26.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    ARCHS: arm64
+    ONLY_ACTIVE_ARCH: YES
+    MACOSX_DEPLOYMENT_TARGET: "26.0"
+packages:
+  WAMacUI:
+    path: Packages/WAMacUI
+  WAKit:
+    path: Packages/WAKit
+targets:
+  BetterWA:
+    type: application
+    platform: macOS
+    sources:
+      - App/Sources
+      - path: App/Resources
+        optional: true
+    dependencies:
+      - package: WAMacUI
+      - package: WAKit
+    info:
+      path: App/Info.plist
+      properties:
+        CFBundleDisplayName: BetterWA
+        CFBundleShortVersionString: "0.1.0"
+        CFBundleVersion: "1"
+        LSApplicationCategoryType: public.app-category.social-networking
+        LSMinimumSystemVersion: "26.0"
+        NSPrincipalClass: NSApplication
+    entitlements:
+      path: App/BetterWA.entitlements
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: live.gosupernova.BetterWA
+        CODE_SIGN_IDENTITY: "-"
+        CODE_SIGN_STYLE: Manual
+        ENABLE_HARDENED_RUNTIME: YES
+        ENABLE_APP_SANDBOX: NO
+        ENABLE_USER_SCRIPT_SANDBOXING: NO
+        SWIFT_STRICT_CONCURRENCY: complete
+        OTHER_CODE_SIGN_FLAGS: "--options=runtime"
+    preBuildScripts:
+      - name: Build wa-bridge
+        script: '"$SRCROOT/scripts/build-bridge.sh" --if-stale'
+        basedOnDependencyAnalysis: false
+schemes:
+  BetterWA:
+    build:
+      targets:
+        BetterWA: all
+    run:
+      config: Debug

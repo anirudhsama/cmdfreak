@@ -1,0 +1,10 @@
+[workspace]
+resolver = "3"
+members = ["wa-bridge", "wa-link", "uniffi-bindgen"]
+
+[workspace.dependencies]
+whatsapp-rust = { git = "https://github.com/oxidezap/whatsapp-rust", rev = "f9811768bdc61340222268bce279c39e962a9638" }
+uniffi = "0.32.2"
+
+[profile.release]
+debug = "line-tables-only"
