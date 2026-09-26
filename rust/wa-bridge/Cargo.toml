@@ -10,3 +10,4 @@ name = "wa_bridge"
 
 [dependencies]
 uniffi = { workspace = true, features = ["tokio"] }
+thiserror = "2"
