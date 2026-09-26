@@ -10,6 +10,14 @@ public struct MessageItem: Hashable, Sendable, Identifiable {
     /// Group chats: the sender's display name (nil for own messages).
     public var senderName: String?
 
+    public init(message: MessageRecord, media: MediaRecord? = nil, reactions: [ReactionRecord] = [], pollVotes: [PollVoteRecord] = [], senderName: String? = nil) {
+        self.message = message
+        self.media = media
+        self.reactions = reactions
+        self.pollVotes = pollVotes
+        self.senderName = senderName
+    }
+
     public var id: String { message.id }
     public var sortKey: Int64 { message.sortKey }
 }

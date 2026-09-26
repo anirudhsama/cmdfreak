@@ -7,6 +7,12 @@ public struct MessagePage: Hashable, Sendable {
     public var hasOlder: Bool
     public var hasNewer: Bool
 
+    public init(items: [MessageItem], hasOlder: Bool, hasNewer: Bool) {
+        self.items = items
+        self.hasOlder = hasOlder
+        self.hasNewer = hasNewer
+    }
+
     public var oldestSortKey: Int64? { items.first?.sortKey }
     public var newestSortKey: Int64? { items.last?.sortKey }
 }

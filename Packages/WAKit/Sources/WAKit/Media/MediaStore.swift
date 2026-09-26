@@ -99,16 +99,28 @@ public actor MediaStore {
 
     /// Call from the visible-row warm-up; no-op when not eligible or already present.
     public func autoDownloadIfNeeded(_ item: MessageItem) {
-        guard let media = item.media, !item.message.revoked,
-              Self.shouldAutoDownload(kind: item.message.kind, media: media),
+        guard let media = item.media, !item.message.revoked else { return }
+        if media.downloadState != .downloaded, let url = localURL(for: media) {
+            // The file is already cached (re-sync, fresh database): record it so cells can show it.
+            Task { await self.recordExisting(url, for: media) }
+            return
+        }
+        guard Self.shouldAutoDownload(kind: item.message.kind, media: media),
               !media.directPath.isEmpty, localURL(for: media) == nil else { return }
         Task { _ = try? await self.download(media) }
+    }
+
+    private func recordExisting(_ url: URL, for media: MediaRecord) async {
+        try? await ingest?.setMediaState(chatJid: media.chatJid, messageId: media.messageId, state: .downloaded, localPath: url.path)
     }
 
     // MARK: Download
 
     public func download(_ media: MediaRecord) async throws -> URL {
-        if let url = localURL(for: media) { return url }
+        if let url = localURL(for: media) {
+            if media.downloadState != .downloaded { await recordExisting(url, for: media) }
+            return url
+        }
         let key = Self.key(for: media)
         if let task = inFlight[key] { return try await task.value }
 
