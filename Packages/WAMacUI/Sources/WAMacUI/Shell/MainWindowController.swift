@@ -68,6 +68,7 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, N
         rail.onSelect = { [weak self] item in self?.selectRail(item) }
         chatList.onSelect = { [weak self] jid in self?.showChat(jid) }
         chatList.onTypeAhead = { [weak self] text in self?.chatContainer.beginComposing(with: text) }
+        chatContainer.onEscapeToChatList = { [weak self] in self?.chatList.focus() }
 
         presenceTask = Task { [weak self, client] in
             for await presence in client.chatPresence {

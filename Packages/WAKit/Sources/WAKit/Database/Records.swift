@@ -130,6 +130,35 @@ public struct MessageRecord: Codable, Hashable, Sendable, FetchableRecord, Mutab
     public var pushName: String?
     public var extra: MessageExtra?
 
+    public init(
+        localId: Int64? = nil, chatJid: String, id: String, senderJid: String, participant: String? = nil, fromMe: Bool,
+        timestamp: Int64, sortKey: Int64, kind: MessageKind, text: String?, quotedId: String? = nil, quotedSenderJid: String? = nil,
+        quotedKind: MessageKind? = nil, quotedSnippet: String? = nil, status: MessageStatus, editedAt: Int64? = nil, revoked: Bool = false,
+        isForwarded: Bool = false, typeName: String? = nil, pushName: String? = nil, extra: MessageExtra? = nil
+    ) {
+        self.localId = localId
+        self.chatJid = chatJid
+        self.id = id
+        self.senderJid = senderJid
+        self.participant = participant
+        self.fromMe = fromMe
+        self.timestamp = timestamp
+        self.sortKey = sortKey
+        self.kind = kind
+        self.text = text
+        self.quotedId = quotedId
+        self.quotedSenderJid = quotedSenderJid
+        self.quotedKind = quotedKind
+        self.quotedSnippet = quotedSnippet
+        self.status = status
+        self.editedAt = editedAt
+        self.revoked = revoked
+        self.isForwarded = isForwarded
+        self.typeName = typeName
+        self.pushName = pushName
+        self.extra = extra
+    }
+
     public mutating func didInsert(_ inserted: InsertionSuccess) {
         localId = inserted.rowID
     }
@@ -191,6 +220,15 @@ public struct ReactionRecord: Codable, Hashable, Sendable, FetchableRecord, Pers
     public var emoji: String
     public var fromMe: Bool
     public var timestamp: Int64
+
+    public init(chatJid: String, messageId: String, senderJid: String, emoji: String, fromMe: Bool, timestamp: Int64) {
+        self.chatJid = chatJid
+        self.messageId = messageId
+        self.senderJid = senderJid
+        self.emoji = emoji
+        self.fromMe = fromMe
+        self.timestamp = timestamp
+    }
 }
 
 public struct PollVoteRecord: Codable, Hashable, Sendable, FetchableRecord, PersistableRecord {

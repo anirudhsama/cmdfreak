@@ -23,6 +23,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         WAKit.log.info("\(WAKit.bridgeVersion(), privacy: .public)")
+        #if DEBUG
+        if ChatHarness.launchIfRequested() { return }  // BETTERWA_CHAT_HARNESS=1: stand-alone chat view
+        #endif
         do {
             client = try makeClient()
         } catch {

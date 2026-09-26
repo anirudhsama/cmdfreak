@@ -34,6 +34,16 @@ public final class ThumbnailCache: @unchecked Sendable {
         return image
     }
 
+    /// Decodes on the calling thread and caches. For preloaders that already run off the main thread.
+    @discardableResult
+    public func decodeSync(key: String, source: Source, maxPixelSize: Int) -> CGImage? {
+        let ck = Self.cacheKey(key, maxPixelSize)
+        if let hit = cache.object(forKey: ck) { return hit }
+        let image = Self.decode(source, maxPixelSize: maxPixelSize)
+        if let image { cache.setObject(image, forKey: ck) }
+        return image
+    }
+
     public func removeAll() { cache.removeAllObjects() }
 
     static func cacheKey(_ key: String, _ size: Int) -> NSString { "\(key)@\(size)" as NSString }

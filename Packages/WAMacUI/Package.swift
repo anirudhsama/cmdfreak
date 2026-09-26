@@ -8,5 +8,6 @@ let package = Package(
     dependencies: [.package(path: "../WAKit")],
     targets: [
         .target(name: "WAMacUI", dependencies: ["WAKit"]),
+        .testTarget(name: "WAMacUITests", dependencies: ["WAMacUI"]),
     ]
 )
