@@ -28,7 +28,7 @@ enum DevSupport {
             main.selectChat(at: 1)
             try? await Task.sleep(for: .milliseconds(400))
             snapshot(in: dir, suffix: "chats")
-            main.selectRailItem(NSMenuItem(title: "", action: nil, keyEquivalent: "").with(tag: 2))
+            main.selectRailItem(NSMenuItem(title: "", action: nil, keyEquivalent: "").with(tag: 4))
             try? await Task.sleep(for: .milliseconds(400))
             snapshot(in: dir, suffix: "archived")
             main.selectRailItem(NSMenuItem(title: "", action: nil, keyEquivalent: "").with(tag: 1))

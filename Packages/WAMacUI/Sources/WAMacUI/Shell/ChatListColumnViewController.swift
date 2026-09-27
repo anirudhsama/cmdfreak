@@ -2,31 +2,27 @@ import AppKit
 import SwiftUI
 import WAKit
 
-enum SidebarMetrics {
-    static let listMinWidth: CGFloat = 260
-    static let listIdealWidth: CGFloat = 320
-    static var minWidth: CGFloat { RailMetrics.width + listMinWidth }
-    static var idealWidth: CGFloat { RailMetrics.width + listIdealWidth }
+enum ChatListMetrics {
+    static let minWidth: CGFloat = 260
+    static let idealWidth: CGFloat = 320
+    static let maxWidth: CGFloat = 480
 }
 
-/// Sidebar split item: rail on the left, chat list filling the rest, and a status footer that
-/// appears while history sync runs or the connection is down.
+/// Middle column: the chat list, with a status footer that appears while history sync runs or
+/// the connection is down.
 @MainActor
-final class SidebarViewController: NSViewController {
-    let rail: RailViewController
+final class ChatListColumnViewController: NSViewController {
     let chatList: ChatListViewController
     private let footer: NSHostingView<SidebarFooter>
     private let session: SessionService
     private var footerHeight: NSLayoutConstraint!
     private var token: ObservationToken?
 
-    init(rail: RailViewController, chatList: ChatListViewController, session: SessionService) {
-        self.rail = rail
+    init(chatList: ChatListViewController, session: SessionService) {
         self.chatList = chatList
         self.session = session
         footer = NSHostingView(rootView: SidebarFooter(session: session))
         super.init(nibName: nil, bundle: nil)
-        addChild(rail)
         addChild(chatList)
     }
 
@@ -35,35 +31,20 @@ final class SidebarViewController: NSViewController {
 
     override func loadView() {
         let root = ShellRootView()
-        let railView = rail.view
         let listView = chatList.view
-        let separator = NSBox()
-        separator.boxType = .separator
-        for v in [railView, separator, listView, footer] {
+        for v in [listView, footer] {
             v.translatesAutoresizingMaskIntoConstraints = false
             root.addSubview(v)
         }
         footer.sizingOptions = []
         footerHeight = footer.heightAnchor.constraint(equalToConstant: 0)
         NSLayoutConstraint.activate([
-            railView.leadingAnchor.constraint(equalTo: root.leadingAnchor),
-            // Rail and separator start below the titlebar so the traffic lights get a clear row
-            // across the whole sidebar instead of straddling the rail's edge.
-            railView.topAnchor.constraint(equalTo: root.safeAreaLayoutGuide.topAnchor),
-            railView.bottomAnchor.constraint(equalTo: root.bottomAnchor),
-            railView.widthAnchor.constraint(equalToConstant: RailMetrics.width),
-
-            separator.leadingAnchor.constraint(equalTo: railView.trailingAnchor),
-            separator.topAnchor.constraint(equalTo: root.safeAreaLayoutGuide.topAnchor),
-            separator.bottomAnchor.constraint(equalTo: root.bottomAnchor),
-            separator.widthAnchor.constraint(equalToConstant: 1),
-
-            listView.leadingAnchor.constraint(equalTo: separator.trailingAnchor),
+            listView.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             listView.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             listView.topAnchor.constraint(equalTo: root.topAnchor),
             listView.bottomAnchor.constraint(equalTo: footer.topAnchor),
 
-            footer.leadingAnchor.constraint(equalTo: listView.leadingAnchor),
+            footer.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             footer.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             footer.bottomAnchor.constraint(equalTo: root.bottomAnchor),
             footerHeight,

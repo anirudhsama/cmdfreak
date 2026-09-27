@@ -141,10 +141,10 @@ enum ShortcutSelfTest {
         check("⇧⌘A archive", main.debugChat(jid) == nil)
 
         // Rail.
-        await menu("2", 19, [.command, .option])
-        check("⌥⌘2 archived rail", main.debugRailIsArchived)
+        await menu("4", 21, [.command, .option])
+        check("⌥⌘4 archived filter", main.debugRailIsArchived)
         await menu("1", 18, [.command, .option])
-        check("⌥⌘1 chats rail", !main.debugRailIsArchived)
+        check("⌥⌘1 chats filter", !main.debugRailIsArchived)
 
         // Esc from elsewhere in the window focuses the list; typing in the list goes to compose.
         main.selectChat(at: 1)

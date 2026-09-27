@@ -2,18 +2,19 @@ import AppKit
 import SwiftUI
 import WAKit
 
-/// The main window: a split view whose sidebar item holds the rail and chat list (standard sidebar
-/// behaviour, so macOS 26 renders it as floating glass) and whose content item is the chat
-/// container. Every keyboard shortcut is a menu item whose action lands here via the responder chain.
+/// The main window: a three-column split view in the Mail layout. The sidebar item is the source
+/// list of chat filters (standard sidebar behaviour, so macOS 26 draws it as floating glass), the
+/// content-list item is the chat list, and the content item is the chat container. Every keyboard shortcut is a menu item whose action lands here via the responder chain.
 @MainActor
 public final class MainWindowController: NSWindowController, NSWindowDelegate, NSToolbarDelegate, NSMenuItemValidation {
     public let client: WAClient
     public let chatContainer: ChatContainerViewController
 
     let railModel = RailModel()
-    let rail: RailViewController
+    let sourceList: SourceListViewController
     let chatList: ChatListViewController
-    let sidebar: SidebarViewController
+    let chatListColumn: ChatListColumnViewController
+    private var countsObservation: AnyDatabaseCancellable?
     let split = NSSplitViewController()
     private var presenceTask: Task<Void, Never>?
     private var didPlaceDivider = false
@@ -29,19 +30,19 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, N
     }
 
     public private(set) var selectedChatJid: String?
-    private static let defaultContentSize = NSSize(width: 1100, height: 720)
+    private static let defaultContentSize = NSSize(width: 1280, height: 800)
 
     public init(client: WAClient) {
         self.client = client
         chatContainer = ChatContainerViewController(client: client)
-        rail = RailViewController(model: railModel)
+        sourceList = SourceListViewController(model: railModel)
         chatList = ChatListViewController(client: client, filter: railModel.selection.filter())
-        sidebar = SidebarViewController(rail: rail, chatList: chatList, session: client.session)
+        chatListColumn = ChatListColumnViewController(chatList: chatList, session: client.session)
         usage = QuickSearchUsageStore(url: URL(filePath: client.database.pool.path)
             .deletingLastPathComponent().appending(path: "quick-search-usage.json"))
 
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 1100, height: 720),
+            contentRect: NSRect(x: 0, y: 0, width: 1280, height: 800),
             styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
             backing: .buffered,
             defer: false
@@ -52,13 +53,17 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, N
         window.identifier = NSUserInterfaceItemIdentifier("MainWindow")
         super.init(window: window)
 
-        let sidebarItem = NSSplitViewItem(sidebarWithViewController: sidebar)
-        sidebarItem.minimumThickness = SidebarMetrics.minWidth
-        sidebarItem.maximumThickness = RailMetrics.width + 480
+        let sidebarItem = NSSplitViewItem(sidebarWithViewController: sourceList)
+        sidebarItem.minimumThickness = SourceListMetrics.minWidth
+        sidebarItem.maximumThickness = SourceListMetrics.maxWidth
         sidebarItem.canCollapse = true
+        let listItem = NSSplitViewItem(contentListWithViewController: chatListColumn)
+        listItem.minimumThickness = ChatListMetrics.minWidth
+        listItem.maximumThickness = ChatListMetrics.maxWidth
         let contentItem = NSSplitViewItem(viewController: chatContainer)
         contentItem.minimumThickness = 400
         split.addSplitViewItem(sidebarItem)
+        split.addSplitViewItem(listItem)
         split.addSplitViewItem(contentItem)
         split.splitView.autosaveName = "MainSplit"
         window.contentViewController = split
@@ -77,7 +82,8 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, N
             window.center()
         }
 
-        rail.onSelect = { [weak self] item in self?.selectRail(item) }
+        sourceList.onSelect = { [weak self] item in self?.selectRail(item) }
+        countsObservation = client.database.observeSidebarCounts { [railModel] counts in railModel.counts = counts }
         chatList.onSelect = { [weak self] jid in self?.showChat(jid) }
         chatList.onTypeAhead = { [weak self] text in self?.chatContainer.beginComposing(with: text) }
         chatContainer.onEscapeToChatList = { [weak self] in self?.chatList.focus() }
@@ -97,9 +103,11 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, N
         super.showWindow(sender)
         if !didPlaceDivider {
             didPlaceDivider = true
-            // Autosaved position wins; otherwise open at the ideal sidebar width.
-            if split.splitView.subviews.first.map({ $0.frame.width < SidebarMetrics.minWidth }) ?? true {
-                split.splitView.setPosition(SidebarMetrics.idealWidth, ofDividerAt: 0)
+            // Autosaved positions win; otherwise open at the ideal column widths.
+            let views = split.splitView.subviews
+            if views.count == 3, views[0].frame.width < SourceListMetrics.minWidth || views[1].frame.width < ChatListMetrics.minWidth {
+                split.splitView.setPosition(SourceListMetrics.idealWidth, ofDividerAt: 0)
+                split.splitView.setPosition(SourceListMetrics.idealWidth + ChatListMetrics.idealWidth, ofDividerAt: 1)
             }
         }
         window?.makeKeyAndOrderFront(sender)
@@ -261,8 +269,10 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, N
     }
 
     private func reveal(_ jid: String, archived: Bool, waitForList: Bool) async {
-        if chatList.filter.archived != nil, chatList.filter.archived != archived {
-            selectRail(archived ? .archived : .chats)
+        // Unread/Groups/tag filters may not contain the chat; fall back to the list that does.
+        let home: RailItem = archived ? .archived : .chats
+        if railModel.selection != home, !chatList.items.contains(where: { $0.id == jid }) {
+            selectRail(home)
         }
         // A just-created chat reaches the list through its observation a moment after the write.
         if waitForList {

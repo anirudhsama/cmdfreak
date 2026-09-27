@@ -31,9 +31,11 @@ public struct ChatFilter: Hashable, Sendable {
     public static let archived = ChatFilter(archived: true)
 }
 
-/// An entry in the left rail. v1 has `chats` and `archived`; tags arrive later.
+/// An entry in the sidebar's source list. Tags arrive later as more items.
 public enum RailItem: Hashable, Sendable {
     case chats
+    case unread
+    case groups
     case archived
     case tag(id: Int64, name: String)
 
@@ -41,9 +43,39 @@ public enum RailItem: Hashable, Sendable {
     public func filter(hiddenTags: Set<Int64> = []) -> ChatFilter {
         switch self {
         case .chats: ChatFilter(archived: false, excludeTags: hiddenTags)
+        case .unread: ChatFilter(archived: false, unreadOnly: true)
+        case .groups: ChatFilter(archived: false, kinds: [.group])
         case .archived: ChatFilter(archived: true)
         case .tag(let id, _): ChatFilter(archived: nil, includeTags: [id])
         }
+    }
+}
+
+/// Unread-chat counts for the sidebar badges.
+public struct SidebarCounts: Hashable, Sendable {
+    public var chats = 0
+    public var groups = 0
+    public var archived = 0
+    public init() {}
+
+    static func fetch(_ db: Database) throws -> SidebarCounts {
+        let row = try Row.fetchOne(db, sql: """
+            SELECT
+              COUNT(*) FILTER (WHERE archived = 0),
+              COUNT(*) FILTER (WHERE archived = 0 AND kind = 'group'),
+              COUNT(*) FILTER (WHERE archived = 1)
+            FROM chat
+            WHERE (unreadCount > 0 OR markedUnread)
+              AND (lastActivityAt IS NOT NULL OR pinnedAt IS NOT NULL)
+              AND kind IN ('dm', 'group', 'broadcast')
+            """)
+        var counts = SidebarCounts()
+        if let row {
+            counts.chats = row[0]
+            counts.groups = row[1]
+            counts.archived = row[2]
+        }
+        return counts
     }
 }
 
@@ -157,6 +189,19 @@ extension AppDatabase {
             scheduling: .immediate,
             onError: { error in MainActor.assumeIsolated { onError(error) } },
             onChange: { items in MainActor.assumeIsolated { onChange(items) } }
+        )
+    }
+}
+
+extension AppDatabase {
+    /// Observes the sidebar's unread-chat counts; the first value is delivered synchronously.
+    @MainActor
+    public func observeSidebarCounts(onChange: @escaping @MainActor (SidebarCounts) -> Void) -> AnyDatabaseCancellable {
+        ValueObservation.trackingConstantRegion(SidebarCounts.fetch).removeDuplicates().start(
+            in: pool,
+            scheduling: .immediate,
+            onError: { error in WAKit.log.error("sidebar counts observation: \(error)") },
+            onChange: { counts in MainActor.assumeIsolated { onChange(counts) } }
         )
     }
 }

@@ -21,7 +21,6 @@ extension MainWindowController {
             out.append((name, renderer.cgImage))
         }
         let rail = ImageRenderer(content: RailDebugView(model: railModel)
-            .frame(width: RailMetrics.width, height: 200)
             .background(Color(nsColor: .windowBackgroundColor)))
         rail.scale = 2
         out.append(("rail", rail.cgImage))
