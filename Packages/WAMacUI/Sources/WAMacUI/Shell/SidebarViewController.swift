@@ -47,12 +47,14 @@ final class SidebarViewController: NSViewController {
         footerHeight = footer.heightAnchor.constraint(equalToConstant: 0)
         NSLayoutConstraint.activate([
             railView.leadingAnchor.constraint(equalTo: root.leadingAnchor),
-            railView.topAnchor.constraint(equalTo: root.topAnchor),
+            // Rail and separator start below the titlebar so the traffic lights get a clear row
+            // across the whole sidebar instead of straddling the rail's edge.
+            railView.topAnchor.constraint(equalTo: root.safeAreaLayoutGuide.topAnchor),
             railView.bottomAnchor.constraint(equalTo: root.bottomAnchor),
             railView.widthAnchor.constraint(equalToConstant: RailMetrics.width),
 
             separator.leadingAnchor.constraint(equalTo: railView.trailingAnchor),
-            separator.topAnchor.constraint(equalTo: root.topAnchor),
+            separator.topAnchor.constraint(equalTo: root.safeAreaLayoutGuide.topAnchor),
             separator.bottomAnchor.constraint(equalTo: root.bottomAnchor),
             separator.widthAnchor.constraint(equalToConstant: 1),
 
