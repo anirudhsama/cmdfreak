@@ -53,6 +53,12 @@ final class ComposeTextView: NSTextView {
         needsDisplay = true
     }
 
+    // Programmatic assignments (edit prefill, draft restore, clear after send) skip didChangeText;
+    // TextKit 2 draws the text in its own layers, so a stale placeholder would show through.
+    override var string: String {
+        didSet { needsDisplay = true }
+    }
+
     /// Pasted or dropped files and images become attachments; text pastes through as plain text.
     var onPasteFiles: (([URL]) -> Void)?
 

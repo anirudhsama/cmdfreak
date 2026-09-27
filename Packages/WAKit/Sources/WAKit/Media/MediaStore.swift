@@ -107,7 +107,11 @@ public actor MediaStore {
         }
         guard Self.shouldAutoDownload(kind: item.message.kind, media: media),
               !media.directPath.isEmpty, localURL(for: media) == nil else { return }
-        Task { _ = try? await self.download(media) }
+        Task {
+            do { _ = try await self.download(media) } catch {
+                WAKit.log.error("auto-download \(media.messageId, privacy: .public) failed: \(error, privacy: .public)")
+            }
+        }
     }
 
     private func recordExisting(_ url: URL, for media: MediaRecord) async {

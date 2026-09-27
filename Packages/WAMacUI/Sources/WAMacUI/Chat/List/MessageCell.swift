@@ -411,7 +411,9 @@ final class MessageCell: NSTableCellView {
                            controlPoint1: NSPoint(x: r.minX - 1, y: r.maxY - 1), controlPoint2: NSPoint(x: r.minX, y: r.maxY - 5))
             }
             tail.close()
-            path.append(tail)
+            // The outgoing tail is mirrored, so it winds opposite to the rounded rect; under the
+            // non-zero rule the overlap would cancel and punch a hole. Match the winding.
+            path.append(plan.outgoing ? tail.reversed : tail)
         }
         (plan.outgoing ? C.outgoingBubble : C.incomingBubble).setFill()
         path.fill()
