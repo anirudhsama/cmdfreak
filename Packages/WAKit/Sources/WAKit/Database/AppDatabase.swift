@@ -212,6 +212,22 @@ extension AppDatabase {
             try db.alter(table: "chat") { t in t.add(column: "stateAt", .integer) }
         }
 
+        // Quotes whose payload carried no text (the bridge could not describe it): describe the
+        // stored original instead.
+        m.registerMigration("v3") { db in
+            try db.execute(sql: Self.fillQuoteFromTargetSQL)
+        }
+
         return m
     }
+
+    /// Fills an empty quote snippet (and kind) from the quoted message when it is stored locally.
+    /// Callers append further `AND …` conditions.
+    static let fillQuoteFromTargetSQL = """
+        UPDATE message SET
+          quotedKind = (SELECT t.kind FROM message t WHERE t.chatJid = message.chatJid AND t.id = message.quotedId),
+          quotedSnippet = (SELECT t.text FROM message t WHERE t.chatJid = message.chatJid AND t.id = message.quotedId)
+        WHERE quotedId IS NOT NULL AND IFNULL(quotedSnippet, '') = ''
+          AND EXISTS (SELECT 1 FROM message t WHERE t.chatJid = message.chatJid AND t.id = message.quotedId)
+        """
 }

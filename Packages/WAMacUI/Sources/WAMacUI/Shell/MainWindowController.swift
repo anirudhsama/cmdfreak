@@ -408,6 +408,7 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, N
         case Self.chatTitleItem:
             let item = NSToolbarItem(itemIdentifier: identifier)
             item.view = chatTitleView
+            item.isBordered = false
             item.visibilityPriority = .high
             return item
         case Self.newChatItem:

@@ -194,7 +194,7 @@ final class MessageListController: NSViewController {
         rows = prepared.rows
         rowsVersion &+= 1
         ownJid = prepared.ownJid
-        peerName = prepared.chat?.name
+        peerName = prepared.peerName
         loader = client.windowLoader(for: prepared.chatJid)
         width = measurementWidth
         plans = abs(prepared.width - width) < 0.5 ? prepared.plans : [:]

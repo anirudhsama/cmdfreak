@@ -422,6 +422,9 @@ public actor IngestActor {
             extra: extra
         )
         try rec.insert(db)
+        if rec.quotedId != nil, (rec.quotedSnippet ?? "").isEmpty {
+            try db.execute(sql: AppDatabase.fillQuoteFromTargetSQL + " AND chatJid = ? AND id = ?", arguments: [chatJid, m.id])
+        }
         if let media = m.media, !m.revoked {
             try Self.mediaRecord(media, chatJid: chatJid, messageId: m.id).insert(db, onConflict: .ignore)
         }

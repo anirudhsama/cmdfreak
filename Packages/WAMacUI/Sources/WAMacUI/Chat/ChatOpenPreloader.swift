@@ -12,6 +12,8 @@ struct PreparedChat: @unchecked Sendable {
     let plans: [String: LayoutPlan]
     let width: CGFloat
     let ownJid: String?
+    /// DM peer's display name (same rule as the chat list), for quoted-reply headers.
+    let peerName: String?
 }
 
 /// Loads the first page and computes layout plans off the main thread. Call `prepare` (or `warm`)
@@ -68,14 +70,16 @@ public actor ChatOpenPreloader {
         defer { Signposts.poi.endInterval("ChatPreload", state) }
 
         let loader = client.windowLoader(for: chatJid)
-        let chat = try client.database.reader.read { db in try ChatRecord.fetchOne(db, key: chatJid) }
+        let (chat, contact) = try client.database.reader.read { db in
+            (try ChatRecord.fetchOne(db, key: chatJid), try ContactRecord.fetchOne(db, key: chatJid))
+        }
         let page = try loader.initialSync(limit: initialPageSize)
         var rows = ChatRows(chatJid: chatJid, isGroupChat: ChatKind(jid: chatJid) == .group)
         rows.replace(with: page)
         rows.setUnread(count: chat?.unreadCount ?? 0)
 
         let ownJid = client.ownJid
-        let peerName = chat?.name
+        let peerName = chat.map { ChatListQuery.title($0, contact, ownJid: ownJid) }
         var plans: [String: LayoutPlan] = [:]
         plans.reserveCapacity(rows.messages.count)
         let cache = LayoutPlanCache.shared
@@ -88,6 +92,6 @@ public actor ChatOpenPreloader {
             guard let media = item.media, let thumb = media.jpegThumbnail, !thumb.isEmpty else { continue }
             _ = ThumbnailCache.shared.decodeSync(key: LayoutPlanner.thumbKey(item), source: .data(thumb), maxPixelSize: 320)
         }
-        return PreparedChat(chatJid: chatJid, chat: chat, rows: rows, plans: plans, width: width, ownJid: ownJid)
+        return PreparedChat(chatJid: chatJid, chat: chat, rows: rows, plans: plans, width: width, ownJid: ownJid, peerName: peerName)
     }
 }
