@@ -15,6 +15,7 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, N
     let chatList: ChatListViewController
     let chatListColumn: ChatListColumnViewController
     private var countsObservation: AnyDatabaseCancellable?
+    private let chatTitleView = ChatTitleView()
     let split = NSSplitViewController()
     private var presenceTask: Task<Void, Never>?
     private var didPlaceDivider = false
@@ -83,7 +84,10 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, N
         }
 
         sourceList.onSelect = { [weak self] item in self?.selectRail(item) }
-        countsObservation = client.database.observeSidebarCounts { [railModel] counts in railModel.counts = counts }
+        countsObservation = client.database.observeSidebarCounts { [weak self] counts in
+            self?.railModel.counts = counts
+            self?.updateTitle()
+        }
         chatList.onSelect = { [weak self] jid in self?.showChat(jid) }
         chatList.onTypeAhead = { [weak self] text in self?.chatContainer.beginComposing(with: text) }
         chatContainer.onEscapeToChatList = { [weak self] in self?.chatList.focus() }
@@ -119,6 +123,7 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, N
     func selectRail(_ item: RailItem) {
         railModel.selection = item
         chatList.filter = item.filter()
+        updateTitle()
     }
 
     /// Selection changed in the list (click, arrows, or menu): swap content, update the title bar,
@@ -139,23 +144,29 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, N
         }
     }
 
+    /// The window title names the current filter (Mail-style, over the chat list); the chat's own
+    /// title sits over the conversation in `chatTitleView`.
     private func updateTitle() {
         guard let window else { return }
+        window.title = railModel.selection.title
+        let unread = railModel.badge(for: railModel.selection)
+        window.subtitle = unread > 0 ? "\(unread) unread" : ""
+
         guard let item = chatList.selectedItem ?? selectedChatJid.flatMap({ jid in chatList.items.first { $0.id == jid } }) else {
-            window.title = "BetterWA"
-            window.subtitle = ""
+            chatTitleView.set(title: "", subtitle: "")
             return
         }
-        window.title = item.title
+        var subtitle = ""
         switch item.chat.kind {
         case .group:
-            window.subtitle = item.chat.participantCount.map { "\($0) participants" } ?? "Group"
+            subtitle = item.chat.participantCount.map { "\($0) participants" } ?? "Group"
         case .dm:
             let phone = item.contact?.phone.map { "+" + $0 } ?? JID.phoneDisplay(item.chat.jid)
-            window.subtitle = phone != item.title ? (phone ?? "") : ""
+            subtitle = phone != item.title ? (phone ?? "") : ""
         default:
-            window.subtitle = ""
+            break
         }
+        chatTitleView.set(title: item.title, subtitle: subtitle)
     }
 
     // MARK: Menu actions (responder chain targets)
@@ -377,17 +388,28 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, N
 
     private static let newChatItem = NSToolbarItem.Identifier("newChat")
 
+    private static let listTrackingSeparator = NSToolbarItem.Identifier("chatListTrackingSeparator")
+    private static let chatTitleItem = NSToolbarItem.Identifier("chatTitle")
+
     public func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.toggleSidebar, .sidebarTrackingSeparator, .flexibleSpace, Self.newChatItem]
+        [.toggleSidebar, .sidebarTrackingSeparator, .flexibleSpace, Self.newChatItem,
+         Self.listTrackingSeparator, Self.chatTitleItem, .flexibleSpace]
     }
 
     public func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.toggleSidebar, .sidebarTrackingSeparator, .flexibleSpace, .space, Self.newChatItem]
+        toolbarDefaultItemIdentifiers(toolbar) + [.space]
     }
 
     public func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier identifier: NSToolbarItem.Identifier,
                         willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? {
         switch identifier {
+        case Self.listTrackingSeparator:
+            return NSTrackingSeparatorToolbarItem(identifier: identifier, splitView: split.splitView, dividerIndex: 1)
+        case Self.chatTitleItem:
+            let item = NSToolbarItem(itemIdentifier: identifier)
+            item.view = chatTitleView
+            item.visibilityPriority = .high
+            return item
         case Self.newChatItem:
             let item = NSToolbarItem(itemIdentifier: identifier)
             item.label = "New Chat"

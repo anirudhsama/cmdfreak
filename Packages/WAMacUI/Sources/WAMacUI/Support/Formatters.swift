@@ -34,11 +34,11 @@ enum ChatTimeFormatter {
 }
 
 enum Initials {
-    /// Up to two letters from the first two words of `name`; "#" for names without letters.
+    /// Up to two letters from the first two words of `name`; empty for names without letters
+    /// (bare phone numbers), which avatars render as a person glyph.
     static func from(_ name: String) -> String {
         let words = name.split(whereSeparator: { $0.isWhitespace }).prefix(2)
         let letters = words.compactMap { $0.first(where: \.isLetter) }
-        if letters.isEmpty { return name.contains(where: \.isNumber) ? "#" : "?" }
         return String(letters).uppercased()
     }
 }

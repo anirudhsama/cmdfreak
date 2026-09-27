@@ -132,6 +132,7 @@ public enum ChatListQuery {
             ORDER BY pinnedAt IS NULL, pinnedAt DESC, lastActivityAt DESC, jid
             """
         let chats = try ChatRecord.fetchAll(db, sql: sql, arguments: StatementArguments(args))
+        let own = try ownJid(db)
 
         var contactJids = Set<String>()
         for chat in chats {
@@ -156,18 +157,33 @@ public enum ChatListQuery {
                     status: chat.lastMessageStatus, revoked: chat.lastMessageRevoked ?? false
                 )
             }
-            return ChatListItem(chat: chat, contact: contact, title: title(chat, contact), preview: preview)
+            return ChatListItem(chat: chat, contact: contact, title: title(chat, contact, ownJid: own), preview: preview)
         }
     }
 
-    public static func title(_ chat: ChatRecord, _ contact: ContactRecord?) -> String {
-        if let name = chat.name.nonEmpty { return name }
-        if let name = contact?.displayName { return name }
+    public static func title(_ chat: ChatRecord, _ contact: ContactRecord?, ownJid: String? = nil) -> String {
+        if chat.kind == .dm, chat.jid == ownJid {
+            return "\(contact?.displayName.flatMap(unmasked) ?? "Me") (You)"
+        }
+        // DMs: the address-book/push name beats the conversation name, which history sync sometimes
+        // fills with a masked number ("+91∙∙∙∙∙∙∙∙02").
+        if chat.kind == .dm, let name = contact?.displayName.flatMap(unmasked) { return name }
+        if let name = chat.name.nonEmpty.flatMap(unmasked) { return name }
+        if let name = contact?.displayName.flatMap(unmasked) { return name }
         switch chat.kind {
         case .group: return "Group"
         case .broadcast: return "Broadcast list"
         default: return JID.phoneDisplay(chat.jid) ?? chat.jid
         }
+    }
+
+    /// WhatsApp masks hidden phone numbers with bullets; such a "name" is worse than the real number.
+    static func unmasked(_ name: String) -> String? {
+        name.contains(where: { $0 == "∙" || $0 == "•" || $0 == "●" }) ? nil : name
+    }
+
+    static func ownJid(_ db: Database) throws -> String? {
+        try String.fetchOne(db, sql: "SELECT value FROM meta WHERE key = 'ownPn'")
     }
 
     public static func observation(filter: ChatFilter) -> ValueObservation<ValueReducers.Fetch<[ChatListItem]>> {

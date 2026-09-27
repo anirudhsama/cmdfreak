@@ -73,13 +73,14 @@ public enum QuickSearchQuery {
             LIMIT :limit
             """
         let args: StatementArguments = ["pattern": pattern, "digits": digitPattern, "limit": limit]
+        let own = try ChatListQuery.ownJid(db)
         var out: [QuickSearchCandidate] = try Row.fetchAll(db, sql: chatSQL, arguments: args).map { row in
             let jid: String = row["jid"]
             let contact = ContactRecord(jid: row["jid"], fullName: row["fullName"], firstName: row["firstName"],
                                         pushName: row["pushName"], phone: row["phone"])
             var chat = ChatRecord(jid: jid, kind: row["kind"] as ChatKind?)
             chat.name = row["name"]
-            let title = ChatListQuery.title(chat, chat.kind == .dm ? contact : nil)
+            let title = ChatListQuery.title(chat, chat.kind == .dm ? contact : nil, ownJid: own)
             return QuickSearchCandidate(
                 jid: chat.jid, kind: chat.kind, title: title,
                 alternateNames: chat.kind == .dm ? alternates(contact, excluding: title) : [],

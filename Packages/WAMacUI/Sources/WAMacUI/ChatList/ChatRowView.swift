@@ -19,6 +19,7 @@ struct ChatRowView: View {
             AvatarView(state: state)
                 .frame(width: ChatRowMetrics.avatarSize, height: ChatRowMetrics.avatarSize)
 
+            // Top-aligned at a fixed offset so one- and two-line previews keep titles level.
             VStack(alignment: .leading, spacing: 2) {
                 HStack(alignment: .firstTextBaseline, spacing: 4) {
                     Text(state.title)
@@ -44,6 +45,8 @@ struct ChatRowView: View {
                     trailingAccessories
                 }
             }
+            .frame(maxHeight: .infinity, alignment: .top)
+            .padding(.top, 11)
         }
         .padding(.horizontal, 10)
         .frame(height: ChatRowMetrics.height)
@@ -125,9 +128,15 @@ struct AvatarView: View {
             Circle()
                 .fill(AvatarTint.color(for: state.jid).gradient)
                 .overlay {
-                    Text(state.initials)
-                        .font(.system(size: 15, weight: .medium))
-                        .foregroundStyle(.white)
+                    if state.initials.isEmpty {
+                        Image(systemName: "person.fill")
+                            .font(.system(size: 18))
+                            .foregroundStyle(.white)
+                    } else {
+                        Text(state.initials)
+                            .font(.system(size: 15, weight: .medium))
+                            .foregroundStyle(.white)
+                    }
                 }
         }
     }

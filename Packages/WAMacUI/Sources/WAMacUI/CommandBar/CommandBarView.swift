@@ -256,7 +256,11 @@ private struct CommandBarAvatar: View {
                 }
             } else {
                 Circle().fill(AvatarTint.color(for: candidate.jid)).overlay {
-                    Text(Initials.from(candidate.title)).font(.system(size: 12, weight: .medium)).foregroundStyle(.white)
+                    if Initials.from(candidate.title).isEmpty {
+                        Image(systemName: "person.fill").font(.system(size: 14)).foregroundStyle(.white)
+                    } else {
+                        Text(Initials.from(candidate.title)).font(.system(size: 12, weight: .medium)).foregroundStyle(.white)
+                    }
                 }
             }
         }
