@@ -218,6 +218,24 @@ extension AppDatabase {
             try db.execute(sql: Self.fillQuoteFromTargetSQL)
         }
 
+        // System messages used to store the stub's raw parameters; render them as sentences, then
+        // refresh chat previews that show one.
+        m.registerMigration("v4") { db in
+            let aliases = Dictionary(try Row.fetchAll(db, sql: "SELECT lid, pn FROM jid_alias").map { ($0["lid"] as String, $0["pn"] as String) },
+                                     uniquingKeysWith: { a, _ in a })
+            let canon: (String) -> String = { aliases[$0] ?? $0 }
+            let rows = try Row.fetchAll(db, sql: "SELECT localId, typeName, text, senderJid, fromMe FROM message WHERE kind = 'system' AND revoked = 0")
+            for row in rows {
+                let text = try IngestActor.renderSystem(db, typeName: row["typeName"], raw: row["text"], actor: row["senderJid"],
+                                                        fromMe: row["fromMe"], canon: canon)
+                try db.execute(sql: "UPDATE message SET text = ? WHERE localId = ?", arguments: [text, row["localId"] as Int64])
+            }
+            try db.execute(sql: """
+                UPDATE chat SET lastMessageText = (SELECT text FROM message WHERE message.chatJid = chat.jid AND message.id = chat.lastMessageId)
+                WHERE lastMessageKind = 'system'
+                """)
+        }
+
         return m
     }
 

@@ -435,6 +435,10 @@ do {
     case "import-capture": try await cmdImport(Array(argv.dropFirst()))
     case "download": try await cmdDownload(Array(argv.dropFirst()))
     case "ingest-capture": try await cmdIngest(Array(argv.dropFirst()))
+    case "migrate":
+        guard let path = option("--db", in: Array(argv.dropFirst())) else { throw CLIError("usage: wa-cli migrate --db PATH") }
+        _ = try AppDatabase(url: URL(filePath: path))
+        print("migrated \(path)")
     case "qr":
         guard argv.count == 2 else { throw CLIError("usage: wa-cli qr TEXT") }
         print(renderQR(argv[1]), terminator: "")
@@ -442,7 +446,7 @@ do {
         guard argv.count == 3 else { throw CLIError("usage: wa-cli remux SRC DST") }
         try remuxOggToCaf(src: argv[1], dst: argv[2])
     default:
-        err("usage: wa-cli events [--seconds N] [--nudge-after N] | qr TEXT | send-self TEXT | send-media-self FILE... [--kind K] [--caption T] | download [--out DIR] | import-capture [DIR] | ingest-capture [--db PATH] | remux SRC DST")
+        err("usage: wa-cli events [--seconds N] [--nudge-after N] | qr TEXT | send-self TEXT | send-media-self FILE... [--kind K] [--caption T] | download [--out DIR] | import-capture [DIR] | ingest-capture [--db PATH] | migrate --db PATH | remux SRC DST")
         exit(2)
     }
 } catch {

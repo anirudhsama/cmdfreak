@@ -363,6 +363,32 @@ public actor IngestActor {
 
     private func canon(_ jid: String) -> String { aliases[jid] ?? jid }
 
+    /// Renders a stub system message with the names known right now.
+    private func systemText(_ db: Database, _ m: BridgeMessage, sender: String) throws -> String {
+        try Self.renderSystem(db, typeName: m.typeName, raw: m.text, actor: sender, fromMe: m.fromMe, canon: canon)
+    }
+
+    static func renderSystem(_ db: Database, typeName: String?, raw: String?, actor: String, fromMe: Bool,
+                             canon: (String) -> String) throws -> String {
+        let own = try String.fetchOne(db, sql: "SELECT value FROM meta WHERE key = 'ownPn'")
+        var cache: [String: String] = [:]
+        func name(_ jid: String) -> String {
+            let j = canon(jid)
+            if let hit = cache[j] { return hit }
+            let resolved: String
+            if j == own {
+                resolved = "You"
+            } else if let c = try? ContactRecord.fetchOne(db, key: j), let n = c.displayName.flatMap(ChatListQuery.unmasked) {
+                resolved = n
+            } else {
+                resolved = JID.isPhoneNumber(j) ? (JID.phoneDisplay(j) ?? "Someone") : "Someone"
+            }
+            cache[j] = resolved
+            return resolved
+        }
+        return SystemMessageText.render(typeName: typeName, raw: raw, actor: actor, actorIsMe: fromMe || canon(actor) == own, name: name)
+    }
+
     private func ensureChat(_ db: Database, _ jid: String) throws {
         try db.execute(sql: "INSERT OR IGNORE INTO chat (jid, kind) VALUES (?, ?)", arguments: [jid, ChatKind(jid: jid)])
     }
@@ -415,7 +441,7 @@ public actor IngestActor {
         var rec = MessageRecord(
             localId: nil, chatJid: chatJid, id: m.id, senderJid: sender, participant: m.participant, fromMe: m.fromMe,
             timestamp: m.timestamp, sortKey: SortKey.make(timestamp: m.timestamp, seq: ingestSeq), kind: m.kind,
-            text: m.revoked ? nil : m.text,
+            text: m.revoked ? nil : (m.kind == .system ? try systemText(db, m, sender: sender) : m.text),
             quotedId: m.quoted?.id, quotedSenderJid: m.quoted?.senderJid.map(canon), quotedKind: m.quoted?.kind, quotedSnippet: m.quoted?.snippet,
             status: incomingStatus ?? (m.fromMe ? .sent : .delivered),
             editedAt: m.editedAt, revoked: m.revoked, isForwarded: m.isForwarded, typeName: m.typeName, pushName: m.pushName,
