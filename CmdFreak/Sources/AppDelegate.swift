@@ -1,10 +1,11 @@
 import AppKit
+import Sparkle
 import WAKit
 import WAMacUI
 
 @main
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     private var client: WAClient!
     private var mainWindow: MainWindowController?
     private var onboarding: OnboardingWindowController?
@@ -16,6 +17,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var liveSeedTask: Task<Void, Never>?
     /// Debug: onboarding forced by `CMDFREAK_ONBOARDING`, so no bridge calls are made.
     private var inertOnboarding: OnboardingModel.Method?
+    /// Checks the appcast daily. Never started in Debug, so dev builds are not offered releases.
+    private let updater: SPUStandardUpdaterController = {
+        #if DEBUG
+        SPUStandardUpdaterController(startingUpdater: false, updaterDelegate: nil, userDriverDelegate: nil)
+        #else
+        SPUStandardUpdaterController(startingUpdater: true, updaterDelegate: nil, userDriverDelegate: nil)
+        #endif
+    }()
 
     static func main() {
         let app = NSApplication.shared
@@ -126,6 +135,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     // MARK: Actions
+
+    @objc func checkForUpdates(_ sender: Any?) {
+        updater.checkForUpdates(sender)
+    }
+
+    func validateMenuItem(_ item: NSMenuItem) -> Bool {
+        guard item.action == #selector(checkForUpdates(_:)) else { return true }
+        return updater.updater.canCheckForUpdates
+    }
 
     @objc func logOut(_ sender: Any?) {
         let alert = NSAlert()

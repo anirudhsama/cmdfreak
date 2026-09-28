@@ -1,0 +1,175 @@
+name: Release
+
+run-name: "CmdFreak ${{ inputs.version }} #${{ github.run_number }}"
+
+# Manually triggered from the Actions tab. Publishes vX.Y.Z with a DMG (manual installs), a zip
+# (what Sparkle installs) and appcast.xml, which the app reads through releases/latest/download.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version, e.g. 0.2.0"
+        type: string
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  SIGNING_IDENTITY: CmdFreak Self-Signed
+
+jobs:
+  release:
+    runs-on: macos-26
+    env:
+      VERSION: ${{ inputs.version }}
+      TAG: v${{ inputs.version }}
+      # CFBundleVersion, which Sparkle compares. Monotonic across runs.
+      BUILD_NUMBER: ${{ github.run_number }}
+      DERIVED_DATA: ${{ github.workspace }}/build/DerivedData
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # Tags and history, for the commit list in the release notes.
+          fetch-depth: 0
+
+      - name: Validate version
+        run: |
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::version must be MAJOR.MINOR.PATCH, got '$VERSION'"
+            exit 1
+          fi
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "::error::$TAG already exists"
+            exit 1
+          fi
+
+      - name: Select Xcode
+        run: |
+          XCODE_PATH="$(ls -d /Applications/Xcode_*.app | sort -V | tail -n1)"
+          echo "Using $XCODE_PATH"
+          echo "DEVELOPER_DIR=$XCODE_PATH/Contents/Developer" >> "$GITHUB_ENV"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+
+      - name: Build wa-bridge
+        # Before xcodebuild, which resolves the WACoreFFI package (and its xcframework) up front.
+        run: ./scripts/build-bridge.sh
+
+      - name: Generate Xcode project
+        run: |
+          brew install xcodegen
+          xcodegen generate
+
+      # The same self-signed identity on every release: Sparkle and macOS both key trust on it.
+      - name: Import signing certificate
+        env:
+          P12_BASE64: ${{ secrets.SIGNING_P12_BASE64 }}
+          P12_PASSWORD: ${{ secrets.SIGNING_P12_PASSWORD }}
+        run: |
+          KEYCHAIN="$RUNNER_TEMP/signing.keychain-db"
+          KPW="$(openssl rand -base64 24)"
+          echo "$P12_BASE64" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p "$KPW" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KPW" "$KEYCHAIN"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" -P "$P12_PASSWORD" -A -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KPW" "$KEYCHAIN" >/dev/null
+          security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | sed 's/"//g')
+          rm -f "$RUNNER_TEMP/cert.p12"
+
+      - name: Build app
+        run: |
+          xcodebuild -project CmdFreak.xcodeproj -scheme CmdFreak -configuration Release \
+            -derivedDataPath "$DERIVED_DATA" \
+            CMDFREAK_SIGN_IDENTITY="$SIGNING_IDENTITY" \
+            MARKETING_VERSION="$VERSION" CURRENT_PROJECT_VERSION="$BUILD_NUMBER" \
+            build
+          APP="$DERIVED_DATA/Build/Products/Release/CmdFreak.app"
+          if [ -z "$(/usr/libexec/PlistBuddy -c 'Print :SUPublicEDKey' "$APP/Contents/Info.plist")" ]; then
+            echo "::error::SPARKLE_PUBLIC_KEY is empty in project.yml; run scripts/setup-release-signing.sh"
+            exit 1
+          fi
+          codesign --verify --deep --strict "$APP"
+          # Without it the self-signed app cannot load Sparkle.framework and dies at launch.
+          if ! codesign -d --entitlements - --xml "$APP" 2>/dev/null | grep -q disable-library-validation; then
+            echo "::error::app is missing com.apple.security.cs.disable-library-validation"
+            exit 1
+          fi
+          codesign -dv "$APP" 2>&1 | grep -E '^(Authority|Runtime|Identifier)'
+          echo "APP=$APP" >> "$GITHUB_ENV"
+
+      - name: Package DMG and zip
+        run: |
+          mkdir -p dist
+          STAGE="$(mktemp -d)"
+          cp -R "$APP" "$STAGE/"
+          ln -s /Applications "$STAGE/Applications"
+          diskutil image create from "$STAGE" --format UDZO --volumeName CmdFreak "dist/CmdFreak-$VERSION.dmg"
+          # ditto keeps symlinks and the code signature intact; plain zip breaks the seal.
+          ditto -c -k --keepParent --sequesterRsrc "$APP" "dist/CmdFreak-$VERSION.zip"
+
+      - name: Sign update for Sparkle
+        env:
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+        run: |
+          SIGN_UPDATE="$DERIVED_DATA/SourcePackages/artifacts/sparkle/Sparkle/bin/sign_update"
+          # Prints `sparkle:edSignature="…" length="…"`.
+          OUT="$(printf '%s' "$SPARKLE_PRIVATE_KEY" | "$SIGN_UPDATE" --ed-key-file - "dist/CmdFreak-$VERSION.zip")"
+          ED_SIGNATURE="$(sed -n 's/.*edSignature="\([^"]*\)".*/\1/p' <<< "$OUT")"
+          ED_LENGTH="$(sed -n 's/.*length="\([0-9]*\)".*/\1/p' <<< "$OUT")"
+          if [ -z "$ED_SIGNATURE" ] || [ -z "$ED_LENGTH" ]; then
+            echo "::error::sign_update produced no signature"
+            exit 1
+          fi
+          echo "ED_SIGNATURE=$ED_SIGNATURE" >> "$GITHUB_ENV"
+          echo "ED_LENGTH=$ED_LENGTH" >> "$GITHUB_ENV"
+
+      - name: Compose release notes and appcast
+        run: |
+          # Commit subjects since the previous release tag (all history for the first release).
+          BASE="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY"
+          PREV="$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null || true)"
+          {
+            git log --no-merges --format='- %s' ${PREV:+"$PREV..HEAD"}
+            if [ -n "$PREV" ]; then printf '\n[Full changelog](%s/compare/%s...%s)\n' "$BASE" "$PREV" "$TAG"; fi
+          } > "$RUNNER_TEMP/notes.md"
+          # Sparkle shows <description> as HTML; GitHub renders the same Markdown the release page shows.
+          gh api markdown -f mode=gfm -f context="$GITHUB_REPOSITORY" \
+            -F text=@"$RUNNER_TEMP/notes.md" > "$RUNNER_TEMP/notes.html"
+          NOTES_HTML="$(sed 's/]]>/]]\&gt;/g' "$RUNNER_TEMP/notes.html")"
+          cat > dist/appcast.xml <<EOF
+          <?xml version="1.0" encoding="utf-8"?>
+          <rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
+            <channel>
+              <title>CmdFreak</title>
+              <item>
+                <title>CmdFreak $VERSION</title>
+                <pubDate>$(LC_ALL=C date -u '+%a, %d %b %Y %H:%M:%S +0000')</pubDate>
+                <sparkle:version>$BUILD_NUMBER</sparkle:version>
+                <sparkle:shortVersionString>$VERSION</sparkle:shortVersionString>
+                <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
+                <sparkle:fullReleaseNotesLink>$BASE/releases/tag/$TAG</sparkle:fullReleaseNotesLink>
+                <description><![CDATA[$NOTES_HTML]]></description>
+                <enclosure url="$BASE/releases/download/$TAG/CmdFreak-$VERSION.zip" type="application/octet-stream" length="$ED_LENGTH" sparkle:edSignature="$ED_SIGNATURE"/>
+              </item>
+            </channel>
+          </rss>
+          EOF
+          xmllint --noout dist/appcast.xml
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: CmdFreak-${{ inputs.version }}
+          path: dist/
+
+      - name: Publish GitHub release
+        run: |
+          gh release create "$TAG" \
+            "dist/CmdFreak-$VERSION.dmg" "dist/CmdFreak-$VERSION.zip" dist/appcast.xml \
+            --target "$GITHUB_SHA" \
+            --title "CmdFreak $VERSION" \
+            --notes-file "$RUNNER_TEMP/notes.md"

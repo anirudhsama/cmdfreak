@@ -4,7 +4,7 @@ import WAKit
 
 /// The main menu, built in code. Every shell shortcut is an item here so it shows in the menu
 /// bar and in Help search. Actions target nil and resolve through the responder chain to
-/// `MainWindowController` (chat and navigation) or `AppDelegate` (log out).
+/// `MainWindowController` (chat and navigation) or `AppDelegate` (updates, log out).
 @MainActor
 enum MainMenu {
     static func build() -> NSMenu {
@@ -27,6 +27,7 @@ enum MainMenu {
         let name = ProcessInfo.processInfo.processName
         let menu = NSMenu(title: name)
         menu.addItem(item("About \(name)", #selector(NSApplication.orderFrontStandardAboutPanel(_:))))
+        menu.addItem(item("Check for Updates…", #selector(AppDelegate.checkForUpdates(_:))))
         menu.addItem(.separator())
         menu.addItem(item("Log Out…", #selector(AppDelegate.logOut(_:))))
         menu.addItem(.separator())

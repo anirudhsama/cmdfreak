@@ -28,13 +28,7 @@
           "fill-specializations": [
             {
               "value": {
-                "solid": "display-p3:0.20000,0.74000,0.42000,1.00000"
-              }
-            },
-            {
-              "appearance": "dark",
-              "value": {
-                "solid": "display-p3:0.04500,0.16500,0.10500,1.00000"
+                "solid": "display-p3:1.00000,1.00000,1.00000,1.00000"
               }
             }
           ],
@@ -53,35 +47,6 @@
       "translucency": {
         "enabled": false,
         "value": 0
-      }
-    },
-    {
-      "blend-mode": "normal",
-      "blur-material": null,
-      "hidden": false,
-      "layers": [
-        {
-          "fill-specializations": [
-            {
-              "value": {
-                "solid": "display-p3:1.00000,1.00000,1.00000,1.00000"
-              }
-            }
-          ],
-          "image-name": "key.svg",
-          "name": "key",
-          "opacity": 1
-        }
-      ],
-      "lighting": "individual",
-      "shadow": {
-        "kind": "neutral",
-        "opacity": 0.5
-      },
-      "specular": true,
-      "translucency": {
-        "enabled": true,
-        "value": 0.1
       }
     },
     {
