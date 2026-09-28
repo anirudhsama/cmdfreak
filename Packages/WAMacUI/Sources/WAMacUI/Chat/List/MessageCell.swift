@@ -148,13 +148,14 @@ final class MessageCell: NSTableCellView {
             l.masksToBounds = true
             l.magnificationFilter = .linear
             l.minificationFilter = .trilinear
+            l.actions = Self.noImplicitAnimations
             self.layer?.insertSublayer(l, at: 0)
             mediaLayer = l
             return l
         }()
         layer.isHidden = false
         layer.frame = frame
-        layer.cornerRadius = isSticker ? 0 : M.mediaRadius - 1
+        layer.cornerRadius = isSticker ? 0 : M.mediaRadius
         layer.contentsGravity = isSticker ? .resizeAspect : .resizeAspectFill
         layer.backgroundColor = isSticker ? nil : C.quoteBackground.cgColor
         layer.contentsScale = window?.backingScaleFactor ?? 2
@@ -248,14 +249,21 @@ final class MessageCell: NSTableCellView {
         if playerPool.count < 4 { playerPool.append(player) }
     }
 
+    /// Media sublayers are not view-backed, so Core Animation would animate every change: a reused
+    /// cell's image slid from the previous message's frame and cross-faded from its picture.
+    private static let noImplicitAnimations: [String: any CAAction] = Dictionary(uniqueKeysWithValues: [
+        "contents", "bounds", "position", "frame", "hidden", "filters", "cornerRadius", "backgroundColor", "contentsGravity",
+    ].map { ($0, NSNull()) })
+
     private func startPlayer(url: URL, in frame: CGRect) {
         guard playerLayer == nil else { return }
         let player = Self.dequeuePlayer()
         let pl = AVPlayerLayer(player: player)
         pl.videoGravity = .resizeAspectFill
         pl.frame = frame
-        pl.cornerRadius = M.mediaRadius - 1
+        pl.cornerRadius = M.mediaRadius
         pl.masksToBounds = true
+        pl.actions = Self.noImplicitAnimations
         layer?.insertSublayer(pl, above: mediaLayer)
         playerLayer = pl
         queuePlayer = player

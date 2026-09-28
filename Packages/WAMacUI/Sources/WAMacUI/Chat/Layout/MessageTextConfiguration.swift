@@ -85,7 +85,8 @@ enum MessageTextConfiguration {
         static let mediaInset: CGFloat = 3
         static let mediaMinWidth: CGFloat = 140
         static let mediaMaxHeight: CGFloat = 340
-        static let mediaRadius: CGFloat = 10
+        /// Concentric with the bubble: its radius less the inset.
+        static let mediaRadius: CGFloat = bubbleRadius - mediaInset
         static let stickerSize: CGFloat = 160
         static let cardWidth: CGFloat = 290
         static let documentHeight: CGFloat = 56
