@@ -7,8 +7,8 @@ import os
 /// swaps the loaded window. Mount it as the split view's content item and call `show(chatJid:)`
 /// when the selection changes, or await `open(chatJid:)` to preload before showing it.
 ///
-/// Sole owner of `WAClient` focus: it reports the shown chat and its window's key state, and marks
-/// the chat read (`openChat`) whenever it is shown in, or its window becomes, the key window.
+/// Sole owner of `WAClient` focus: it reports the shown chat, and marks it read (`openChat`) once
+/// its first frame is on screen in the key window and it has stayed there for `readSettleDelay`.
 @MainActor
 public final class ChatViewController: NSViewController {
     public let client: WAClient
@@ -25,6 +25,15 @@ public final class ChatViewController: NSViewController {
     private var lastComposingSent: Date = .distantPast
     private var pausedTimer: Timer?
     private var keyObservers: [NSObjectProtocol] = []
+    /// How long a chat must stay on screen in the key window before it is marked read, so flicking
+    /// through chats does not read them.
+    var readSettleDelay: Duration = .seconds(1)
+    private var readTask: Task<Void, Never>?
+    /// The chat whose first frame is on screen. Its unread divider was placed from the unread count
+    /// read while loading, so marking it read before then would lose the divider.
+    private var displayedChatJid: String?
+    /// Between `viewDidAppear` and `viewWillDisappear`; focus is only reported while on screen.
+    private var isOnScreen = false
     /// The attachment tray, in order. Metadata is computed as soon as a file is staged.
     private var staged: [StagedAttachment] = []
 
@@ -89,13 +98,16 @@ public final class ChatViewController: NSViewController {
 
     public override func viewDidAppear() {
         super.viewDidAppear()
+        isOnScreen = true
         observeWindowKey()
-        reportFocus(markRead: false)
+        reportFocus()
     }
 
     public override func viewWillDisappear() {
         super.viewWillDisappear()
+        isOnScreen = false
         stopObservingWindowKey()
+        readTask?.cancel()
         client.setFocus(chatJid: nil, windowIsKey: false)
     }
 
@@ -104,7 +116,7 @@ public final class ChatViewController: NSViewController {
         guard let window = view.window else { return }
         for name in [NSWindow.didBecomeKeyNotification, NSWindow.didResignKeyNotification] {
             keyObservers.append(NotificationCenter.default.addObserver(forName: name, object: window, queue: .main) { [weak self] _ in
-                MainActor.assumeIsolated { self?.reportFocus(markRead: true) }
+                MainActor.assumeIsolated { self?.reportFocus() }
             })
         }
     }
@@ -114,14 +126,20 @@ public final class ChatViewController: NSViewController {
         keyObservers = []
     }
 
-    /// Reports the shown chat and whether its window is key. With `markRead`, a chat in a key
-    /// window is opened instead: WAKit clears its unread state and sends read receipts.
-    private func reportFocus(markRead: Bool) {
-        let windowIsKey = view.window?.isKeyWindow ?? false
-        if markRead, windowIsKey, let chatJid {
-            Task { [client] in await client.openChat(chatJid) }
-        } else {
-            client.setFocus(chatJid: chatJid, windowIsKey: windowIsKey)
+    /// Reports the shown chat as not yet being read, then, if its first frame is on screen in the
+    /// key window, opens it after `readSettleDelay`: WAKit clears its unread state, sends read
+    /// receipts, and from then on reads incoming messages there. A chat switch, the window
+    /// resigning key, or the view disappearing cancels a pending read.
+    private func reportFocus() {
+        readTask?.cancel()
+        readTask = nil
+        guard isOnScreen else { return }
+        client.setFocus(chatJid: chatJid, windowIsKey: false)
+        guard view.window?.isKeyWindow == true, let chatJid, chatJid == displayedChatJid else { return }
+        readTask = Task { [weak self, client, readSettleDelay] in
+            try? await Task.sleep(for: readSettleDelay)
+            guard !Task.isCancelled, let self, isOnScreen, self.chatJid == chatJid, view.window?.isKeyWindow == true else { return }
+            await client.openChat(chatJid)
         }
     }
 
@@ -138,7 +156,7 @@ public final class ChatViewController: NSViewController {
     public func show(chatJid: String?) {
         guard chatJid != self.chatJid else {
             // Re-selecting the open chat reads it again (e.g. after Mark as Unread).
-            if chatJid != nil { reportFocus(markRead: true) }
+            if chatJid != nil { reportFocus() }
             return
         }
         if let old = self.chatJid { drafts[old] = compose.text }
@@ -149,7 +167,8 @@ public final class ChatViewController: NSViewController {
         compose.setBar(nil)
         compose.text = chatJid.flatMap { drafts[$0] } ?? ""
         pausedTimer?.invalidate()
-        reportFocus(markRead: true)
+        displayedChatJid = nil
+        reportFocus()
 
         guard let chatJid else {
             list.clear()
@@ -165,6 +184,7 @@ public final class ChatViewController: NSViewController {
         if let prepared = preloader.takePrepared(chatJid: chatJid, width: width) {
             list.show(prepared, changes: changes)
             Signposts.poi.endInterval("OpenChat", state, "prepared")
+            didDisplay(chatJid)
             return
         }
         list.clear()
@@ -177,11 +197,17 @@ public final class ChatViewController: NSViewController {
                 _ = self.preloader.takePrepared(chatJid: chatJid, width: width)
                 self.list.show(prepared, changes: changes)
                 Signposts.poi.endInterval("OpenChat", state, "loaded")
+                self.didDisplay(chatJid)
             } catch {
                 Signposts.log.error("open chat failed: \(error)")
                 Signposts.poi.endInterval("OpenChat", state, "failed")
             }
         }
+    }
+
+    private func didDisplay(_ chatJid: String) {
+        displayedChatJid = chatJid
+        reportFocus()
     }
 
     /// Awaitable variant for shells that want a guaranteed synchronous first frame.
