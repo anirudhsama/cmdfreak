@@ -67,6 +67,8 @@ final class MessageListController: NSViewController {
         case older
         case newer
         case jump(String)
+        /// The newest page, pinned to the bottom (after a send while paged away from it).
+        case latest
     }
 
     static let bottomTolerance: CGFloat = 8
@@ -240,11 +242,12 @@ final class MessageListController: NSViewController {
 
     private func run(_ op: ListOp, gen: Int) async {
         switch op {
-        case .change(.reload): await runReload(gen: gen)
+        case .change(.reload): await runReload(gen: gen, toLatest: false)
         case .change(let change): await runChange(change, gen: gen)
         case .older: await runLoadOlder(gen: gen)
         case .newer: await runLoadNewer(gen: gen)
         case .jump(let id): await runJump(to: id, gen: gen)
+        case .latest: await runReload(gen: gen, toLatest: true)
         }
     }
 
@@ -396,12 +399,13 @@ final class MessageListController: NSViewController {
 
     /// `.reload`: re-fetch the window around what the user is looking at (or the newest page when
     /// pinned to the bottom), plan it off-main, then swap it in keeping the visible position.
-    private func runReload(gen: Int) async {
+    /// `toLatest`: always the newest page, ending at the bottom.
+    private func runReload(gen: Int, toLatest: Bool) async {
         guard let loader else { return }
         let state = Signposts.poi.beginInterval("ReloadWindow", id: Signposts.poi.makeSignpostID())
         defer { Signposts.poi.endInterval("ReloadWindow", state) }
         let limit = min(max(rows.messages.count, ChatOpenPreloader.initialPageSize), 300)
-        let anchor = isAtBottom ? nil : topVisibleAnchor()
+        let anchor = toLatest || isAtBottom ? nil : topVisibleAnchor()
         let page: MessagePage
         do {
             if let anchor, let around = try await loader.around(messageId: anchor.id, limit: limit) {
@@ -420,7 +424,7 @@ final class MessageListController: NSViewController {
         guard generation == gen else { return }
 
         // Re-sample: the user may have scrolled while the page loaded.
-        let atBottom = isAtBottom
+        let atBottom = toLatest || isAtBottom
         let liveAnchor = atBottom ? nil : topVisibleAnchor()
         let gap = bottomGap
         rows = next
@@ -495,6 +499,16 @@ final class MessageListController: NSViewController {
     }
 
     var isAtBottom: Bool { bottomGap <= Self.bottomTolerance }
+
+    /// After a send: bring the newest message into view, so the one just sent shows up. Loads the
+    /// newest page first when the loaded window has been paged away from it.
+    func followLatest() {
+        if rows.hasNewer {
+            ops?.yield(.latest)
+        } else {
+            scrollToBottom()
+        }
+    }
 
     func scrollToBottom() {
         view.layoutSubtreeIfNeeded()

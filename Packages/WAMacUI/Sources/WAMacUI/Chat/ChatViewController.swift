@@ -309,6 +309,7 @@ public final class ChatViewController: NSViewController {
                 Signposts.poi.endInterval("Send", state, "edit")
             }
         } else if !staged.isEmpty {
+            list.followLatest()
             let items = staged
             let reply = replyTarget
             staged = []
@@ -327,6 +328,7 @@ public final class ChatViewController: NSViewController {
                 Signposts.poi.endInterval("Send", state, "media")
             }
         } else {
+            list.followLatest()
             let reply = replyTarget
             replyTarget = nil
             compose.clearAfterSend()

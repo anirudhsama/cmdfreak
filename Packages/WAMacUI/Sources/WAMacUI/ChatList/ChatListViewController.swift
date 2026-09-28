@@ -15,6 +15,8 @@ final class ChatListViewController: NSViewController, NSCollectionViewDelegate {
     var onSelect: ((String?) -> Void)?
     /// Printable text typed while the list has keyboard focus.
     var onTypeAhead: ((String) -> Void)?
+    /// Tab in the list, or a click on a row: the open chat's composer should take focus.
+    var onFocusCompose: (() -> Void)?
 
     var filter: ChatFilter {
         didSet { if filter != oldValue { startObserving() } }
@@ -74,6 +76,11 @@ final class ChatListViewController: NSViewController, NSCollectionViewDelegate {
         collectionView.delegate = self
         collectionView.register(ChatRowItem.self, forItemWithIdentifier: ChatRowItem.identifier)
         collectionView.onTypeAhead = { [weak self] text in self?.onTypeAhead?(text) }
+        collectionView.onMove = { [weak self] offset in self?.selectAdjacent(offset: offset) }
+        collectionView.onFocusCompose = { [weak self] in
+            guard let self, selectedJid != nil else { return }
+            onFocusCompose?()
+        }
         collectionView.onFocusChange = { [weak self] in self?.updateEmphasis() }
 
         scrollView.documentView = collectionView
@@ -177,15 +184,27 @@ final class ChatListViewController: NSViewController, NSCollectionViewDelegate {
         return visible.intersects(frame)
     }
 
+    /// Scrolls the least needed to show the selected row in full below the toolbar and search
+    /// field (`scrollToItems` ignores the top inset and can leave it under them).
     private func revealSelectedRow() {
-        guard let selectedJid, let path = indexPath(for: selectedJid) else { return }
-        if path.item == 0 {
-            // All the way up, so the section's top inset shows too.
-            scrollView.contentView.scroll(to: NSPoint(x: 0, y: -scrollView.contentView.contentInsets.top))
-            scrollView.reflectScrolledClipView(scrollView.contentView)
+        guard let selectedJid, let path = indexPath(for: selectedJid),
+              let frame = collectionView.layoutAttributesForItem(at: path)?.frame else { return }
+        let clip = scrollView.contentView
+        let inset = scrollView.contentInsets.top
+        let top = clip.bounds.minY + inset
+        var y: CGFloat
+        if frame.minY < top {
+            // The first row goes all the way up, so the section's top inset shows too.
+            y = path.item == 0 ? -inset : frame.minY - inset
+        } else if frame.maxY > clip.bounds.maxY {
+            y = frame.maxY - clip.bounds.height
         } else {
-            collectionView.scrollToItems(at: [path], scrollPosition: .nearestHorizontalEdge)
+            return
         }
+        y = max(-inset, y)
+        guard abs(y - clip.bounds.minY) > 0.5 else { return }
+        clip.scroll(to: NSPoint(x: 0, y: y))
+        scrollView.reflectScrolledClipView(clip)
     }
 
     // MARK: Selection
@@ -209,7 +228,10 @@ final class ChatListViewController: NSViewController, NSCollectionViewDelegate {
         }
         let target: Set<IndexPath> = [path]
         if collectionView.selectionIndexPaths != target { collectionView.selectionIndexPaths = target }
-        if scroll { collectionView.scrollToItems(at: target, scrollPosition: .nearestHorizontalEdge) }
+        if scroll {
+            collectionView.layoutSubtreeIfNeeded()
+            revealSelectedRow()
+        }
     }
 
     func selectAdjacent(offset: Int) {
@@ -296,11 +318,22 @@ final class ChatListViewController: NSViewController, NSCollectionViewDelegate {
 }
 
 /// Collection view that forwards printable typing to the compose seam and reports focus changes.
+/// ↑/↓ move the open chat; Tab and clicks hand focus to the composer.
 final class ChatListCollectionView: NSCollectionView {
     var onTypeAhead: ((String) -> Void)?
+    var onMove: ((Int) -> Void)?
+    var onFocusCompose: (() -> Void)?
     var onFocusChange: (() -> Void)?
 
     override func keyDown(with event: NSEvent) {
+        if event.modifierFlags.isDisjoint(with: [.command, .control, .option, .shift]) {
+            switch event.keyCode {
+            case 126: onMove?(-1); return  // ↑
+            case 125: onMove?(1); return  // ↓
+            case 48: onFocusCompose?(); return  // Tab
+            default: break
+            }
+        }
         if let text = Self.typedText(event) {
             onTypeAhead?(text)
             return
@@ -314,6 +347,16 @@ final class ChatListCollectionView: NSCollectionView {
               text.unicodeScalars.allSatisfy({ !CharacterSet.controlCharacters.contains($0) && $0.value < 0xF700 })
         else { return nil }
         return text
+    }
+
+    /// A click opens the chat (via selection) and moves on to its composer, as WhatsApp does;
+    /// after the collection view's own handling, so it doesn't take focus back.
+    override func mouseDown(with event: NSEvent) {
+        super.mouseDown(with: event)
+        guard event.modifierFlags.isDisjoint(with: [.command, .shift]), event.clickCount == 1 else { return }
+        let point = convert(event.locationInWindow, from: nil)
+        guard indexPathForItem(at: point) != nil else { return }
+        DispatchQueue.main.async { [weak self] in self?.onFocusCompose?() }
     }
 
     override func becomeFirstResponder() -> Bool {

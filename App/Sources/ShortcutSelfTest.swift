@@ -161,6 +161,21 @@ enum ShortcutSelfTest {
         await view("h", 4, [])
         await view(" ", 49, [])
         check("printable keys and Space in the list go to compose", sunk == "h ")
+        main.chatContainer.composeTextSink = nil
+
+        // Focus: ↑/↓ in the list move the open chat, Tab hands off to its composer, Esc comes back.
+        let listJids = main.visibleChatJids(limit: 5)
+        main.selectChat(at: 1)
+        main.focusChatList(nil)
+        await view(key(NSDownArrowFunctionKey), 125, [.numericPad, .function])
+        check("↓ in the list opens the next chat", main.selectedChatJid == listJids[2])
+        await view(key(NSUpArrowFunctionKey), 126, [.numericPad, .function])
+        check("↑ in the list opens the previous chat", main.selectedChatJid == listJids[1])
+        check("the list keeps focus while ↑/↓ move", main.debugFirstResponder.contains("ChatListCollectionView"))
+        await view("\t", 48, [])
+        check("Tab in the list focuses the composer", main.debugFirstResponder.contains("ComposeTextView"))
+        await menu("\u{1b}", 53, [])
+        check("Esc in the composer focuses the list", main.debugFirstResponder.contains("ChatListCollectionView"))
 
         // Disabled items.
         check("⌘F present and disabled", menuItem("f", [.command]) != nil && !isEnabled("f", [.command]))
