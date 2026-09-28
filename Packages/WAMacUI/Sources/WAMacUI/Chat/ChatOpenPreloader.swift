@@ -6,7 +6,6 @@ import os
 /// Everything the list needs for a synchronous first frame.
 struct PreparedChat: @unchecked Sendable {
     let chatJid: String
-    let chat: ChatRecord?
     let rows: ChatRows
     /// Plans keyed by message id, computed at `width`.
     let plans: [String: LayoutPlan]
@@ -16,7 +15,7 @@ struct PreparedChat: @unchecked Sendable {
     let peerName: String?
 }
 
-/// Loads the first page and computes layout plans off the main thread. Call `prepare` (or `warm`)
+/// Loads the first page and computes layout plans off the main thread. Call `prepare`
 /// as soon as a chat is about to open; `ChatViewController.show` consumes the result synchronously
 /// through `takePrepared` so the first frame never waits on the database.
 public actor ChatOpenPreloader {
@@ -29,11 +28,6 @@ public actor ChatOpenPreloader {
 
     public init() {}
 
-    /// Fire-and-forget warm-up (e.g. on hover or keyboard focus in the chat list).
-    public nonisolated func warm(chatJid: String, width: CGFloat, client: WAClient) {
-        Task(priority: .userInitiated) { _ = try? await self.prepare(chatJid: chatJid, width: width, client: client) }
-    }
-
     /// Consumes a prepared payload if one exists for this chat and width. Synchronous, main-thread safe.
     nonisolated func takePrepared(chatJid: String, width: CGFloat) -> PreparedChat? {
         ready.withLock { store in
@@ -41,10 +35,6 @@ public actor ChatOpenPreloader {
             store[chatJid] = nil
             return p
         }
-    }
-
-    nonisolated func invalidate(chatJid: String) {
-        ready.withLock { $0[chatJid] = nil }
     }
 
     @discardableResult
@@ -92,6 +82,6 @@ public actor ChatOpenPreloader {
             guard let media = item.media, let thumb = media.jpegThumbnail, !thumb.isEmpty else { continue }
             _ = ThumbnailCache.shared.decodeSync(key: LayoutPlanner.thumbKey(item), source: .data(thumb), maxPixelSize: 320)
         }
-        return PreparedChat(chatJid: chatJid, chat: chat, rows: rows, plans: plans, width: width, ownJid: ownJid, peerName: peerName)
+        return PreparedChat(chatJid: chatJid, rows: rows, plans: plans, width: width, ownJid: ownJid, peerName: peerName)
     }
 }

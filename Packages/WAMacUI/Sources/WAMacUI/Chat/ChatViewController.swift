@@ -5,7 +5,7 @@ import os
 
 /// The chat content area: message list + glass compose. One instance serves every chat; `show`
 /// swaps the loaded window. Mount it as the split view's content item and call `show(chatJid:)`
-/// when the selection changes (call `preloader.warm` earlier when you can, e.g. on hover).
+/// when the selection changes, or await `open(chatJid:)` to preload before showing it.
 @MainActor
 public final class ChatViewController: NSViewController {
     public let client: WAClient
@@ -18,7 +18,6 @@ public final class ChatViewController: NSViewController {
     private let list: MessageListController
     private let compose = ComposeView()
     private let emptyLabel = NSTextField(labelWithString: "Select a chat")
-    private var composeBottom: NSLayoutConstraint!
     private var replyTarget: MessageItem?
     private var editTarget: MessageItem?
     private var drafts: [String: String] = [:]
@@ -58,7 +57,6 @@ public final class ChatViewController: NSViewController {
         root.addSubview(emptyLabel)
 
         root.addSubview(compose)
-        composeBottom = compose.bottomAnchor.constraint(equalTo: root.bottomAnchor)
         NSLayoutConstraint.activate([
             list.view.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             list.view.trailingAnchor.constraint(equalTo: root.trailingAnchor),
@@ -66,7 +64,7 @@ public final class ChatViewController: NSViewController {
             list.view.bottomAnchor.constraint(equalTo: root.bottomAnchor),
             compose.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             compose.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            composeBottom,
+            compose.bottomAnchor.constraint(equalTo: root.bottomAnchor),
             compose.widthAnchor.constraint(lessThanOrEqualToConstant: 900),
             emptyLabel.centerXAnchor.constraint(equalTo: root.centerXAnchor),
             emptyLabel.centerYAnchor.constraint(equalTo: root.centerYAnchor),

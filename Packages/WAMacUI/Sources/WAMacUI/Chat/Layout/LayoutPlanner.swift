@@ -42,7 +42,7 @@ enum LayoutPlanner {
         return LayoutPlan(
             id: item.id, width: ctx.width, rowHeight: pill.maxY + 2, outgoing: false, shape: .system, bubble: pill,
             sender: nil, forwarded: nil, quote: nil, content: .none, text: label, meta: nil, reactions: [],
-            isFailed: false, isPending: false, hasTail: false)
+            isFailed: false, hasTail: false)
     }
 
     // MARK: - Bubble
@@ -141,7 +141,6 @@ enum LayoutPlanner {
                 let kind: LayoutPlan.Media.Kind = m.kind == .image ? .image : (m.kind == .gif ? .gif : .video)
                 content = .media(.init(
                     kind: kind, frame: frame, thumbKey: thumbKey(item), fileKey: fileKey(item),
-                    hasThumbnail: media?.jpegThumbnail?.isEmpty == false,
                     durationText: media?.durationSecs.map(durationText), pixelSize: size))
                 mediaFrame = frame
                 innerWidth = max(innerWidth, frame.width + 2 * M.mediaInset - 2 * M.bubblePaddingH)
@@ -195,7 +194,7 @@ enum LayoutPlanner {
             return LayoutPlan(id: item.id, width: ctx.width, rowHeight: rowH, outgoing: outgoing, shape: .bare, bubble: bubble,
                               sender: nil, forwarded: nil, quote: nil, content: content, text: nil,
                               meta: shift(meta!, dx: bubble.minX + (outgoing ? M.stickerSize - metaW : 0), dy: 0),
-                              reactions: chips, isFailed: m.status == .failed, isPending: m.isPending, hasTail: false)
+                              reactions: chips, isFailed: m.status == .failed, hasTail: false)
         }
 
         if let bodyAttr {
@@ -251,7 +250,7 @@ enum LayoutPlanner {
         }
         if case .media(let md) = content {
             let f = CGRect(x: M.mediaInset, y: md.frame.minY, width: bubbleW - 2 * M.mediaInset, height: md.frame.height)
-            content = .media(.init(kind: md.kind, frame: f, thumbKey: md.thumbKey, fileKey: md.fileKey, hasThumbnail: md.hasThumbnail,
+            content = .media(.init(kind: md.kind, frame: f, thumbKey: md.thumbKey, fileKey: md.fileKey,
                                    durationText: md.durationText, pixelSize: md.pixelSize))
             if var mp = meta, mp.overlay {
                 mp = .init(frame: CGRect(x: f.maxX - metaW - 10, y: f.maxY - M.metaHeight - 6, width: metaW, height: M.metaHeight),
@@ -273,7 +272,7 @@ enum LayoutPlanner {
             content: shift(content, dx: bubble.minX, dy: bubble.minY),
             text: text.map { shift($0, dx: bubble.minX, dy: bubble.minY) },
             meta: meta.map { shift($0, dx: bubble.minX, dy: bubble.minY) },
-            reactions: chipPlans, isFailed: m.status == .failed, isPending: m.isPending,
+            reactions: chipPlans, isFailed: m.status == .failed,
             hasTail: ctx.isLastInGroup)
     }
 
@@ -448,7 +447,7 @@ enum LayoutPlanner {
         case .none: return .none
         case .media(let m):
             return .media(.init(kind: m.kind, frame: m.frame.offsetBy(dx: dx, dy: dy), thumbKey: m.thumbKey, fileKey: m.fileKey,
-                                hasThumbnail: m.hasThumbnail, durationText: m.durationText, pixelSize: m.pixelSize))
+                                durationText: m.durationText, pixelSize: m.pixelSize))
         case .sticker(let f, let fk, let tk, let a):
             return .sticker(frame: f.offsetBy(dx: dx, dy: dy), fileKey: fk, thumbKey: tk, animated: a)
         case .document(let d):

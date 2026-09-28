@@ -33,7 +33,6 @@ struct LayoutPlan: @unchecked Sendable {
         /// `ThumbnailCache` key for the embedded JPEG thumbnail, and for the full file when local.
         let thumbKey: String
         let fileKey: String
-        let hasThumbnail: Bool
         let durationText: String?
         let pixelSize: Int
     }
@@ -116,7 +115,6 @@ struct LayoutPlan: @unchecked Sendable {
     let meta: Meta?
     let reactions: [Chip]
     let isFailed: Bool
-    let isPending: Bool
     /// Tail on the last message of a run.
     let hasTail: Bool
 }

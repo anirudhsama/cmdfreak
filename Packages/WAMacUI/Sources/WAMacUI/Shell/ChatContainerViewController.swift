@@ -76,11 +76,6 @@ public final class ChatContainerViewController: NSViewController {
         emptyState.isHidden = chatJid != nil
     }
 
-    /// Warms layout for a chat the user is likely to open next (hover, keyboard focus).
-    public func prewarm(chatJid: String) {
-        ChatOpenPreloader.shared.warm(chatJid: chatJid, width: chatView.view.bounds.width, client: client)
-    }
-
     /// Forwarded from the chat list when the user starts typing while it has focus.
     public func beginComposing(with text: String) {
         if let composeTextSink { return composeTextSink(text) }

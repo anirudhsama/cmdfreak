@@ -6,9 +6,7 @@ enum MessageTextConfiguration {
     // MARK: Fonts
 
     nonisolated(unsafe) static let body = NSFont.systemFont(ofSize: 14)
-    nonisolated(unsafe) static let bodyBold = NSFont.boldSystemFont(ofSize: 14)
     nonisolated(unsafe) static let bodyItalic: NSFont = NSFontManager.shared.convert(body, toHaveTrait: .italicFontMask)
-    nonisolated(unsafe) static let bodyBoldItalic: NSFont = NSFontManager.shared.convert(bodyBold, toHaveTrait: .italicFontMask)
     nonisolated(unsafe) static let mono = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
     nonisolated(unsafe) static let bigEmoji = NSFont.systemFont(ofSize: 36)
     nonisolated(unsafe) static let sender = NSFont.systemFont(ofSize: 12, weight: .semibold)

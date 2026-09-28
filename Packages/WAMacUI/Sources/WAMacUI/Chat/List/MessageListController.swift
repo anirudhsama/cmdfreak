@@ -54,10 +54,7 @@ final class MessageListController: NSViewController {
     private var progressTask: Task<Void, Never>?
     private var bottomInset: CGFloat = 0
     private var needsInitialScroll = false
-    private var bottomGapBeforeLayout: CGFloat = 0
     private var wasAtBottom = true
-    private var pendingFlashId: String?
-    private var highlightedRow: Int?
     private var previewItems: [PreviewItem] = []
     private var previewIndex = 0
     private var openedPreviewPanel = false
@@ -203,7 +200,6 @@ final class MessageListController: NSViewController {
         plans = abs(prepared.width - width) < 0.5 ? prepared.plans : [:]
         wasAtBottom = true
         needsInitialScroll = true
-        highlightedRow = nil
         tableView.reloadData()
         view.layoutSubtreeIfNeeded()
         scrollToBottom()

@@ -24,6 +24,4 @@ final class LayoutPlanCache: @unchecked Sendable {
         cache.setObject(Box(plan), forKey: key)
         return plan
     }
-
-    func removeAll() { cache.removeAllObjects() }
 }

@@ -46,7 +46,6 @@ final class MessageCell: NSTableCellView {
     private var downloadFraction: Double?
     private var audioState: AudioPlaybackController.State?
     private var showsFullImage = false
-    private var mouseDownPoint: NSPoint?
     /// Media chrome (play button, duration, progress) must sit above the media sublayer, which is
     /// below the cell's own drawing; this subview draws it.
     private let overlay = OverlayView()
@@ -689,7 +688,6 @@ final class MessageCell: NSTableCellView {
 
     override func mouseDown(with event: NSEvent) {
         let p = convert(event.locationInWindow, from: nil)
-        mouseDownPoint = p
         guard let plan, let item, let delegate else { return super.mouseDown(with: event) }
         if let q = plan.quote, q.frame.contains(p) {
             delegate.cell(self, didClickQuote: q.targetId)

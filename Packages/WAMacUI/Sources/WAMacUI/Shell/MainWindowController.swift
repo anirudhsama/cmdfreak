@@ -45,7 +45,7 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, N
             .deletingLastPathComponent().appending(path: "quick-search-usage.json"))
 
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 1280, height: 800),
+            contentRect: NSRect(origin: .zero, size: Self.defaultContentSize),
             styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
             backing: .buffered,
             defer: false
@@ -168,7 +168,7 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, N
         window.subtitle = unread > 0 ? "\(unread) unread" : ""
         listTitleView.set(title: window.title, subtitle: window.subtitle)
 
-        guard let item = chatList.selectedItem ?? selectedChatJid.flatMap({ jid in chatList.items.first { $0.id == jid } }) else {
+        guard let item = selectedChatItem else {
             chatHeader.state = nil
             chatHeader.subtitle = ""
             return
