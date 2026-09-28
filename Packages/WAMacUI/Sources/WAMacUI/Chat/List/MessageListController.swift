@@ -821,10 +821,9 @@ final class MessageListController: NSViewController {
             open(item)
             return true
         }
-        if let chars = event.characters, !chars.isEmpty, event.modifierFlags.intersection([.command, .control, .option]).isEmpty,
-           let scalar = chars.unicodeScalars.first, scalar.value >= 0x20, scalar.value != 0x7F {
+        if let text = event.typedText {
             clearSelection()
-            actions?.typeToCompose(chars)
+            actions?.typeToCompose(text)
             return true
         }
         return false

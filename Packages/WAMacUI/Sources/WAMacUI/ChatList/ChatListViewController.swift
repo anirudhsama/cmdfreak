@@ -334,19 +334,11 @@ final class ChatListCollectionView: NSCollectionView {
             default: break
             }
         }
-        if let text = Self.typedText(event) {
+        if let text = event.typedText {
             onTypeAhead?(text)
             return
         }
         super.keyDown(with: event)
-    }
-
-    private static func typedText(_ event: NSEvent) -> String? {
-        guard event.modifierFlags.isDisjoint(with: [.command, .control, .function]),
-              let text = event.characters, !text.isEmpty,
-              text.unicodeScalars.allSatisfy({ !CharacterSet.controlCharacters.contains($0) && $0.value < 0xF700 })
-        else { return nil }
-        return text
     }
 
     /// A click opens the chat (via selection) and moves on to its composer, as WhatsApp does;
