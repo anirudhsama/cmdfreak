@@ -1,5 +1,6 @@
 import AppKit
 import WAMacUI
+import WAKit
 
 /// The main menu, built in code. Every shell shortcut is an item here so it shows in the menu
 /// bar and in Help search. Actions target nil and resolve through the responder chain to
@@ -145,7 +146,7 @@ enum MainMenu {
 
     private static func help() -> NSMenu {
         let menu = NSMenu(title: "Help")
-        menu.addItem(item("CmdFreak Help", #selector(NSApplication.showHelp(_:)), "?"))
+        menu.addItem(item("\(WAKit.appName) Help", #selector(NSApplication.showHelp(_:)), "?"))
         return menu
     }
 

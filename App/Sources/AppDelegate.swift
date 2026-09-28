@@ -32,7 +32,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         do {
             client = try makeClient()
         } catch {
-            presentFatal("CmdFreak could not open its database.", error)
+            presentFatal("\(WAKit.appName) could not open its database.", error)
             return
         }
         NSApp.mainMenu = MainMenu.build()

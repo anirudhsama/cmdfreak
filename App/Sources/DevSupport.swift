@@ -57,7 +57,7 @@ enum DevSupport {
 
     /// A fresh, isolated data directory; never the real Application Support one.
     static func seedDirectory() throws -> URL {
-        let dir = URL.cachesDirectory.appending(path: "CmdFreak/dev-seed", directoryHint: .isDirectory)
+        let dir = WAKit.cacheDirectory.appending(path: "dev-seed", directoryHint: .isDirectory)
         try? FileManager.default.removeItem(at: dir)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir

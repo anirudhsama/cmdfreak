@@ -155,7 +155,7 @@ actor ReadReceiptBatcher {
 
 /// Forwards Rust `log`/`tracing` output to `os.Logger`.
 final class BridgeLogForwarder: LogSink, Sendable {
-    let logger = Logger(subsystem: "net.anirudhs.CmdFreak", category: "bridge")
+    let logger = Logger(subsystem: WAKit.subsystem, category: "bridge")
 
     func onLog(level: LogLevel, target: String, message: String) {
         switch level {
@@ -205,7 +205,7 @@ public final class WAClient: Sendable {
 
     /// `dataDir` holds the Rust session store (`wa-session.sqlite`).
     @MainActor
-    public convenience init(database: AppDatabase, dataDir: URL = URL.applicationSupportDirectory.appending(path: "CmdFreak")) throws {
+    public convenience init(database: AppDatabase, dataDir: URL = WAKit.dataDirectory) throws {
         BridgeLogForwarder.installOnce()
         try self.init(database: database) { sink in try WaBridge(dataDir: dataDir.path, sink: sink) }
     }

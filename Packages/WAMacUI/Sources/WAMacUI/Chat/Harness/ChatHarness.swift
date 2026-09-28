@@ -32,7 +32,7 @@ public enum ChatHarness {
     }
 
     private static func launch(startWithGroup: Bool) throws {
-        let root = URL.applicationSupportDirectory.appending(path: "CmdFreak/harness", directoryHint: .isDirectory)
+        let root = WAKit.dataDirectory.appending(path: "harness", directoryHint: .isDirectory)
         try? FileManager.default.removeItem(at: root)
         try FileManager.default.createDirectory(at: root.appending(path: "remote"), withIntermediateDirectories: true)
         let database = try AppDatabase(url: root.appending(path: "app.sqlite"))

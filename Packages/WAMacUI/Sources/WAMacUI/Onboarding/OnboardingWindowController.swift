@@ -14,7 +14,7 @@ public final class OnboardingWindowController: NSWindowController {
             backing: .buffered,
             defer: false
         )
-        window.title = "Link CmdFreak"
+        window.title = "Link \(WAKit.appName)"
         window.titlebarAppearsTransparent = true
         window.titleVisibility = .hidden
         window.isMovableByWindowBackground = true

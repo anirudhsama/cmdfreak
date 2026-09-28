@@ -18,7 +18,7 @@ public final class AppDatabase: Sendable {
     }
 
     public static var defaultURL: URL {
-        URL.applicationSupportDirectory.appending(path: "CmdFreak/app.sqlite")
+        WAKit.dataDirectory.appending(path: "app.sqlite")
     }
 
     public static func openDefault() throws -> AppDatabase {

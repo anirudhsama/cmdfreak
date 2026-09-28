@@ -3,6 +3,7 @@ import AVFoundation
 import AppKit
 import ImageIO
 import UniformTypeIdentifiers
+import WAKit
 
 /// Generates throwaway media files so every message kind can be exercised without a network.
 enum HarnessMedia {
@@ -72,7 +73,7 @@ enum HarnessMedia {
             let ns = NSGraphicsContext(cgContext: ctx, flipped: false)
             NSGraphicsContext.saveGraphicsState()
             NSGraphicsContext.current = ns
-            NSAttributedString(string: "CmdFreak harness document — page \(p) of \(pages)", attributes: [.font: NSFont.systemFont(ofSize: 20)])
+            NSAttributedString(string: "\(WAKit.appName) harness document — page \(p) of \(pages)", attributes: [.font: NSFont.systemFont(ofSize: 20)])
                 .draw(at: NSPoint(x: 60, y: 700))
             NSGraphicsContext.restoreGraphicsState()
             ctx.endPDFPage()

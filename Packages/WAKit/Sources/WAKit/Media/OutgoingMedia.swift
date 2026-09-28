@@ -50,7 +50,7 @@ public enum OutgoingMediaPreparer {
 
     /// Converted files live here until sent; `WAClient` removes them after a successful send.
     public static var stagingDirectory: URL {
-        URL.cachesDirectory.appending(path: "CmdFreak/outgoing", directoryHint: .isDirectory)
+        WAKit.cacheDirectory.appending(path: "outgoing", directoryHint: .isDirectory)
     }
 
     /// `asDocument` sends media files as-is, as documents.

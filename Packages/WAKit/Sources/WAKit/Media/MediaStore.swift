@@ -34,7 +34,7 @@ public actor MediaStore {
     private var inFlight: [String: Task<URL, any Error>] = [:]
 
     public static var defaultRoot: URL {
-        URL.cachesDirectory.appending(path: "CmdFreak/media", directoryHint: .isDirectory)
+        WAKit.cacheDirectory.appending(path: "media", directoryHint: .isDirectory)
     }
 
     @MainActor

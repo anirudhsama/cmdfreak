@@ -96,7 +96,7 @@ public actor IngestActor {
     public nonisolated let notices: AsyncStream<NoticeEvent>
     private nonisolated let noticesContinuation: AsyncStream<NoticeEvent>.Continuation
 
-    private nonisolated let queue = DispatchSerialQueue(label: "CmdFreak.ingest", qos: .userInitiated)
+    private nonisolated let queue = DispatchSerialQueue(label: "\(WAKit.subsystem).ingest", qos: .userInitiated)
     public nonisolated var unownedExecutor: UnownedSerialExecutor { queue.asUnownedSerialExecutor() }
 
     /// LID → phone-number JID.

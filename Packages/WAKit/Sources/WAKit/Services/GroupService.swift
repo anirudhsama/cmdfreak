@@ -70,7 +70,7 @@ public actor GroupService {
 /// path on the chat. Checks each JID at most once per `recheckInterval`.
 public actor AvatarService {
     public static var defaultRoot: URL {
-        URL.cachesDirectory.appending(path: "CmdFreak/avatars", directoryHint: .isDirectory)
+        WAKit.cacheDirectory.appending(path: "avatars", directoryHint: .isDirectory)
     }
 
     public let root: URL
