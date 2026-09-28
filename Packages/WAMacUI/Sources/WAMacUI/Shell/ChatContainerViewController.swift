@@ -20,9 +20,8 @@ public final class ChatContainerViewController: NSViewController {
     public var composeTextSink: ((String) -> Void)?
 
     private let emptyState = NSHostingView(rootView: EmptyChatView())
-    /// The open chat's avatar and name (iMessage style), centered in the toolbar strip over the
-    /// conversation. An overlay rather than a toolbar item: the stacked header is taller than the
-    /// toolbar gives items.
+    /// The open chat's avatar, name and subtitle in the toolbar strip over the conversation,
+    /// aligned with the message bubbles' leading edge.
     let header = ChatHeaderModel()
     private lazy var headerView = ChatHeaderView(model: header)
 
@@ -61,7 +60,7 @@ public final class ChatContainerViewController: NSViewController {
             band.topAnchor.constraint(equalTo: root.topAnchor),
             band.bottomAnchor.constraint(equalTo: root.safeAreaLayoutGuide.topAnchor),
             headerView.centerYAnchor.constraint(equalTo: band.centerYAnchor),
-            headerView.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 16),
+            headerView.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: MessageTextConfiguration.Metrics.horizontalInset),
             headerView.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -16),
         ])
         headerView.isHidden = true

@@ -2,26 +2,25 @@ import AppKit
 import Observation
 import SwiftUI
 
-/// The open chat's identity, iMessage style: the avatar centered at the top of the thread with the
-/// name in a glass capsule under it. The subtitle (phone or participant count) is the tooltip.
+/// The open chat's identity, set by the window controller.
 @MainActor @Observable
 final class ChatHeaderModel {
     var state: ChatRowState?
     var subtitle = ""
 }
 
-/// The avatar over a glass name capsule.
+/// Avatar, then the name with the subtitle (phone or participant count) under it, leading-aligned
+/// in the toolbar strip over the conversation.
 @MainActor
 final class ChatHeaderView: NSView {
-    static let avatarSize: CGFloat = 26
-    static let capsuleHeight: CGFloat = 20
-    /// Capsule tucks this far under the avatar.
-    static let overlap: CGFloat = 4
+    static let avatarSize: CGFloat = 28
 
     private let model: ChatHeaderModel
     private let avatar: NSHostingView<HeaderAvatar>
-    private let capsule = NSGlassEffectView()
     private let nameField = NSTextField(labelWithString: "")
+    private let subtitleField = NSTextField(labelWithString: "")
+    private var nameCentered: NSLayoutConstraint!
+    private var nameAbove: NSLayoutConstraint!
     private var token: ObservationToken?
 
     init(model: ChatHeaderModel) {
@@ -29,55 +28,50 @@ final class ChatHeaderView: NSView {
         avatar = NSHostingView(rootView: HeaderAvatar(model: model))
         super.init(frame: .zero)
 
-        capsule.cornerRadius = Self.capsuleHeight / 2
-        capsule.style = .regular
-        let content = NSView()
-        capsule.contentView = content
-        nameField.font = .systemFont(ofSize: 11, weight: .semibold)
-        nameField.lineBreakMode = .byTruncatingTail
-        nameField.setContentHuggingPriority(.required, for: .horizontal)
-        nameField.setContentCompressionResistancePriority(.defaultHigh, for: .horizontal)
-        nameField.translatesAutoresizingMaskIntoConstraints = false
-        content.addSubview(nameField)
         avatar.sizingOptions = []
         // It sits in the toolbar strip; don't let SwiftUI pad it out of the safe area.
         avatar.safeAreaRegions = []
-        // Avatar above the capsule, overlapping its top edge.
-        for v in [capsule, avatar] {
+        nameField.font = .systemFont(ofSize: 13, weight: .semibold)
+        subtitleField.font = .systemFont(ofSize: 11)
+        subtitleField.textColor = .secondaryLabelColor
+        for field in [nameField, subtitleField] {
+            field.lineBreakMode = .byTruncatingTail
+            field.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        }
+        for v in [avatar, nameField, subtitleField] {
             v.translatesAutoresizingMaskIntoConstraints = false
             addSubview(v)
         }
+        nameCentered = nameField.centerYAnchor.constraint(equalTo: centerYAnchor)
+        // Same baselines as the chat list's title and subtitle (`ChatTitleView`), so the rows line up.
+        nameAbove = nameField.lastBaselineAnchor.constraint(equalTo: centerYAnchor, constant: -2)
         NSLayoutConstraint.activate([
+            heightAnchor.constraint(equalToConstant: Self.avatarSize),
             avatar.widthAnchor.constraint(equalToConstant: Self.avatarSize),
             avatar.heightAnchor.constraint(equalToConstant: Self.avatarSize),
-            avatar.topAnchor.constraint(equalTo: topAnchor),
-            avatar.centerXAnchor.constraint(equalTo: centerXAnchor),
+            avatar.leadingAnchor.constraint(equalTo: leadingAnchor),
+            avatar.centerYAnchor.constraint(equalTo: centerYAnchor),
 
-            capsule.topAnchor.constraint(equalTo: avatar.bottomAnchor, constant: -Self.overlap),
-            capsule.bottomAnchor.constraint(equalTo: bottomAnchor),
-            capsule.centerXAnchor.constraint(equalTo: centerXAnchor),
-            capsule.heightAnchor.constraint(equalToConstant: Self.capsuleHeight),
-            capsule.widthAnchor.constraint(lessThanOrEqualToConstant: 320),
-            capsule.leadingAnchor.constraint(greaterThanOrEqualTo: leadingAnchor),
-
-            nameField.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 9),
-            nameField.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -9),
-            nameField.centerYAnchor.constraint(equalTo: content.centerYAnchor),
+            nameField.leadingAnchor.constraint(equalTo: avatar.trailingAnchor, constant: 9),
+            nameField.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor),
+            subtitleField.leadingAnchor.constraint(equalTo: nameField.leadingAnchor),
+            subtitleField.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor),
+            subtitleField.firstBaselineAnchor.constraint(equalTo: nameField.lastBaselineAnchor, constant: 14),
         ])
 
         token = WAMacUI.observe { [weak self] in
             guard let self else { return }
             nameField.stringValue = model.state?.title ?? ""
-            capsule.toolTip = model.subtitle.isEmpty ? nil : model.subtitle
+            subtitleField.stringValue = model.subtitle
+            let twoLine = !model.subtitle.isEmpty
+            subtitleField.isHidden = !twoLine
+            nameCentered.isActive = !twoLine
+            nameAbove.isActive = twoLine
         }
     }
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError() }
-
-    override var intrinsicContentSize: NSSize {
-        NSSize(width: NSView.noIntrinsicMetric, height: Self.avatarSize + Self.capsuleHeight - Self.overlap)
-    }
 }
 
 private struct HeaderAvatar: View {
