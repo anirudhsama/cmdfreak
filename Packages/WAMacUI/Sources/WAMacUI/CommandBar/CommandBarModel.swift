@@ -46,6 +46,9 @@ final class CommandBarModel {
 
     nonisolated static let resultLimit = 40
     static let actionBaseline = 100.0
+    /// An action whose title or keyword, or a word in it, starts with the query (allowing for the
+    /// length penalty and the keyword discount) is listed above chats; weaker matches mix in by score.
+    static let strongActionMatch = FuzzyMatcher.wordPrefix - 70
 
     init(database: AppDatabase, usage: QuickSearchUsageStore, registry: CommandRegistry) {
         self.database = database
@@ -142,11 +145,29 @@ final class CommandBarModel {
         }
     }
 
-    private func apply(ranked: [RankedCandidate], actions: [(CommandAction, Double)], direct: RankedCandidate?) {
+    private struct ScoredAction {
+        let action: CommandAction
+        let isChatAction: Bool
+        /// Fuzzy match of the query; nil with nothing typed.
+        let match: Int?
+    }
+
+    /// Actions first (the open chat's, then the rest; with a query only strong matches), then
+    /// chats mixed by score with the weaker action matches.
+    private func apply(ranked: [RankedCandidate], actions: [ScoredAction], direct: RankedCandidate?) {
+        let isOnTop = { (a: ScoredAction) in a.match.map { $0 >= Self.strongActionMatch } ?? true }
+        let top = actions.filter(isOnTop)
+            .enumerated()
+            .sorted { l, r in
+                if l.element.isChatAction != r.element.isChatAction { return l.element.isChatAction }
+                if l.element.match != r.element.match { return (l.element.match ?? 0) > (r.element.match ?? 0) }
+                return l.offset < r.offset
+            }
+            .map { CommandBarResult.action($0.element.action) }
         var merged: [(CommandBarResult, Double)] = ranked.map { (.chat($0), $0.score) }
-        merged += actions.map { (.action($0.0), $0.1) }
+        merged += actions.filter { !isOnTop($0) }.map { (.action($0.action), Double($0.match ?? 0) + Self.actionBaseline) }
         merged.sort { $0.1 > $1.1 }
-        var out = merged.prefix(Self.resultLimit).map(\.0)
+        var out = top + merged.prefix(Self.resultLimit).map(\.0)
         if let direct, !ranked.contains(where: { $0.candidate.jid == direct.candidate.jid }) {
             out.append(.chat(direct))
         }
@@ -155,12 +176,16 @@ final class CommandBarModel {
         hasLoaded = true
     }
 
-    private func scoredActions(_ query: String) -> [(CommandAction, Double)] {
+    /// With nothing typed, the open chat's actions; otherwise every action that matches.
+    private func scoredActions(_ query: String) -> [ScoredAction] {
         let q = FuzzyMatcher.normalize(query)
-        guard !q.isEmpty else { return [] }
-        return registry.actions(for: context).compactMap { action in
+        let grouped = registry.groupedActions(for: context)
+        guard !q.isEmpty else {
+            return grouped.filter { $0.group == .chat }.map { ScoredAction(action: $0.action, isChatAction: true, match: nil) }
+        }
+        return grouped.compactMap { action, group in
             FuzzyMatcher.best(q, title: FuzzyMatcher.normalize(action.title), alternates: action.keywords.map(FuzzyMatcher.normalize))
-                .map { (action, Double($0) + Self.actionBaseline) }
+                .map { ScoredAction(action: action, isChatAction: group == .chat, match: $0) }
         }
     }
 

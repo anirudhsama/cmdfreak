@@ -47,35 +47,44 @@ public struct CommandAction: Identifiable {
 @MainActor
 public final class CommandRegistry {
     public typealias Provider = @MainActor (CommandContext) -> [CommandAction]
-    private var providers: [Provider] = []
+
+    /// `.chat` actions act on the open chat; the bar lists them first.
+    public enum Group: Sendable { case chat, general }
+
+    private var providers: [(Group, Provider)] = []
 
     public init() {}
 
-    public func register(_ provider: @escaping Provider) {
-        providers.append(provider)
+    public func register(_ group: Group = .general, _ provider: @escaping Provider) {
+        providers.append((group, provider))
     }
 
     public func actions(for context: CommandContext) -> [CommandAction] {
-        providers.flatMap { $0(context) }
+        groupedActions(for: context).map(\.action)
+    }
+
+    func groupedActions(for context: CommandContext) -> [(action: CommandAction, group: Group)] {
+        providers.flatMap { group, provider in provider(context).map { ($0, group) } }
     }
 
     /// The v1 set: chat actions on the current chat, navigation, and account.
     static func standard() -> CommandRegistry {
         let registry = CommandRegistry()
-        registry.register { context in
+        // Least disruptive first: with nothing typed the first one is selected.
+        registry.register(.chat) { context in
             guard let chat = context.chat?.chat else { return [] }
             let unread = chat.unreadCount > 0 || chat.markedUnread
             return [
-                .menu("chat.archive", chat.archived ? "Unarchive Chat" : "Archive Chat", symbol: chat.archived ? "tray.and.arrow.up" : "archivebox",
-                      keywords: ["archive", "hide"], shortcut: "⇧⌘A", #selector(MainWindowController.toggleArchive(_:))),
-                .menu("chat.mute", chat.isMuted() ? "Unmute Chat" : "Mute Chat", symbol: chat.isMuted() ? "bell" : "bell.slash",
-                      keywords: ["mute", "silence", "notifications"], shortcut: "⇧⌘M", #selector(MainWindowController.toggleMute(_:))),
-                .menu("chat.pin", chat.isPinned ? "Unpin Chat" : "Pin Chat", symbol: chat.isPinned ? "pin.slash" : "pin",
-                      keywords: ["pin", "favorite"], shortcut: "⇧⌘P", #selector(MainWindowController.togglePin(_:))),
-                .menu("chat.unread", unread ? "Mark as Read" : "Mark as Unread", symbol: unread ? "envelope.open" : "envelope.badge",
-                      keywords: ["unread", "read"], shortcut: "⇧⌘U", #selector(MainWindowController.toggleUnread(_:))),
                 .menu("chat.attach", "Attach File…", symbol: "paperclip", keywords: ["attach", "send file", "upload"],
                       shortcut: "⇧⌘O", #selector(MainWindowController.attachFile(_:))),
+                .menu("chat.unread", unread ? "Mark as Read" : "Mark as Unread", symbol: unread ? "envelope.open" : "envelope.badge",
+                      keywords: ["unread", "read"], shortcut: "⇧⌘U", #selector(MainWindowController.toggleUnread(_:))),
+                .menu("chat.pin", chat.isPinned ? "Unpin Chat" : "Pin Chat", symbol: chat.isPinned ? "pin.slash" : "pin",
+                      keywords: ["pin", "favorite"], shortcut: "⇧⌘P", #selector(MainWindowController.togglePin(_:))),
+                .menu("chat.mute", chat.isMuted() ? "Unmute Chat" : "Mute Chat", symbol: chat.isMuted() ? "bell" : "bell.slash",
+                      keywords: ["mute", "silence", "notifications"], shortcut: "⇧⌘M", #selector(MainWindowController.toggleMute(_:))),
+                .menu("chat.archive", chat.archived ? "Unarchive Chat" : "Archive Chat", symbol: chat.archived ? "tray.and.arrow.up" : "archivebox",
+                      keywords: ["archive", "hide"], shortcut: "⇧⌘A", #selector(MainWindowController.toggleArchive(_:))),
             ]
         }
         registry.register { _ in

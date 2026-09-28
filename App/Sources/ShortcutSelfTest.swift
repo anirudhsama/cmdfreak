@@ -70,7 +70,7 @@ enum ShortcutSelfTest {
         // Empty-query snapshot and actions.
         await menu("k", 40, [.command])
         try? await Task.sleep(for: .milliseconds(300))
-        log("recent: \(main.debugCommandBar.results.prefix(5))")
+        log("recent: \(main.debugCommandBar.results.prefix(8))")
         if let dir = snapshotDir { save(main.debugRenderCommandBar(), dir, "commandbar-recent") }
         main.debugSetCommandBarQuery("mute")
         try? await Task.sleep(for: .milliseconds(300))
