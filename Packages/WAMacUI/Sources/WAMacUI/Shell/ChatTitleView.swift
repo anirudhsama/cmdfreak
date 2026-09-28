@@ -1,6 +1,6 @@
 import AppKit
 
-/// Title and subtitle in the toolbar (the chat list's filter name, centered over the list).
+/// Title and subtitle in the toolbar (the chat list's filter name).
 /// The lines are placed by baseline, as the window's own title and subtitle are.
 @MainActor
 final class ChatTitleView: NSView {
@@ -9,7 +9,7 @@ final class ChatTitleView: NSView {
     private var twoLine: [NSLayoutConstraint] = []
     private var oneLine: [NSLayoutConstraint] = []
 
-    init(centered: Bool = false) {
+    init() {
         super.init(frame: .zero)
         titleField.font = .systemFont(ofSize: 13, weight: .semibold)
         subtitleField.font = .systemFont(ofSize: 11)
@@ -19,15 +19,6 @@ final class ChatTitleView: NSView {
             field.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
             field.translatesAutoresizingMaskIntoConstraints = false
             addSubview(field)
-            if centered {
-                field.alignment = .center
-                NSLayoutConstraint.activate([
-                    field.centerXAnchor.constraint(equalTo: centerXAnchor),
-                    field.leadingAnchor.constraint(greaterThanOrEqualTo: leadingAnchor),
-                    widthAnchor.constraint(greaterThanOrEqualTo: field.widthAnchor),
-                ])
-                continue
-            }
             let fill = field.trailingAnchor.constraint(equalTo: trailingAnchor)
             fill.priority = .defaultLow
             NSLayoutConstraint.activate([

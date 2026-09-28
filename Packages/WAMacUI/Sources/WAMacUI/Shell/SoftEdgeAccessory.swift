@@ -3,7 +3,6 @@ import AppKit
 /// A split view item's top accessory that content scrolls beneath with a soft, fading edge (the
 /// AppKit counterpart of SwiftUI's `scrollEdgeEffectStyle(.soft, for: .top)`). Without it the
 /// scroll view under the toolbar gets a hard cutoff.
-/// Every accessory is the same height, so the fade band lines up across columns.
 @MainActor
 final class SoftEdgeAccessory: NSSplitViewItemAccessoryViewController {
     static let height: CGFloat = 54

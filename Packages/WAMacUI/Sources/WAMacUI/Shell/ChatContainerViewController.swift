@@ -20,14 +20,11 @@ public final class ChatContainerViewController: NSViewController {
     public var composeTextSink: ((String) -> Void)?
 
     private let emptyState = NSHostingView(rootView: EmptyChatView())
-    /// The open chat's avatar and name at the top center of the thread (iMessage style), as a
-    /// soft-edged top accessory of the split view item: messages scroll under it and fade out.
+    /// The open chat's avatar and name (iMessage style), centered in the toolbar strip over the
+    /// conversation. An overlay rather than a toolbar item: the stacked header is taller than the
+    /// toolbar gives items.
     let header = ChatHeaderModel()
-    private(set) lazy var headerAccessory: SoftEdgeAccessory = {
-        let accessory = SoftEdgeAccessory(content: ChatHeaderView(model: header), horizontalInset: 16)
-        accessory.isHidden = true
-        return accessory
-    }()
+    private lazy var headerView = ChatHeaderView(model: header)
 
     public init(client: WAClient) {
         self.client = client
@@ -54,6 +51,20 @@ public final class ChatContainerViewController: NSViewController {
             ])
         }
         chatView.view.isHidden = true
+
+        // The toolbar strip: from the top of the view to the safe area.
+        let band = NSLayoutGuide()
+        root.addLayoutGuide(band)
+        headerView.translatesAutoresizingMaskIntoConstraints = false
+        root.addSubview(headerView)
+        NSLayoutConstraint.activate([
+            band.topAnchor.constraint(equalTo: root.topAnchor),
+            band.bottomAnchor.constraint(equalTo: root.safeAreaLayoutGuide.topAnchor),
+            headerView.centerYAnchor.constraint(equalTo: band.centerYAnchor),
+            headerView.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 16),
+            headerView.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -16),
+        ])
+        headerView.isHidden = true
         view = root
     }
 
@@ -62,7 +73,7 @@ public final class ChatContainerViewController: NSViewController {
         self.chatJid = chatJid
         chatView.show(chatJid: chatJid)
         chatView.view.isHidden = chatJid == nil
-        headerAccessory.isHidden = chatJid == nil
+        headerView.isHidden = chatJid == nil
         emptyState.isHidden = chatJid != nil
     }
 

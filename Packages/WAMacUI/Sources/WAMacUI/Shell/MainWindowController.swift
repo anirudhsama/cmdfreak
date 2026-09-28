@@ -15,8 +15,8 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, N
     let chatList: ChatListViewController
     let chatListColumn: ChatListColumnViewController
     private var countsObservation: AnyDatabaseCancellable?
-    /// "Chats" (the rail filter) centered over the chat list, as WhatsApp for Mac does.
-    private let listTitleView = ChatTitleView(centered: true)
+    /// "Chats" (the rail filter) at the leading edge of the chat list's toolbar, as Mail does.
+    private let listTitleView = ChatTitleView()
     private var chatHeader: ChatHeaderModel { chatContainer.header }
     let split = RailSplitViewController()
     private var presenceTask: Task<Void, Never>?
@@ -70,11 +70,10 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, N
         listItem.maximumThickness = ChatListMetrics.maxWidth
         listItem.automaticallyAdjustsSafeAreaInsets = true
         let contentItem = NSSplitViewItem(viewController: chatContainer)
-        // No hard line under the toolbar; the soft-edged accessories fade content out instead.
+        // No separator line under the toolbar.
         contentItem.titlebarSeparatorStyle = .none
         listItem.titlebarSeparatorStyle = .none
         listItem.addTopAlignedAccessoryViewController(chatListColumn.searchAccessory)
-        contentItem.addTopAlignedAccessoryViewController(chatContainer.headerAccessory)
         contentItem.minimumThickness = 400
         split.addSplitViewItem(sidebarItem)
         split.addSplitViewItem(listItem)
@@ -412,7 +411,7 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, N
     public func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
         // No sidebar toggle in the toolbar: in rail mode it would crowd the traffic lights. The
         // sidebar carries its own toggle at the bottom.
-        [.sidebarTrackingSeparator, .flexibleSpace, Self.listTitleItem, .flexibleSpace, Self.newChatItem,
+        [.sidebarTrackingSeparator, Self.listTitleItem, .flexibleSpace, Self.newChatItem,
          Self.listTrackingSeparator, .flexibleSpace]
     }
 

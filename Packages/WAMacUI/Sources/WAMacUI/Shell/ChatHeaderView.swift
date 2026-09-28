@@ -10,13 +10,13 @@ final class ChatHeaderModel {
     var subtitle = ""
 }
 
-/// The avatar over a glass name capsule, sized for `SoftEdgeAccessory`.
+/// The avatar over a glass name capsule.
 @MainActor
 final class ChatHeaderView: NSView {
-    static let avatarSize: CGFloat = 30
-    static let capsuleHeight: CGFloat = 24
+    static let avatarSize: CGFloat = 26
+    static let capsuleHeight: CGFloat = 20
     /// Capsule tucks this far under the avatar.
-    static let overlap: CGFloat = 5
+    static let overlap: CGFloat = 4
 
     private let model: ChatHeaderModel
     private let avatar: NSHostingView<HeaderAvatar>
@@ -33,13 +33,15 @@ final class ChatHeaderView: NSView {
         capsule.style = .regular
         let content = NSView()
         capsule.contentView = content
-        nameField.font = .systemFont(ofSize: 12, weight: .semibold)
+        nameField.font = .systemFont(ofSize: 11, weight: .semibold)
         nameField.lineBreakMode = .byTruncatingTail
         nameField.setContentHuggingPriority(.required, for: .horizontal)
         nameField.setContentCompressionResistancePriority(.defaultHigh, for: .horizontal)
         nameField.translatesAutoresizingMaskIntoConstraints = false
         content.addSubview(nameField)
         avatar.sizingOptions = []
+        // It sits in the toolbar strip; don't let SwiftUI pad it out of the safe area.
+        avatar.safeAreaRegions = []
         // Avatar above the capsule, overlapping its top edge.
         for v in [capsule, avatar] {
             v.translatesAutoresizingMaskIntoConstraints = false
@@ -58,8 +60,8 @@ final class ChatHeaderView: NSView {
             capsule.widthAnchor.constraint(lessThanOrEqualToConstant: 320),
             capsule.leadingAnchor.constraint(greaterThanOrEqualTo: leadingAnchor),
 
-            nameField.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 11),
-            nameField.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -11),
+            nameField.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 9),
+            nameField.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -9),
             nameField.centerYAnchor.constraint(equalTo: content.centerYAnchor),
         ])
 
