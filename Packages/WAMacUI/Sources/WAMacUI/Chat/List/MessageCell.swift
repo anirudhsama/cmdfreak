@@ -604,13 +604,12 @@ final class MessageCell: NSTableCellView {
         }
     }
 
+    /// Filled with the bubble's own color, cut out of the bubble by a ring of the chat background.
     private func drawChip(_ chip: LayoutPlan.Chip) {
-        let path = NSBezierPath(roundedRect: chip.frame, xRadius: chip.frame.height / 2, yRadius: chip.frame.height / 2)
-        NSColor.windowBackgroundColor.setFill()
-        path.fill()
-        (chip.mine ? Palette.green : NSColor.separatorColor).setStroke()
-        path.lineWidth = chip.mine ? 1.5 : 1
-        path.stroke()
+        let ring = chip.frame.insetBy(dx: -2, dy: -2)
+        NSBezierPath(roundedRect: ring, xRadius: ring.height / 2, yRadius: ring.height / 2).fill(with: .windowBackgroundColor)
+        NSBezierPath(roundedRect: chip.frame, xRadius: chip.frame.height / 2, yRadius: chip.frame.height / 2)
+            .fill(with: plan?.outgoing == true ? C.outgoingBubble : C.incomingBubble)
         var x = chip.frame.minX + 7
         let emoji = NSAttributedString(string: chip.emoji, attributes: [.font: C.reaction])
         emoji.draw(at: NSPoint(x: x, y: chip.frame.minY + 2))
