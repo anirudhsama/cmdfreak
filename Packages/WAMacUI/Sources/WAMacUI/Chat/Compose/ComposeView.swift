@@ -2,8 +2,8 @@ import AppKit
 
 /// Liquid-glass compose pill: reply/edit bar, attachment tray, TextKit 2 editor, send button.
 /// With attachments staged, the editor text is their caption and Enter sends even when it's empty.
-/// Enter sends, ⇧Enter inserts a newline, ↑ in an empty editor asks to edit the last message,
-/// Esc clears the bar first and then escalates to `onEscape`.
+/// Enter sends, ⇧Enter inserts a newline, ↑ in an empty editor moves into the message list, ⌘R
+/// replies to the newest incoming message, Esc clears the bar first and then escalates to `onEscape`.
 final class ComposeView: NSView, NSTextViewDelegate {
     enum Bar: Equatable {
         case reply(name: String, snippet: String, color: NSColor)
@@ -14,6 +14,10 @@ final class ComposeView: NSView, NSTextViewDelegate {
     var onTyping: (() -> Void)?
     var onEscape: (() -> Void)?
     var onArrowUpEmpty: (() -> Void)?
+    var onReplyShortcut: (() -> Void)? {
+        get { textView.onReplyShortcut }
+        set { textView.onReplyShortcut = newValue }
+    }
     var onAttach: (() -> Void)?
     var onPasteFiles: (([URL]) -> Void)?
     var onHeightChange: ((CGFloat) -> Void)?
@@ -39,6 +43,7 @@ final class ComposeView: NSView, NSTextViewDelegate {
     private(set) var hasAttachments = false
     private var textHeight: NSLayoutConstraint!
     private var barHeight: NSLayoutConstraint!
+    private var barTop: NSLayoutConstraint!
 
     static let outerInsets = NSEdgeInsets(top: 6, left: 12, bottom: 10, right: 12)
     static let maxLines = 8
@@ -136,6 +141,7 @@ final class ComposeView: NSView, NSTextViewDelegate {
 
         textHeight = scroll.heightAnchor.constraint(equalToConstant: 30)
         barHeight = barView.heightAnchor.constraint(equalToConstant: 0)
+        barTop = barView.topAnchor.constraint(equalTo: pillContent.topAnchor)
         trayHeight = tray.heightAnchor.constraint(equalToConstant: 0)
         let o = Self.outerInsets
         NSLayoutConstraint.activate([
@@ -158,7 +164,7 @@ final class ComposeView: NSView, NSTextViewDelegate {
 
             barView.leadingAnchor.constraint(equalTo: pillContent.leadingAnchor, constant: 8),
             barView.trailingAnchor.constraint(equalTo: pillContent.trailingAnchor, constant: -8),
-            barView.topAnchor.constraint(equalTo: pillContent.topAnchor, constant: 8),
+            barTop,
             barHeight,
             barAccent.leadingAnchor.constraint(equalTo: barView.leadingAnchor),
             barAccent.topAnchor.constraint(equalTo: barView.topAnchor),
@@ -235,6 +241,8 @@ final class ComposeView: NSView, NSTextViewDelegate {
         }
         barView.isHidden = bar == nil
         barHeight.constant = bar == nil ? 0 : 40
+        // A hidden bar takes no space, or the editor row sits below the pill's center.
+        barTop.constant = bar == nil ? 0 : 8
         updateHeight()
     }
 
@@ -321,7 +329,8 @@ final class ComposeView: NSView, NSTextViewDelegate {
         if abs(textHeight.constant - h) > 0.5 {
             textHeight.constant = h
         }
-        let total = Self.outerInsets.top + Self.outerInsets.bottom + 10 + h + barHeight.constant + (bar == nil ? 0 : 5) + trayHeight.constant
+        let pill = barTop.constant + barHeight.constant + trayHeight.constant + 5 + h + 5
+        let total = Self.outerInsets.top + Self.outerInsets.bottom + pill
         onHeightChange?(ceil(total))
     }
 }

@@ -112,6 +112,7 @@ final class ChatListViewController: NSViewController, NSCollectionViewDelegate {
         states = live
         items = newItems
 
+        let selectedWasVisible = isSelectedRowVisible
         var snapshot = NSDiffableDataSourceSnapshot<Int, String>()
         snapshot.appendSections([0])
         snapshot.appendItems(newItems.map(\.id))
@@ -124,6 +125,33 @@ final class ChatListViewController: NSViewController, NSCollectionViewDelegate {
             collectionView.deselectAll(nil)
         } else {
             syncSelectionToCollectionView()
+            // The open chat jumped (usually to the top, after a send): follow it if it was on screen.
+            if selectedWasVisible {
+                collectionView.layoutSubtreeIfNeeded()
+                if !isSelectedRowVisible { revealSelectedRow() }
+            }
+        }
+    }
+
+    private var isSelectedRowVisible: Bool {
+        guard let selectedJid, let path = indexPath(for: selectedJid),
+              let frame = collectionView.layoutAttributesForItem(at: path)?.frame else { return false }
+        // Rows under the toolbar (the top content inset) count as hidden.
+        var visible = collectionView.visibleRect
+        let inset = scrollView.contentInsets.top
+        visible.origin.y += inset
+        visible.size.height -= inset
+        return visible.intersects(frame)
+    }
+
+    private func revealSelectedRow() {
+        guard let selectedJid, let path = indexPath(for: selectedJid) else { return }
+        if path.item == 0 {
+            // All the way up, so the section's top inset shows too.
+            scrollView.contentView.scroll(to: NSPoint(x: 0, y: -scrollView.contentView.contentInsets.top))
+            scrollView.reflectScrolledClipView(scrollView.contentView)
+        } else {
+            collectionView.scrollToItems(at: [path], scrollPosition: .nearestHorizontalEdge)
         }
     }
 

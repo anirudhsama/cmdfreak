@@ -132,6 +132,9 @@ enum MainMenu {
         backtab.isHidden = true
         backtab.allowsKeyEquivalentWhenHidden = true
         menu.addItem(backtab)
+        // ⇧⌘] / ⇧⌘[, as Safari's tab switching. Hidden, like Safari's: ⌃Tab is the visible binding.
+        menu.addItem(hidden(item("Show Next Chat", #selector(MainWindowController.nextChat(_:)), "]", [.command, .shift])))
+        menu.addItem(hidden(item("Show Previous Chat", #selector(MainWindowController.previousChat(_:)), "[", [.command, .shift])))
         menu.addItem(.separator())
         menu.addItem(item("Bring All to Front", #selector(NSApplication.arrangeInFront(_:))))
         return menu
@@ -155,6 +158,12 @@ enum MainMenu {
                              _ modifiers: NSEvent.ModifierFlags = [.command]) -> NSMenuItem {
         let item = NSMenuItem(title: title, action: action, keyEquivalent: key)
         item.keyEquivalentModifierMask = key.isEmpty ? [] : modifiers
+        return item
+    }
+
+    private static func hidden(_ item: NSMenuItem) -> NSMenuItem {
+        item.isHidden = true
+        item.allowsKeyEquivalentWhenHidden = true
         return item
     }
 

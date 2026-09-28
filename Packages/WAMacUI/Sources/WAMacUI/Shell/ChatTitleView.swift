@@ -1,24 +1,40 @@
 import AppKit
 
 /// Title and subtitle of the open chat, shown in the toolbar over the conversation column.
+/// The compact toolbar gives items 24pt, less than two stacked labels need, so the lines are
+/// placed by baseline (as the window's own title and subtitle are) and their boxes overlap.
 @MainActor
-final class ChatTitleView: NSStackView {
+final class ChatTitleView: NSView {
     private let titleField = NSTextField(labelWithString: "")
     private let subtitleField = NSTextField(labelWithString: "")
+    private var twoLine: [NSLayoutConstraint] = []
+    private var oneLine: [NSLayoutConstraint] = []
 
     init() {
         super.init(frame: .zero)
-        orientation = .vertical
-        alignment = .leading
-        spacing = 0
         titleField.font = .systemFont(ofSize: 13, weight: .semibold)
         subtitleField.font = .systemFont(ofSize: 11)
         subtitleField.textColor = .secondaryLabelColor
         for field in [titleField, subtitleField] {
             field.lineBreakMode = .byTruncatingTail
             field.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-            addArrangedSubview(field)
+            field.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(field)
+            let fill = field.trailingAnchor.constraint(equalTo: trailingAnchor)
+            fill.priority = .defaultLow
+            NSLayoutConstraint.activate([
+                field.leadingAnchor.constraint(equalTo: leadingAnchor),
+                field.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor),
+                fill,
+            ])
         }
+        heightAnchor.constraint(equalToConstant: 24).isActive = true
+        twoLine = [
+            titleField.firstBaselineAnchor.constraint(equalTo: topAnchor, constant: 11),
+            subtitleField.firstBaselineAnchor.constraint(equalTo: topAnchor, constant: 24),
+        ]
+        oneLine = [titleField.centerYAnchor.constraint(equalTo: centerYAnchor)]
+        NSLayoutConstraint.activate(twoLine)
     }
 
     @available(*, unavailable)
@@ -28,5 +44,7 @@ final class ChatTitleView: NSStackView {
         titleField.stringValue = title
         subtitleField.stringValue = subtitle
         subtitleField.isHidden = subtitle.isEmpty
+        NSLayoutConstraint.deactivate(subtitle.isEmpty ? twoLine : oneLine)
+        NSLayoutConstraint.activate(subtitle.isEmpty ? oneLine : twoLine)
     }
 }

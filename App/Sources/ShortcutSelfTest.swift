@@ -116,6 +116,10 @@ enum ShortcutSelfTest {
         check("⌃Tab next chat", main.selectedChatJid == jids[4])
         await menu("\u{19}", 48, [.control, .shift])
         check("⌃⇧Tab previous chat", main.selectedChatJid == jids[3])
+        await menu("}", 30, [.command, .shift])
+        check("⇧⌘] next chat", main.selectedChatJid == jids[4])
+        await menu("{", 33, [.command, .shift])
+        check("⇧⌘[ previous chat", main.selectedChatJid == jids[3])
         await menu(key(NSDownArrowFunctionKey), 125, [.option, .numericPad, .function])
         let downUnread = main.selectedChatJid
         check("⌥↓ next unread chat", downUnread != jids[3] && downUnread.map(main.chatShowsUnread) == true)

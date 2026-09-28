@@ -61,6 +61,18 @@ final class ComposeTextView: NSTextView {
 
     /// Pasted or dropped files and images become attachments; text pastes through as plain text.
     var onPasteFiles: (([URL]) -> Void)?
+    /// ⌘R while editing.
+    var onReplyShortcut: (() -> Void)?
+
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if let onReplyShortcut, window?.firstResponder === self,
+           event.modifierFlags.intersection([.command, .control, .option, .shift]) == .command,
+           event.charactersIgnoringModifiers?.lowercased() == "r" {
+            onReplyShortcut()
+            return true
+        }
+        return super.performKeyEquivalent(with: event)
+    }
 
     override func paste(_ sender: Any?) {
         if let onPasteFiles {

@@ -29,6 +29,16 @@ enum Fx {
 @Suite struct ChatRowsTests {
     let day: Int64 = 1_700_000_000
 
+    @Test func editAllowedOnlyForOwnSentTextInsideWindow() {
+        let now = day + 3_600
+        let fresh = now - ChatRows.editWindowSeconds
+        #expect(ChatRows.canEdit(Fx.item("a", ts: fresh, fromMe: true), now: now))
+        #expect(!ChatRows.canEdit(Fx.item("b", ts: fresh - 1, fromMe: true), now: now))
+        #expect(!ChatRows.canEdit(Fx.item("c", ts: now, fromMe: false), now: now))
+        #expect(!ChatRows.canEdit(Fx.item("d", ts: now, fromMe: true, kind: .image), now: now))
+        #expect(!ChatRows.canEdit(Fx.item("e", ts: now, fromMe: true, status: .failed), now: now))
+    }
+
     @Test func buildsDaySeparatorsAndGrouping() {
         var rows = ChatRows(chatJid: Fx.chat, isGroupChat: false)
         rows.replace(with: Fx.page([

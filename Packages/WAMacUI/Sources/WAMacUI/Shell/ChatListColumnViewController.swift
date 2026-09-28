@@ -41,8 +41,8 @@ final class ChatListColumnViewController: NSViewController {
         NSLayoutConstraint.activate([
             listView.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             listView.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            // Below the titlebar: the list column has no scroll-edge material behind the title.
-            listView.topAnchor.constraint(equalTo: root.safeAreaLayoutGuide.topAnchor),
+            // Under the toolbar: the scroll view insets its content and draws the scroll-edge glass.
+            listView.topAnchor.constraint(equalTo: root.topAnchor),
             listView.bottomAnchor.constraint(equalTo: footer.topAnchor),
 
             footer.leadingAnchor.constraint(equalTo: root.leadingAnchor),

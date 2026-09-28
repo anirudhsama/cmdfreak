@@ -54,9 +54,20 @@ struct ChatRows: Sendable {
         return item(id: id)
     }
 
-    /// Own text messages are editable; the newest one is what ↑ edits.
-    var lastOwnEditable: MessageItem? {
-        messages.last { $0.message.fromMe && $0.message.kind == .text && !$0.message.revoked && !$0.message.isPending && $0.message.status != .failed }
+    /// WhatsApp accepts edits for 15 minutes after sending.
+    static let editWindowSeconds: Int64 = 15 * 60
+
+    /// Own, sent text messages inside the edit window.
+    static func canEdit(_ item: MessageItem, now: Int64 = Int64(Date().timeIntervalSince1970)) -> Bool {
+        let m = item.message
+        return m.fromMe && m.kind == .text && !m.revoked && !m.isPending && m.status != .failed
+            && now - m.timestamp <= editWindowSeconds
+    }
+
+    /// Reply and react targets: anything delivered that is not a system notice or deleted.
+    static func canRespond(to item: MessageItem) -> Bool {
+        let m = item.message
+        return !m.revoked && m.kind != .system && !m.isPending
     }
 
     // MARK: - Grouping

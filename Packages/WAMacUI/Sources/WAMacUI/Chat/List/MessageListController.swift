@@ -15,6 +15,8 @@ protocol MessageListActions: AnyObject {
     func retry(_ item: MessageItem)
     func typeToCompose(_ text: String)
     func escapeFromList()
+    /// ↓ past the newest message.
+    func returnToCompose()
 }
 
 /// The message table. Row heights come from `LayoutPlan`s; nothing is measured in delegate callbacks
@@ -126,8 +128,8 @@ final class MessageListController: NSViewController {
         super.viewDidLayout()
         let top = view.safeAreaInsets.top + M.listTopInset
         if scrollView.contentInsets.top != top || scrollView.contentInsets.bottom != bottomInset {
+            // The scroller track already follows contentInsets; scrollerInsets would inset it twice.
             scrollView.contentInsets = NSEdgeInsets(top: top, left: 0, bottom: bottomInset, right: 0)
-            scrollView.scrollerInsets = NSEdgeInsets(top: 0, left: 0, bottom: bottomInset, right: 0)
         }
         let newWidth = floor(scrollView.contentView.bounds.width)
         if newWidth > 0, abs(newWidth - width) >= 1 {
@@ -149,7 +151,6 @@ final class MessageListController: NSViewController {
         let atBottom = isAtBottom
         bottomInset = inset
         scrollView.contentInsets.bottom = inset
-        scrollView.scrollerInsets.bottom = inset
         if atBottom { scrollToBottom() }
     }
 
@@ -729,7 +730,71 @@ final class MessageListController: NSViewController {
         tableView.selectedRow >= 0 ? rows.item(atRow: tableView.selectedRow) : nil
     }
 
+    var hasKeyboardFocus: Bool { view.window?.firstResponder === tableView }
+
+    func clearSelection() { tableView.deselectAll(nil) }
+
+    /// ↑ in an empty compose: selects the newest message and takes keyboard focus.
+    @discardableResult
+    func selectNewestMessage() -> Bool {
+        guard let row = messageRow(before: rows.count) else { return false }
+        selectMessage(at: row)
+        view.window?.makeFirstResponder(tableView)
+        return true
+    }
+
+    private func selectMessage(at row: Int) {
+        tableView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+        tableView.scrollRowToVisible(row)
+    }
+
+    private func messageRow(before row: Int) -> Int? {
+        stride(from: row - 1, through: 0, by: -1).first { if case .message = rows.row(at: $0) { true } else { false } }
+    }
+
+    private func messageRow(after row: Int) -> Int? {
+        (row + 1 ..< rows.count).first { if case .message = rows.row(at: $0) { true } else { false } }
+    }
+
+    /// Message-list keys: ↑/↓ walk messages, E edits, R reacts, ⌘R replies. A key that does not
+    /// apply to the selected message shakes it.
     private func handleKey(_ event: NSEvent) -> Bool {
+        let mods = event.modifierFlags.intersection([.command, .control, .option])
+        let key = event.charactersIgnoringModifiers?.lowercased()
+        let selected = tableView.selectedRow
+        if mods.isEmpty, event.keyCode == 126 {  // ↑
+            if selected < 0 { return selectNewestMessage() }
+            if let row = messageRow(before: selected) { selectMessage(at: row) }
+            return true
+        }
+        if mods.isEmpty, event.keyCode == 125, selected >= 0 {  // ↓
+            if let row = messageRow(after: selected) {
+                selectMessage(at: row)
+            } else {
+                clearSelection()
+                actions?.returnToCompose()
+            }
+            return true
+        }
+        if let item = selectedItem {
+            if mods == .command, key == "r" {
+                guard ChatRows.canRespond(to: item) else { return shake(row: selected) }
+                clearSelection()
+                actions?.reply(to: item)
+                return true
+            }
+            if mods.isEmpty, key == "e" {
+                guard ChatRows.canEdit(item) else { return shake(row: selected) }
+                clearSelection()
+                actions?.edit(item)
+                return true
+            }
+            if mods.isEmpty, key == "r" {
+                guard ChatRows.canRespond(to: item) else { return shake(row: selected) }
+                showReactionMenu(for: item, row: selected)
+                return true
+            }
+        }
         if event.keyCode == 53 {  // Esc
             actions?.escapeFromList()
             return true
@@ -744,10 +809,44 @@ final class MessageListController: NSViewController {
         }
         if let chars = event.characters, !chars.isEmpty, event.modifierFlags.intersection([.command, .control, .option]).isEmpty,
            let scalar = chars.unicodeScalars.first, scalar.value >= 0x20, scalar.value != 0x7F {
+            clearSelection()
             actions?.typeToCompose(chars)
             return true
         }
         return false
+    }
+
+    /// Shakes the message at `row` to refuse a key. Returns true (the key is consumed).
+    private func shake(row: Int) -> Bool {
+        guard let cell = tableView.view(atColumn: 0, row: row, makeIfNecessary: false) else {
+            NSSound.beep()
+            return true
+        }
+        cell.wantsLayer = true
+        let shake = CAKeyframeAnimation(keyPath: "transform.translation.x")
+        shake.values = [0, -8, 8, -6, 6, -3, 3, 0]
+        shake.duration = 0.35
+        cell.layer?.add(shake, forKey: "shake")
+        return true
+    }
+
+    static let quickReactions = ["👍", "❤️", "😂", "😮", "😢", "🙏"]
+
+    /// R: the quick reactions under the bubble; 1–6 pick, and the current one is checked.
+    private func showReactionMenu(for item: MessageItem, row: Int) {
+        guard let cell = tableView.view(atColumn: 0, row: row, makeIfNecessary: false) as? MessageCell,
+              let bubble = cell.plan?.bubble else { return }
+        let mine = item.reactions.first { $0.fromMe }?.emoji
+        let menu = NSMenu()
+        for (i, emoji) in Self.quickReactions.enumerated() {
+            let mi = NSMenuItem(title: emoji, action: #selector(menuReact(_:)), keyEquivalent: String(i + 1))
+            mi.keyEquivalentModifierMask = []
+            mi.representedObject = (item, emoji)
+            mi.target = self
+            mi.state = emoji == mine ? .on : .off
+            menu.addItem(mi)
+        }
+        menu.popUp(positioning: nil, at: NSPoint(x: bubble.minX, y: bubble.maxY + 4), in: cell)
     }
 
     // MARK: - Media opening & Quick Look
@@ -840,11 +939,11 @@ final class MessageListController: NSViewController {
         let menu = NSMenu()
         let m = item.message
         let own = m.fromMe
-        if !m.revoked, m.kind != .system, !m.isPending {
+        if ChatRows.canRespond(to: item) {
             menu.addItem(withTitle: "Reply", action: #selector(menuReply(_:)), keyEquivalent: "").representedObject = item
             let react = NSMenuItem(title: "React", action: nil, keyEquivalent: "")
             let sub = NSMenu()
-            for e in ["👍", "❤️", "😂", "😮", "😢", "🙏"] {
+            for e in Self.quickReactions {
                 let mi = NSMenuItem(title: e, action: #selector(menuReact(_:)), keyEquivalent: "")
                 mi.representedObject = (item, e)
                 mi.target = self
@@ -870,7 +969,7 @@ final class MessageListController: NSViewController {
         }
         if own, !m.revoked, !m.isPending, m.status != .failed {
             menu.addItem(.separator())
-            if m.kind == .text {
+            if ChatRows.canEdit(item) {
                 menu.addItem(withTitle: "Edit", action: #selector(menuEdit(_:)), keyEquivalent: "").representedObject = item
             }
             menu.addItem(withTitle: "Delete for Everyone", action: #selector(menuRevoke(_:)), keyEquivalent: "").representedObject = item

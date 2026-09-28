@@ -79,7 +79,8 @@ public final class ChatViewController: NSViewController {
             guard let self else { return }
             if !self.clearStaged() { self.onEscapeWithNothingToClear?() }
         }
-        compose.onArrowUpEmpty = { [weak self] in self?.editLastOwnMessage() }
+        compose.onArrowUpEmpty = { [weak self] in self?.list.selectNewestMessage() }
+        compose.onReplyShortcut = { [weak self] in self?.replyToNewestIncoming() }
         compose.onAttach = { [weak self] in self?.attachFile() }
         compose.onPasteFiles = { [weak self] urls in self?.attach(urls) }
         compose.onRemoveAttachment = { [weak self] id in self?.removeStaged(id) }
@@ -198,14 +199,22 @@ public final class ChatViewController: NSViewController {
         compose.insert(text)
     }
 
-    /// Esc: clears reply/edit state. Returns false when there was nothing to clear.
+    /// Esc: leaves the message list for compose, else clears reply/edit state. Returns false when
+    /// there was nothing to do.
     @discardableResult
     public func handleEscape() -> Bool {
-        compose.handleEscape() || clearStaged()
+        if list.hasKeyboardFocus {
+            // Out of the message list, back to where ↑ came from; a pending reply/edit stays.
+            list.clearSelection()
+            compose.focus()
+            return true
+        }
+        return compose.handleEscape() || clearStaged()
     }
 
     /// Esc menu title while a reply or edit is pending.
     public var transientStateTitle: String? {
+        if list.hasKeyboardFocus { return "Back to Compose" }
         if editTarget != nil { return "Cancel Edit" }
         if replyTarget != nil { return "Cancel Reply" }
         return nil
@@ -283,7 +292,7 @@ public final class ChatViewController: NSViewController {
     // Internal hooks for the debug harness.
     var listController: MessageListController { list }
     func debugSend() { send(compose.text.trimmingCharacters(in: .whitespacesAndNewlines)) }
-    func debugArrowUp() { editLastOwnMessage() }
+    func debugArrowUp() { list.selectNewestMessage() }
     var debugBar: ComposeView.Bar? { compose.bar }
     var debugComposeText: String { compose.text }
 
@@ -330,9 +339,12 @@ public final class ChatViewController: NSViewController {
         sendPaused()
     }
 
-    private func editLastOwnMessage() {
-        guard let item = list.rows.lastOwnEditable else { return }
-        edit(item)
+    private func replyToNewestIncoming() {
+        guard let item = list.rows.messages.last(where: { !$0.message.fromMe && ChatRows.canRespond(to: $0) }) else {
+            NSSound.beep()
+            return
+        }
+        reply(to: item)
     }
 
     // MARK: - Typing state
@@ -450,6 +462,10 @@ extension ChatViewController: MessageListActions {
 
     func typeToCompose(_ text: String) {
         insertComposeText(text)
+    }
+
+    func returnToCompose() {
+        compose.focus()
     }
 
     func escapeFromList() {

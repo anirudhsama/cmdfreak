@@ -64,6 +64,7 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, N
         let listItem = NSSplitViewItem(contentListWithViewController: chatListColumn)
         listItem.minimumThickness = ChatListMetrics.minWidth
         listItem.maximumThickness = ChatListMetrics.maxWidth
+        listItem.automaticallyAdjustsSafeAreaInsets = true
         let contentItem = NSSplitViewItem(viewController: chatContainer)
         contentItem.minimumThickness = 400
         split.addSplitViewItem(sidebarItem)
