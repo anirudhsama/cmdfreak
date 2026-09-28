@@ -18,7 +18,10 @@ struct ChatRowView: View {
     let state: ChatRowState
     let appearance: ChatListAppearance
 
-    private var accessoryColor: Color { Color(nsColor: .tertiaryLabelColor) }
+    /// Solid green selection with white ink while the list has keyboard focus (the macOS
+    /// convention); gray with normal ink otherwise.
+    private var emphasized: Bool { state.isSelected && appearance.isEmphasized }
+    private var accessoryColor: Color { emphasized ? .white.opacity(0.8) : Color(nsColor: .tertiaryLabelColor) }
 
     var body: some View {
         HStack(spacing: ChatRowMetrics.avatarSpacing) {
@@ -49,13 +52,11 @@ struct ChatRowView: View {
         }
         .padding(.horizontal, ChatRowMetrics.contentPadding)
         .frame(height: ChatRowMetrics.height)
-        .foregroundStyle(.primary)
+        .foregroundStyle(emphasized ? .white : .primary)
         .background {
-            // Green tint while the list has keyboard focus (like the rail's selection), gray otherwise,
-            // so it is clear whether ↑/↓ will move through chats or the composer has focus.
             if state.isSelected {
                 RoundedRectangle(cornerRadius: ChatRowMetrics.selectionCornerRadius, style: .continuous)
-                    .fill(appearance.isEmphasized ? Color.waGreen.opacity(0.18) : Color(nsColor: .unemphasizedSelectedContentBackgroundColor))
+                    .fill(appearance.isEmphasized ? Color.waSelection : Color(nsColor: .unemphasizedSelectedContentBackgroundColor))
             }
         }
         .overlay(alignment: .bottom) {
@@ -72,17 +73,18 @@ struct ChatRowView: View {
     }
 
     private var timeColor: Color {
-        state.unreadCount > 0 && !state.isMuted ? .waGreen : .secondary
+        if emphasized { return .white.opacity(0.85) }
+        return state.unreadCount > 0 && !state.isMuted ? .waGreen : .secondary
     }
 
     @ViewBuilder
     private var preview: some View {
         if state.isTyping {
             Text("typing…")
-                .foregroundStyle(Color.waGreen)
+                .foregroundStyle(emphasized ? .white : Color.waGreen)
         } else {
             previewText
-                .foregroundStyle(.secondary)
+                .foregroundStyle(emphasized ? .white.opacity(0.85) : .secondary)
         }
     }
 
@@ -110,7 +112,7 @@ struct ChatRowView: View {
                 Text(state.unreadCount > 999 ? "999+" : String(state.unreadCount))
                     .font(.system(size: 11, weight: .semibold))
                     .monospacedDigit()
-                    .foregroundStyle(Color.waOnBadge)
+                    .foregroundStyle(emphasized ? Color.waSelection : Color.waOnBadge)
                     .padding(.horizontal, 6)
                     .frame(minWidth: 20, minHeight: 20)
                     .background(Capsule().fill(badgeColor))
@@ -124,7 +126,8 @@ struct ChatRowView: View {
     }
 
     private var badgeColor: Color {
-        state.isMuted ? Color(nsColor: .tertiaryLabelColor) : .waBadge
+        if emphasized { return .white }
+        return state.isMuted ? Color(nsColor: .tertiaryLabelColor) : .waBadge
     }
 }
 

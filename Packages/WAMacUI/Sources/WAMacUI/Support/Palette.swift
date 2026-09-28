@@ -12,6 +12,14 @@ enum Palette {
             : NSColor(srgbRed: 0.114, green: 0.667, blue: 0.380, alpha: 1)  // #1DAA61
     }
 
+    /// The chat list's selected row while the list has keyboard focus, under white text. Darker than
+    /// `green` in dark mode, where the brighter green would not hold white text.
+    static let selection = NSColor(name: "waSelection") { appearance in
+        appearance.isDark
+            ? NSColor(srgbRed: 0.078, green: 0.525, blue: 0.294, alpha: 1)  // #14864B
+            : NSColor(srgbRed: 0.114, green: 0.667, blue: 0.380, alpha: 1)  // #1DAA61
+    }
+
     /// Unread badges and dots: WhatsApp's brand green.
     static let badge = NSColor(name: "waBadge") { appearance in
         appearance.isDark
@@ -43,6 +51,7 @@ enum Palette {
 
 extension Color {
     static let waGreen = Color(nsColor: Palette.green)
+    static let waSelection = Color(nsColor: Palette.selection)
     static let waBadge = Color(nsColor: Palette.badge)
     static let waOnBadge = Color(nsColor: Palette.onBadge)
 }
