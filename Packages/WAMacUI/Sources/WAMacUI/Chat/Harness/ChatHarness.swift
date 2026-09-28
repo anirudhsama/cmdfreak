@@ -101,7 +101,7 @@ public enum ChatHarness {
     static func deliverIncoming(text: String, chat: String) {
         guard let bridge = client?.bridge as? HarnessBridge else { return }
         let ts = Int64(Date().timeIntervalSince1970)
-        bridge.sink?.onEvents(events: [.messages(messages: [Seed.message("live-\(ts)-\(text.hashValue)", chat: chat, sender: chat == dm ? dm : bob,
+        _ = bridge.sink?.onEvents(events: [.messages(messages: [Seed.message("live-\(ts)-\(text.hashValue)", chat: chat, sender: chat == dm ? dm : bob,
                                                                   ts: ts, text: text, pushName: chat == dm ? nil : "Bob", status: nil)], updates: [])])
     }
 }
