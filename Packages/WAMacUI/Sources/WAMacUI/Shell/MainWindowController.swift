@@ -16,7 +16,7 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, N
     let chatListColumn: ChatListColumnViewController
     private var countsObservation: AnyDatabaseCancellable?
     private let chatTitleView = ChatTitleView()
-    let split = NSSplitViewController()
+    let split = RailSplitViewController()
     private var presenceTask: Task<Void, Never>?
     private var didPlaceDivider = false
     /// Chat and action commands shown in the command bar; `register` more providers to extend it.
@@ -49,15 +49,18 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, N
             defer: false
         )
         window.title = "BetterWA"
-        window.toolbarStyle = .unified
+        // Compact: shorter titlebar, and the traffic lights sit 12pt from the corner, which keeps the
+        // collapsed rail narrow with even padding around them.
+        window.toolbarStyle = .unifiedCompact
         window.minSize = NSSize(width: 760, height: 480)
         window.identifier = NSUserInterfaceItemIdentifier("MainWindow")
         super.init(window: window)
 
         let sidebarItem = NSSplitViewItem(sidebarWithViewController: sourceList)
-        sidebarItem.minimumThickness = SourceListMetrics.minWidth
+        // Never hidden: collapsing shrinks it to the icon rail (RailSplitViewController).
+        sidebarItem.minimumThickness = SourceListMetrics.railWidth
         sidebarItem.maximumThickness = SourceListMetrics.maxWidth
-        sidebarItem.canCollapse = true
+        sidebarItem.canCollapse = false
         let listItem = NSSplitViewItem(contentListWithViewController: chatListColumn)
         listItem.minimumThickness = ChatListMetrics.minWidth
         listItem.maximumThickness = ChatListMetrics.maxWidth
@@ -84,6 +87,7 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, N
         }
 
         sourceList.onSelect = { [weak self] item in self?.selectRail(item) }
+        sourceList.onToggle = { [weak self] in self?.split.toggleSidebar(nil) }
         countsObservation = client.database.observeSidebarCounts { [weak self] counts in
             self?.railModel.counts = counts
             self?.updateTitle()
@@ -109,11 +113,12 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, N
             didPlaceDivider = true
             // Autosaved positions win; otherwise open at the ideal column widths.
             let views = split.splitView.subviews
-            if views.count == 3, views[0].frame.width < SourceListMetrics.minWidth || views[1].frame.width < ChatListMetrics.minWidth {
+            if views.count == 3, views[0].frame.width < SourceListMetrics.railWidth || views[1].frame.width < ChatListMetrics.minWidth {
                 split.splitView.setPosition(SourceListMetrics.idealWidth, ofDividerAt: 0)
                 split.splitView.setPosition(SourceListMetrics.idealWidth + ChatListMetrics.idealWidth, ofDividerAt: 1)
             }
         }
+        split.normalizeRailWidth()
         window?.makeKeyAndOrderFront(sender)
         chatList.focus()
     }
@@ -392,7 +397,9 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, N
     private static let chatTitleItem = NSToolbarItem.Identifier("chatTitle")
 
     public func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.toggleSidebar, .sidebarTrackingSeparator, .flexibleSpace, Self.newChatItem,
+        // No sidebar toggle in the toolbar: in rail mode it would crowd the traffic lights. The
+        // sidebar carries its own toggle at the bottom.
+        [.sidebarTrackingSeparator, .flexibleSpace, Self.newChatItem,
          Self.listTrackingSeparator, Self.chatTitleItem, .flexibleSpace]
     }
 
