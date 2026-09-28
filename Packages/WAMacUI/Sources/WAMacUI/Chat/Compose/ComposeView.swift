@@ -82,6 +82,10 @@ final class ComposeView: NSView, NSTextViewDelegate {
         barSnippet.font = MessageTextConfiguration.quoteBody
         barSnippet.textColor = .secondaryLabelColor
         barSnippet.lineBreakMode = .byTruncatingTail
+        // A long quote must truncate, not widen the chat column and squeeze the split view's list.
+        for label in [barTitle, barSnippet] {
+            label.setContentCompressionResistancePriority(.init(1), for: .horizontal)
+        }
         barTitle.translatesAutoresizingMaskIntoConstraints = false
         barSnippet.translatesAutoresizingMaskIntoConstraints = false
         barClose.translatesAutoresizingMaskIntoConstraints = false
