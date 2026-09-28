@@ -376,5 +376,7 @@ pub async fn send_media(
         page_count: m.page_count,
         is_animated: (kind == MessageKind::Gif).then_some(true),
     };
-    Ok(sent_result(&shared, &to, sent.message_id, kind, caption, Some(media), reply_to))
+    let mut result = sent_result(&shared, &to, sent.message_id, kind, caption, Some(media), reply_to);
+    result.message.participant = crate::bridge::own_participant(&shared, &client, &to).await;
+    Ok(result)
 }

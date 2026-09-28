@@ -255,6 +255,15 @@ pub enum BridgeMessageUpdate {
         selected: Vec<String>,
         timestamp: i64,
     },
+    /// An encrypted edit or poll vote whose parent secret is not known yet (it arrived before its
+    /// original). Park it with the target; once the target message has been stored, pass
+    /// `envelope` to `WaBridge::decrypt_parked`, which returns the decrypted `Edit`/`PollVote`.
+    /// `envelope` is opaque to Swift.
+    Encrypted {
+        target: BridgeMessageKey,
+        #[serde(serialize_with = "crate::json::hex")]
+        envelope: Vec<u8>,
+    },
 }
 
 // MARK: - Receipts, presence
@@ -391,8 +400,9 @@ pub enum BridgeEvent {
     Contacts { contacts: Vec<BridgeContact> },
     JidAliases { aliases: Vec<BridgeJidAlias> },
     ChatAction { action: BridgeChatAction },
-    /// Group subject changed. `participant_count == 0` means unknown here; participant changes are
-    /// not pushed, fetch them with `fetch_group_metadata`.
+    /// Group subject or membership changed. `participant_count == 0` means unknown here. A
+    /// membership change (members added or removed) arrives with `subject == None` and a zero
+    /// count: the stored count is stale, re-fetch it (`fetch_group_overviews`).
     Group { group: BridgeGroup },
     PictureChanged { jid: String },
     HistoryChunk { chunk: BridgeHistoryChunk },
@@ -458,7 +468,10 @@ pub enum LogLevel {
 
 #[uniffi::export(with_foreign)]
 pub trait EventSink: Send + Sync {
-    fn on_events(&self, events: Vec<BridgeEvent>);
+    /// Returns whether the batch was handled (persisted, for events the app stores). `false`
+    /// fails the durability hook for any inbound messages in the batch, so the library leaves
+    /// them unacked and the server redelivers them (bounded, see `DurabilityHook`).
+    fn on_events(&self, events: Vec<BridgeEvent>) -> bool;
 }
 
 #[uniffi::export(with_foreign)]

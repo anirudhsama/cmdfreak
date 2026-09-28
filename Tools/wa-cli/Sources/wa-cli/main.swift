@@ -44,7 +44,7 @@ final class Sink: EventSink, @unchecked Sendable {
     var connected: Bool { lock.withLock { _connected } }
     var ownPn: String? { lock.withLock { _ownPn } }
 
-    func onEvents(events: [BridgeEvent]) {
+    func onEvents(events: [BridgeEvent]) -> Bool {
         for e in events {
             lock.withLock {
                 switch e {
@@ -56,6 +56,7 @@ final class Sink: EventSink, @unchecked Sendable {
             }
             handler?(e)
         }
+        return true
     }
 }
 
@@ -370,7 +371,7 @@ func cmdImport(_ args: [String]) async throws {
 final class BatchSink: EventSink, @unchecked Sendable {
     let continuation: AsyncStream<[BridgeEvent]>.Continuation
     init(_ c: AsyncStream<[BridgeEvent]>.Continuation) { continuation = c }
-    func onEvents(events: [BridgeEvent]) { continuation.yield(events) }
+    func onEvents(events: [BridgeEvent]) -> Bool { continuation.yield(events); return true }
 }
 
 func cmdIngest(_ args: [String]) async throws {

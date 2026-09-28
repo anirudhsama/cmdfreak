@@ -16,9 +16,10 @@
 //! `hook_committed == true` and is skipped to avoid delivering it twice. History chunks use the same
 //! wait, so exactly one chunk is in flight against Swift's commit.
 
+use std::collections::HashMap;
 use std::future::Future;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, RwLock, Weak};
+use std::sync::{Arc, Mutex, RwLock, Weak};
 use std::time::Duration;
 
 use tokio::sync::{mpsc, oneshot};
@@ -44,8 +45,8 @@ const ORDERED_CAPACITY: usize = 8192;
 pub(crate) enum Input {
     Lib(Arc<Event>),
     /// Already-mapped events (hook batches, history chunks, import). `done` fires after the sink
-    /// has returned from the flush containing them.
-    Ready(Vec<BridgeEvent>, Option<oneshot::Sender<()>>),
+    /// has returned from the flush containing them, with the sink's result.
+    Ready(Vec<BridgeEvent>, Option<oneshot::Sender<bool>>),
 }
 
 #[derive(Default)]
@@ -64,6 +65,10 @@ pub(crate) struct Shared {
     history_tx: mpsc::UnboundedSender<Arc<Event>>,
     client: RwLock<Option<Arc<Client>>>,
     bot: tokio::sync::Mutex<Option<BotHandle>>,
+    /// Bumped per client built and per reset; a `LoggedOut` from an older client never resets a
+    /// newer one.
+    generation: AtomicU64,
+    rt: tokio::runtime::Handle,
 }
 
 impl Shared {
@@ -75,22 +80,31 @@ impl Shared {
         self.client().ok_or(BridgeError::NotConnected)
     }
 
-    /// Pushes mapped events and waits (async) until the sink has received them.
-    pub async fn emit_and_wait(&self, events: Vec<BridgeEvent>) -> bool {
+    /// Pushes mapped events and waits (async) until the sink has handled them. `Some(persisted)`
+    /// is the sink's result; `None` means the sink is gone.
+    pub async fn emit_and_wait(&self, events: Vec<BridgeEvent>) -> Option<bool> {
         let (done, rx) = oneshot::channel();
         if self.tx.send(Input::Ready(events, Some(done))).is_err() {
-            return false;
+            return None;
         }
-        rx.await.is_ok()
+        rx.await.ok()
     }
 
-    /// Blocking-thread variant of [`Shared::emit_and_wait`].
+    /// Blocking-thread variant of [`Shared::emit_and_wait`] for history chunks. Returns whether
+    /// to go on: a chunk the app failed to save is logged and skipped; only a gone sink stops.
     pub fn emit_blocking(&self, events: Vec<BridgeEvent>) -> bool {
         let (done, rx) = oneshot::channel();
         if self.tx.send(Input::Ready(events, Some(done))).is_err() {
             return false;
         }
-        rx.blocking_recv().is_ok()
+        match rx.blocking_recv() {
+            Ok(true) => true,
+            Ok(false) => {
+                log::error!("history chunk not persisted by the app; continuing with the next");
+                true
+            }
+            Err(_) => false,
+        }
     }
 
     fn emit(&self, events: Vec<BridgeEvent>) {
@@ -104,7 +118,7 @@ impl Shared {
 
 // MARK: - Pipeline
 
-type SinkJob = (Vec<BridgeEvent>, Vec<oneshot::Sender<()>>);
+type SinkJob = (Vec<BridgeEvent>, Vec<oneshot::Sender<bool>>);
 
 /// Calls the sink in order on its own thread (the sink may block until Swift has committed), then
 /// releases the batch's waiters. Exits when the pipeline drops its sender.
@@ -112,11 +126,9 @@ fn spawn_sink_thread(sink: Arc<dyn EventSink>) -> std::io::Result<std::sync::mps
     let (tx, rx) = std::sync::mpsc::channel::<SinkJob>();
     std::thread::Builder::new().name("wa-bridge-sink".into()).spawn(move || {
         for (events, waiters) in rx {
-            if !events.is_empty() {
-                sink.on_events(events);
-            }
+            let ok = events.is_empty() || sink.on_events(events);
             for w in waiters {
-                let _ = w.send(());
+                let _ = w.send(ok);
             }
         }
     })?;
@@ -129,12 +141,12 @@ async fn pipeline(
     sink_tx: std::sync::mpsc::Sender<SinkJob>,
 ) {
     let mut buf: Vec<BridgeEvent> = Vec::new();
-    let mut waiters: Vec<oneshot::Sender<()>> = Vec::new();
+    let mut waiters: Vec<oneshot::Sender<bool>> = Vec::new();
     let mut deadline = tokio::time::Instant::now();
 
     // Never blocks: hands the batch to the sink thread. A dead sink thread drops the waiters, which
     // the durability hook reports as a failure (messages stay unacked).
-    let flush = |shared: &Shared, buf: &mut Vec<BridgeEvent>, waiters: &mut Vec<oneshot::Sender<()>>| {
+    let flush = |shared: &Shared, buf: &mut Vec<BridgeEvent>, waiters: &mut Vec<oneshot::Sender<bool>>| {
         if buf.is_empty() && waiters.is_empty() {
             return;
         }
@@ -233,6 +245,8 @@ async fn history_worker(weak: Weak<Shared>, mut rx: mpsc::UnboundedReceiver<Arc<
 
 struct BusHandler {
     shared: Weak<Shared>,
+    /// `Shared::generation` of the client this handler was built for.
+    generation: u64,
 }
 
 impl EventHandler for BusHandler {
@@ -242,6 +256,9 @@ impl EventHandler for BusHandler {
             && batch.hook_committed
         {
             return;
+        }
+        if matches!(&*event, Event::LoggedOut(_)) {
+            spawn_logout_reset(&shared, self.generation);
         }
         shared.counters.received.fetch_add(1, Ordering::Relaxed);
         if shared.tx.send(Input::Lib(event)).is_err() {
@@ -254,8 +271,79 @@ impl EventHandler for BusHandler {
     }
 }
 
+/// Unlinked (from the phone, or our own `logout()`): the session is dead, so do the same full reset
+/// `logout()` does and let a later connect start unpaired. The event itself still reaches Swift,
+/// which forgets its own identity.
+fn spawn_logout_reset(shared: &Arc<Shared>, generation: u64) {
+    let weak = Arc::downgrade(shared);
+    shared.rt.spawn(async move {
+        let Some(shared) = weak.upgrade() else { return };
+        let session = session_path(&shared.data_dir);
+        match reset_session(&shared, &session, Some(generation)).await {
+            Ok(()) => log::info!("logged out; session store reset"),
+            Err(e) => log::error!("session reset after logout failed: {e}"),
+        }
+    });
+}
+
+/// Failed saves a message gets before the hook gives up and acks it anyway (logged). The library
+/// redelivers an unacked batch on the next connect; a batch the app can never save would otherwise
+/// come back forever.
+const MAX_HOOK_ATTEMPTS: u32 = 3;
+
+type HookKey = (String, String, String);
+
 struct DurabilityHook {
     shared: Weak<Shared>,
+    /// Failed save attempts per `(chat, sender, id)` (this process only).
+    failures: Mutex<HashMap<HookKey, u32>>,
+}
+
+impl DurabilityHook {
+    fn new(shared: Weak<Shared>) -> Self {
+        Self { shared, failures: Mutex::new(HashMap::new()) }
+    }
+
+    /// Hands the mapped batch to the sink and turns its answer into the hook's: `Ok` acks, `Err`
+    /// leaves the batch unacked for redelivery, until every message in it has failed
+    /// `MAX_HOOK_ATTEMPTS` times.
+    async fn commit(&self, shared: &Shared, keys: Vec<HookKey>, events: Vec<BridgeEvent>) -> anyhow::Result<()> {
+        if events.is_empty() {
+            return Ok(());
+        }
+        match shared.emit_and_wait(events).await {
+            None => anyhow::bail!("event sink closed; leaving messages unacked for redelivery"),
+            Some(true) => {
+                let mut failures = self.failures.lock().unwrap();
+                if !failures.is_empty() {
+                    keys.iter().for_each(|k| _ = failures.remove(k));
+                }
+                Ok(())
+            }
+            Some(false) => {
+                let mut failures = self.failures.lock().unwrap();
+                if failures.len() > 10_000 {
+                    failures.clear();
+                }
+                let mut exhausted = true;
+                for k in &keys {
+                    let n = failures.entry(k.clone()).or_default();
+                    *n += 1;
+                    exhausted &= *n >= MAX_HOOK_ATTEMPTS;
+                }
+                if exhausted {
+                    keys.iter().for_each(|k| _ = failures.remove(k));
+                    log::error!(
+                        "app failed to save {} inbound message(s) {MAX_HOOK_ATTEMPTS} times; acking them anyway",
+                        keys.len()
+                    );
+                    Ok(())
+                } else {
+                    anyhow::bail!("app failed to save the batch; leaving it unacked for redelivery")
+                }
+            }
+        }
+    }
 }
 
 #[whatsapp_rust::async_trait]
@@ -270,11 +358,11 @@ impl InboundDurabilityHook for DurabilityHook {
         if !messages.is_empty() || !updates.is_empty() {
             events.push(BridgeEvent::Messages { messages, updates });
         }
-        if events.is_empty() || shared.emit_and_wait(events).await {
-            Ok(())
-        } else {
-            anyhow::bail!("event sink closed; leaving messages unacked for redelivery")
-        }
+        let keys = batch
+            .iter()
+            .map(|m| (m.info.source.chat.to_string(), m.info.source.sender.to_string(), m.info.id.to_string()))
+            .collect();
+        self.commit(&shared, keys, events).await
     }
 }
 
@@ -309,8 +397,12 @@ impl WaBridge {
     }
 
     fn session_path(&self) -> std::path::PathBuf {
-        std::path::Path::new(&self.shared.data_dir).join("wa-session.sqlite")
+        session_path(&self.shared.data_dir)
     }
+}
+
+fn session_path(data_dir: &str) -> std::path::PathBuf {
+    std::path::Path::new(data_dir).join("wa-session.sqlite")
 }
 
 fn parse_jid(s: &str) -> R<Jid> {
@@ -332,11 +424,12 @@ async fn connect_inner(shared: Arc<Shared>, session: std::path::PathBuf) -> R<()
     }
     let path = session.to_str().ok_or_else(|| BridgeError::Io("non-UTF-8 data dir".into()))?;
     let store = SqliteStore::new(path).await.map_err(|e| BridgeError::Store(e.to_string()))?;
+    let generation = shared.generation.fetch_add(1, Ordering::SeqCst) + 1;
     let bot = Bot::builder()
         .with_backend(store)
         .with_event_delivery(EventDelivery::Ordered { capacity: ORDERED_CAPACITY })
-        .with_event_handler(BusHandler { shared: Arc::downgrade(&shared) })
-        .with_inbound_durability_hook(DurabilityHook { shared: Arc::downgrade(&shared) })
+        .with_event_handler(BusHandler { shared: Arc::downgrade(&shared), generation })
+        .with_inbound_durability_hook(DurabilityHook::new(Arc::downgrade(&shared)))
         .build()
         .await
         .map_err(|e| BridgeError::Store(e.to_string()))?;
@@ -349,8 +442,17 @@ async fn connect_inner(shared: Arc<Shared>, session: std::path::PathBuf) -> R<()
 }
 
 /// Stops the bot, forgets the client and our identity, and removes the session store files.
-async fn reset_session(shared: &Shared, session: &std::path::Path) -> R<()> {
-    let handle = shared.bot.lock().await.take();
+/// With `only_generation`, does nothing unless that client is still the current one.
+async fn reset_session(shared: &Shared, session: &std::path::Path, only_generation: Option<u64>) -> R<()> {
+    let handle = {
+        let mut guard = shared.bot.lock().await;
+        if only_generation.is_some_and(|g| g != shared.generation.load(Ordering::SeqCst)) {
+            return Ok(());
+        }
+        // This client is finished; a later connect() builds the next generation.
+        shared.generation.fetch_add(1, Ordering::SeqCst);
+        guard.take()
+    };
     if let Some(h) = handle {
         h.shutdown().await;
     }
@@ -391,6 +493,8 @@ impl WaBridge {
             history_tx,
             client: RwLock::new(None),
             bot: tokio::sync::Mutex::new(None),
+            generation: AtomicU64::new(0),
+            rt: rt.handle().clone(),
         });
         rt.spawn(pipeline(Arc::downgrade(&shared), rx, sink_tx));
         rt.spawn(history_worker(Arc::downgrade(&shared), history_rx));
@@ -447,7 +551,7 @@ impl WaBridge {
             let client = shared.require_client()?;
             client.logout().await;
             drop(client);
-            reset_session(&shared, &session).await
+            reset_session(&shared, &session, None).await
         })
         .await
     }
@@ -514,7 +618,9 @@ impl WaBridge {
                 None => wa::Message::text(text.clone()),
             };
             let sent = client.send_message(to.clone(), msg).await.map_err(net)?;
-            Ok(sent_result(&shared, &to, sent.message_id, MessageKind::Text, Some(text), None, reply_to))
+            let mut result = sent_result(&shared, &to, sent.message_id, MessageKind::Text, Some(text), None, reply_to);
+            result.message.participant = own_participant(&shared, &client, &to).await;
+            Ok(result)
         })
         .await
     }
@@ -734,6 +840,29 @@ impl WaBridge {
         .await
     }
 
+    /// Retries `BridgeMessageUpdate::Encrypted` envelopes once their target is stored. One entry
+    /// per envelope, in order: the decrypted `Edit`/`PollVote`, or `None` (still no secret, not
+    /// connected, or undecryptable).
+    pub async fn decrypt_parked(&self, envelopes: Vec<Vec<u8>>) -> Vec<Option<BridgeMessageUpdate>> {
+        let shared = self.shared.clone();
+        let count = envelopes.len();
+        self.run(async move {
+            let client = shared.client();
+            let ctx = MapCtx { canon: &shared.canon, polls: &shared.polls, client: client.as_ref() };
+            let mut out = Vec::with_capacity(envelopes.len());
+            for e in &envelopes {
+                out.push(live::decrypt_parked(&ctx, e).await);
+            }
+            let aliases = shared.canon.take_pending();
+            if !aliases.is_empty() {
+                shared.emit(vec![BridgeEvent::JidAliases { aliases }]);
+            }
+            Ok(out)
+        })
+        .await
+        .unwrap_or_else(|_| vec![None; count])
+    }
+
     // Development: replays a wa-link capture (`history/*.zlib` + `events.jsonl`) through the same
     // mapping and sink as live traffic, without connecting. Lets the app DB be built without re-pairing.
     pub async fn import_capture(&self, capture_dir: String) -> R<()> {
@@ -801,6 +930,33 @@ impl WaBridge {
         })
         .await
     }
+}
+
+/// Our own JID as the key `participant` of a message we sent to `chat`: `None` outside groups; in a
+/// group, the LID when the group is LID-addressed (as the server and our other devices key it),
+/// else the phone-number JID. The routing info is cached by the send that just ran.
+pub(crate) async fn own_participant(shared: &Shared, client: &Client, chat: &Jid) -> Option<String> {
+    use whatsapp_rust::wacore::types::message::AddressingMode;
+    use whatsapp_rust::wacore_binary::JidExt;
+    if !chat.is_group() {
+        return None;
+    }
+    let lid_addressed = match client.groups().routing_info(chat).await {
+        Ok(info) => info.addressing_mode == AddressingMode::Lid,
+        Err(e) => {
+            log::warn!("group addressing mode unknown for own participant: {e}");
+            false
+        }
+    };
+    own_participant_for(shared, lid_addressed).or_else(|| {
+        let own = if lid_addressed { client.lid() } else { client.pn() };
+        own.map(|j| j.to_non_ad().to_string())
+    })
+}
+
+pub(crate) fn own_participant_for(shared: &Shared, lid_addressed: bool) -> Option<String> {
+    let own = if lid_addressed { shared.canon.own_lid() } else { shared.canon.own_pn() };
+    own.map(|j| j.to_non_ad().to_string())
 }
 
 /// Rebuilds the wire key from our-frame fields.
@@ -913,10 +1069,20 @@ mod sink_tests {
     }
 
     impl EventSink for SlowSink {
-        fn on_events(&self, events: Vec<BridgeEvent>) {
+        fn on_events(&self, events: Vec<BridgeEvent>) -> bool {
             std::thread::sleep(Duration::from_millis(80));
             self.batches.lock().unwrap().push(events.len());
             self.committed.store(true, Ordering::SeqCst);
+            true
+        }
+    }
+
+    /// Stands in for a Swift sink whose ingest transaction fails.
+    struct FailingSink(AtomicBool);
+
+    impl EventSink for FailingSink {
+        fn on_events(&self, _events: Vec<BridgeEvent>) -> bool {
+            !self.0.load(Ordering::SeqCst)
         }
     }
 
@@ -941,7 +1107,7 @@ mod sink_tests {
             ticker.await.unwrap();
             ok
         });
-        assert!(ok);
+        assert_eq!(ok, Some(true));
         assert!(sink.committed.load(Ordering::SeqCst), "hook resolved before the sink returned");
         assert_eq!(*sink.batches.lock().unwrap(), vec![1]);
     }
@@ -960,12 +1126,87 @@ mod sink_tests {
             Some("123@lid".parse().unwrap()),
         );
         let shared = bridge.shared.clone();
-        bridge.rt.block_on(async move { reset_session(&shared, &session).await }).unwrap();
+        bridge.rt.block_on(async move { reset_session(&shared, &session, None).await }).unwrap();
         for suffix in ["", "-wal", "-shm"] {
             assert!(!std::path::Path::new(&format!("{}{suffix}", bridge.session_path().display())).exists());
         }
         assert!(bridge.shared.client().is_none());
         assert!(bridge.rt.block_on(bridge.shared.bot.lock()).is_none());
         assert!(bridge.shared.canon.own_pn().is_none());
+    }
+
+    fn write_session(bridge: &WaBridge) {
+        for suffix in ["", "-wal"] {
+            std::fs::write(format!("{}{suffix}", bridge.session_path().display()), b"x").unwrap();
+        }
+    }
+
+    fn logged_out() -> Arc<Event> {
+        use whatsapp_rust::types::events::{ConnectFailureReason, LoggedOut};
+        Arc::new(Event::LoggedOut(Box::new(
+            LoggedOut::builder().on_connect(false).reason(ConnectFailureReason::LoggedOut).build(),
+        )))
+    }
+
+    #[test]
+    fn server_logout_resets_the_session_like_logout() {
+        let sink = Arc::new(SlowSink { committed: AtomicBool::new(false), batches: Mutex::new(vec![]) });
+        let dir = temp_dir("server-logout");
+        let bridge = WaBridge::new(dir.to_string_lossy().into(), sink).unwrap();
+        bridge.shared.canon.set_own(Some("15550000000@s.whatsapp.net".parse().unwrap()), None);
+
+        // A LoggedOut from a client that is no longer current changes nothing.
+        bridge.shared.generation.store(2, Ordering::SeqCst);
+        write_session(&bridge);
+        BusHandler { shared: Arc::downgrade(&bridge.shared), generation: 1 }.handle_event(logged_out());
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(bridge.session_path().exists());
+        assert!(bridge.shared.canon.own_pn().is_some());
+
+        BusHandler { shared: Arc::downgrade(&bridge.shared), generation: 2 }.handle_event(logged_out());
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while bridge.session_path().exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(!bridge.session_path().exists());
+        assert!(!std::path::Path::new(&format!("{}-wal", bridge.session_path().display())).exists());
+        assert!(bridge.shared.canon.own_pn().is_none());
+        assert!(bridge.shared.client().is_none());
+    }
+
+    #[test]
+    fn own_group_participant_follows_the_addressing_mode() {
+        let sink = Arc::new(SlowSink { committed: AtomicBool::new(false), batches: Mutex::new(vec![]) });
+        let bridge = WaBridge::new(temp_dir("own-participant").to_string_lossy().into(), sink).unwrap();
+        bridge.shared.canon.set_own(
+            Some("15550000000:3@s.whatsapp.net".parse().unwrap()),
+            Some("123:3@lid".parse().unwrap()),
+        );
+        assert_eq!(own_participant_for(&bridge.shared, true).as_deref(), Some("123@lid"));
+        assert_eq!(own_participant_for(&bridge.shared, false).as_deref(), Some("15550000000@s.whatsapp.net"));
+    }
+
+    #[test]
+    fn hook_fails_while_the_app_cannot_save_then_gives_up() {
+        let sink = Arc::new(FailingSink(AtomicBool::new(true)));
+        let dir = temp_dir("hook-fail");
+        let bridge = WaBridge::new(dir.to_string_lossy().into(), sink.clone()).unwrap();
+        let hook = DurabilityHook::new(Arc::downgrade(&bridge.shared));
+        let shared = bridge.shared.clone();
+        let key = |id: &str| ("c@s.whatsapp.net".to_string(), "s@s.whatsapp.net".to_string(), id.to_string());
+        let events = || vec![BridgeEvent::OfflineSyncCompleted { count: 1 }];
+        bridge.rt.block_on(async {
+            // Failing sink: unacked (Err) until the bound, then acked with an error log.
+            for _ in 1..MAX_HOOK_ATTEMPTS {
+                assert!(hook.commit(&shared, vec![key("A")], events()).await.is_err());
+            }
+            assert!(hook.commit(&shared, vec![key("A")], events()).await.is_ok());
+            // A fresh message batched with it resets nothing: its own count starts over.
+            assert!(hook.commit(&shared, vec![key("A"), key("B")], events()).await.is_err());
+            // Once the app saves again, the batch is acked and its counts are forgotten.
+            sink.0.store(false, Ordering::SeqCst);
+            assert!(hook.commit(&shared, vec![key("A"), key("B")], events()).await.is_ok());
+            assert!(hook.failures.lock().unwrap().is_empty());
+        });
     }
 }

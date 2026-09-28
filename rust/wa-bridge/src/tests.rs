@@ -430,6 +430,130 @@ fn clear_and_delete_cutoff_comes_from_the_message_range() {
     assert_eq!(range_cutoff(Some(&Default::default()), 1_800_000_000), 1_800_000_000);
 }
 
+fn reply_quoting(quoted: wa::Message) -> wa::Message {
+    wa::Message {
+        extended_text_message: MessageField::some(wa::message::ExtendedTextMessage {
+            text: Some("reply".into()),
+            context_info: MessageField::some(wa::ContextInfo {
+                stanza_id: Some("Q1".into()),
+                quoted_message: MessageField::some(quoted),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn quotes_of_business_documents_contacts_and_wrapped_text_get_a_snippet() {
+    let canon = canon();
+    let polls = PollCache::default();
+    let bob = format!("{BOB_PN}@s.whatsapp.net");
+    let quote = |q: wa::Message| {
+        let Mapped::Message(b) = map::map_message(&reply_quoting(q), &env(&bob, &bob, None, false), &canon, &polls)
+        else {
+            panic!("expected message")
+        };
+        let q = b.quoted.unwrap();
+        (q.kind, q.snippet)
+    };
+    let buttons = wa::Message {
+        buttons_message: MessageField::some(wa::message::ButtonsMessage {
+            content_text: Some("Pick a slot".into()),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    assert_eq!(quote(buttons), (MessageKind::Text, "Pick a slot".into()));
+    let template = wa::Message {
+        template_message: MessageField::some(wa::message::TemplateMessage {
+            hydrated_template: MessageField::some(wa::message::template_message::HydratedFourRowTemplate {
+                hydrated_content_text: Some("Your order shipped".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    assert_eq!(quote(template), (MessageKind::Text, "Your order shipped".into()));
+    let document = wa::Message {
+        document_message: MessageField::some(wa::message::DocumentMessage {
+            file_name: Some("invoice.pdf".into()),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    assert_eq!(quote(document), (MessageKind::Document, "invoice.pdf".into()));
+    let contact = wa::Message {
+        contact_message: MessageField::some(wa::message::ContactMessage {
+            display_name: Some("Carol".into()),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    assert_eq!(quote(contact), (MessageKind::Contact, "Carol".into()));
+    let ephemeral_text = wa::Message {
+        ephemeral_message: MessageField::some(wa::message::FutureProofMessage {
+            message: MessageField::some(wa::Message {
+                extended_text_message: MessageField::some(wa::message::ExtendedTextMessage {
+                    text: Some("vanishing".into()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+        }),
+        ..Default::default()
+    };
+    assert_eq!(quote(ephemeral_text), (MessageKind::Text, "vanishing".into()));
+}
+
+#[test]
+fn poll_vote_without_a_known_parent_secret_is_parked_and_round_trips() {
+    use std::sync::Arc;
+    use whatsapp_rust::prelude::{InboundMessage, MessageInfo};
+    use whatsapp_rust::wacore::types::message::MessageSource;
+    let canon = canon();
+    let polls = PollCache::default();
+    let bob = format!("{BOB_PN}@s.whatsapp.net");
+    let vote = wa::Message {
+        poll_update_message: MessageField::some(wa::message::PollUpdateMessage {
+            poll_creation_message_key: key(&bob, false, "POLL1", None),
+            vote: MessageField::some(wa::message::PollEncValue {
+                enc_payload: Some(vec![1, 2, 3]),
+                enc_iv: Some(vec![4, 5, 6]),
+            }),
+            sender_timestamp_ms: Some(1_700_000_000_000),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let info = MessageInfo {
+        source: MessageSource { chat: bob.parse().unwrap(), sender: bob.parse().unwrap(), ..Default::default() },
+        id: "VOTE1".into(),
+        timestamp: whatsapp_rust::chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap(),
+        ..Default::default()
+    };
+    let inbound = InboundMessage::builder().message(Arc::new(vote.clone())).info(Arc::new(info)).build();
+    let ctx = crate::live::MapCtx { canon: &canon, polls: &polls, client: None };
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let (messages, updates) = rt.block_on(crate::live::map_batch(&ctx, std::slice::from_ref(&inbound)));
+    assert!(messages.is_empty());
+    let [BridgeMessageUpdate::Encrypted { target, envelope }] = updates.as_slice() else {
+        panic!("expected a parked vote, got {updates:?}");
+    };
+    // Bob voted on a poll we created in our DM.
+    assert_eq!(target.id, "POLL1");
+    assert_eq!(target.chat_jid, bob);
+    assert!(target.from_me);
+    let back = crate::live::unpark(envelope).unwrap();
+    assert_eq!(*back.message, vote);
+    assert_eq!(back.info.id.as_str(), "VOTE1");
+    assert_eq!(back.info.source.sender.to_string(), bob);
+    // Retrying without a client decrypts nothing and never re-parks.
+    assert!(rt.block_on(crate::live::decrypt_parked(&ctx, envelope)).is_none());
+}
+
 /// `WA_CAPTURE_DIR=… cargo test -- --ignored --nocapture real_capture`
 #[test]
 #[ignore]
@@ -478,4 +602,117 @@ fn real_capture_summary() {
     println!("TOTAL chats={chats} messages={messages} updates={updates} contacts={contacts} aliases={aliases} lid_chats={lid_chats} max_chunk_messages={max_chunk_messages}");
     println!("kinds: {kinds:?}");
     assert!(messages > 0);
+}
+
+/// Shape of a quoted payload: its populated top-level fields, descending one level into wrappers.
+fn quote_shape(v: &serde_json::Value) -> String {
+    const TEXT: &[&str] = &[
+        "text", "caption", "title", "description", "content_text", "name", "hydrated_content_text",
+        "selected_display_text", "file_name", "display_name", "conversation",
+    ];
+    let Some(obj) = v.as_object() else { return "-".into() };
+    let mut parts = Vec::new();
+    for (k, v) in obj {
+        if v.is_null() || v.as_array().is_some_and(Vec::is_empty) || k == "message_context_info" {
+            continue;
+        }
+        let inner = v.get("message").and_then(|m| m.as_object()).map(|m| {
+            m.iter()
+                .filter(|(k, v)| !v.is_null() && *k != "message_context_info")
+                .map(|(k, _)| k.as_str())
+                .collect::<Vec<_>>()
+                .join("+")
+        });
+        let texts = v.as_object().map(|o| {
+            o.iter()
+                .filter(|(k, v)| TEXT.contains(&k.as_str()) && v.as_str().is_some_and(|s| !s.is_empty()))
+                .map(|(k, _)| k.as_str())
+                .collect::<Vec<_>>()
+                .join(",")
+        });
+        match (inner, texts) {
+            (Some(i), _) => parts.push(format!("{k}{{{i}}}")),
+            (None, Some(t)) => parts.push(format!("{k}[{t}]")),
+            _ => parts.push(k.clone()),
+        }
+    }
+    parts.join(" ")
+}
+
+fn find_quoted(v: &serde_json::Value, out: &mut Vec<(String, serde_json::Value)>) {
+    match v {
+        serde_json::Value::Object(o) => {
+            if let (Some(id), Some(q)) = (o.get("stanza_id").and_then(|s| s.as_str()), o.get("quoted_message"))
+                && !q.is_null()
+            {
+                out.push((id.to_string(), q.clone()));
+            }
+            o.values().for_each(|v| find_quoted(v, out));
+        }
+        serde_json::Value::Array(a) => a.iter().for_each(|v| find_quoted(v, out)),
+        _ => {}
+    }
+}
+
+/// Quoted payloads the bridge maps to an empty snippet, grouped by shape.
+/// `cargo test -- --ignored --nocapture real_capture_quotes`
+#[test]
+#[ignore]
+fn real_capture_quotes() {
+    let dir = std::env::var("WA_CAPTURE_DIR").unwrap_or_else(|_| {
+        format!("{}/Library/Application Support/BetterWA/capture", std::env::var("HOME").unwrap())
+    });
+    let mut files: Vec<_> = std::fs::read_dir(format!("{dir}/history"))
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .collect();
+    files.sort();
+    let canon = canon();
+    let polls = PollCache::default();
+    let (mut quotes, mut empty) = (0usize, 0usize);
+    let mut shapes = std::collections::BTreeMap::<String, usize>::new();
+    let mut kinds = std::collections::BTreeMap::<String, usize>::new();
+    for f in files {
+        let bytes = std::fs::read(&f).unwrap();
+        let mut stream = HistorySyncStream::new(&bytes, MAX_DECOMPRESSED);
+        let mut conv = wa::Conversation::default();
+        loop {
+            conv.clear();
+            if !stream.next_conversation_into(&mut conv).unwrap() {
+                break;
+            }
+            let Some(chat) = crate::canon::parse(&conv.id) else { continue };
+            for hm in &conv.messages {
+                let Some(wmi) = hm.message.as_option() else { continue };
+                let Some(msg) = wmi.message.as_option() else { continue };
+                let (mut ms, mut us) = (Vec::new(), Vec::new());
+                map::map_web_message(wmi, &chat, &|j| canon.cached(j), &canon, &polls, &mut ms, &mut us);
+                let Some(q) = ms.first().and_then(|m| m.quoted.clone()) else { continue };
+                quotes += 1;
+                let tag = if q.snippet.is_empty() { ":empty" } else { "" };
+                *kinds.entry(format!("{:?}{tag}", q.kind)).or_default() += 1;
+                if !q.snippet.is_empty() {
+                    continue;
+                }
+                empty += 1;
+                let json = serde_json::to_value(msg).unwrap();
+                let mut found = Vec::new();
+                find_quoted(&json, &mut found);
+                let shape = found
+                    .iter()
+                    .find(|(id, _)| *id == q.id)
+                    .map(|(_, v)| quote_shape(v))
+                    .unwrap_or_else(|| "<none>".into());
+                *shapes.entry(format!("{:?} {shape}", q.kind)).or_default() += 1;
+            }
+        }
+    }
+    println!("QUOTES total={quotes} empty_snippet={empty}");
+    println!("kinds: {kinds:?}");
+    let mut v: Vec<_> = shapes.into_iter().collect();
+    v.sort_by_key(|e| std::cmp::Reverse(e.1));
+    for (s, n) in v {
+        println!("{n:6}  {s}");
+    }
 }

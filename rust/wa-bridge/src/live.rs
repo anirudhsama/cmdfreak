@@ -12,6 +12,7 @@ use whatsapp_rust::types::events::{
 use whatsapp_rust::wacore::poll::PollVoteCiphertext;
 use whatsapp_rust::wacore::types::presence::{ChatPresence, ChatPresenceMedia, ReceiptType};
 use whatsapp_rust::wacore_binary::JidExt;
+use whatsapp_rust::waproto::buffa::Message as _;
 
 use crate::canon::{Canon, parse};
 use crate::map::{self, Envelope, Mapped, PollCache};
@@ -174,13 +175,19 @@ pub async fn map_event(ctx: &MapCtx<'_>, event: &Event) -> Vec<BridgeEvent> {
         }
         Event::GroupUpdate(g) => {
             use whatsapp_rust::wacore::stanza::groups::GroupNotificationAction;
-            // Only subject changes carry data the chat row needs; participant changes are fetched
-            // lazily through `fetch_group_metadata` when the group is opened.
-            if let GroupNotificationAction::Subject { subject, .. } = &*g.action {
+            // Subject changes carry the new name. Membership changes only mark the stored count
+            // stale (subject `None`, count 0); the app re-fetches it with the batched overviews.
+            // The participant list itself is fetched lazily when the group is opened.
+            let subject = match &*g.action {
+                GroupNotificationAction::Subject { subject, .. } => Some(Some(subject.clone())),
+                GroupNotificationAction::Add { .. } | GroupNotificationAction::Remove { .. } => Some(None),
+                _ => None,
+            };
+            if let Some(subject) = subject {
                 out.push(BridgeEvent::Group {
                     group: BridgeGroup {
                         jid: g.group_jid.to_string(),
-                        subject: Some(subject.clone()),
+                        subject,
                         participant_count: 0,
                         participants: vec![],
                     },
@@ -386,7 +393,7 @@ pub async fn map_batch(
     let mut updates = Vec::new();
     for m in batch {
         let env = envelope(ctx, &m.info).await;
-        match map_inbound(ctx, &env, m).await {
+        match map_inbound(ctx, &env, m, true).await {
             Mapped::Message(b) => messages.push(*b),
             Mapped::Update(u) => updates.push(u),
             Mapped::Skip => {}
@@ -395,20 +402,97 @@ pub async fn map_batch(
     (messages, updates)
 }
 
-async fn map_inbound(ctx: &MapCtx<'_>, env: &Envelope, m: &InboundMessage) -> Mapped {
+/// Outcome of opening an encrypted add-on (poll vote, edit).
+enum Addon<T> {
+    Opened(T),
+    /// The parent's secret is not known (yet): the add-on arrived before its original.
+    NoSecret(BridgeMessageKey),
+    Skip,
+}
+
+/// `park`: emit add-ons whose parent secret is missing as `BridgeMessageUpdate::Encrypted` so the
+/// app can retry them once the parent is stored; `false` when retrying a parked one.
+async fn map_inbound(ctx: &MapCtx<'_>, env: &Envelope, m: &InboundMessage, park: bool) -> Mapped {
     let base = m.message.get_base_message();
     if let Some(pu) = base.poll_update_message.as_option() {
         return match decrypt_poll_vote(ctx, env, m, pu).await {
-            Some(u) => Mapped::Update(u),
-            None => Mapped::Skip,
+            Addon::Opened(u) => Mapped::Update(u),
+            Addon::NoSecret(target) if park => parked(target, m),
+            _ => Mapped::Skip,
         };
     }
-    if base.secret_encrypted_message.is_set()
-        && let Some(rewrapped) = decrypt_edit_fallback(ctx, env, m).await
-    {
-        return map::map_message(&rewrapped, env, ctx.canon, ctx.polls);
+    if base.secret_encrypted_message.is_set() {
+        match decrypt_edit_fallback(ctx, env, m).await {
+            Addon::Opened(rewrapped) => return map::map_message(&rewrapped, env, ctx.canon, ctx.polls),
+            Addon::NoSecret(target) if park => return parked(target, m),
+            _ => {}
+        }
     }
     map::map_message(&m.message, env, ctx.canon, ctx.polls)
+}
+
+/// What `decrypt_parked` needs to rebuild the add-on: the raw (not canonicalised) source and the
+/// encoded message. Private to the bridge; Swift stores it as opaque bytes.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct ParkedEnvelope {
+    chat: String,
+    sender: String,
+    sender_alt: Option<String>,
+    from_me: bool,
+    is_group: bool,
+    id: String,
+    timestamp: i64,
+    push_name: String,
+    message: String,
+}
+
+fn parked(target: BridgeMessageKey, m: &InboundMessage) -> Mapped {
+    let src = &m.info.source;
+    let envelope = ParkedEnvelope {
+        chat: src.chat.to_string(),
+        sender: src.sender.to_string(),
+        sender_alt: src.sender_alt.as_ref().map(|j| j.to_string()),
+        from_me: src.is_from_me,
+        is_group: src.is_group,
+        id: m.info.id.to_string(),
+        timestamp: m.info.timestamp.timestamp(),
+        push_name: m.info.push_name.to_string(),
+        message: hex::encode(m.message.encode_to_vec()),
+    };
+    match serde_json::to_vec(&envelope) {
+        Ok(envelope) => Mapped::Update(BridgeMessageUpdate::Encrypted { target, envelope }),
+        Err(_) => Mapped::Skip,
+    }
+}
+
+pub(crate) fn unpark(bytes: &[u8]) -> Option<InboundMessage> {
+    let p: ParkedEnvelope = serde_json::from_slice(bytes).ok()?;
+    let message = wa::Message::decode_from_slice(&hex::decode(&p.message).ok()?).ok()?;
+    let info = MessageInfo {
+        source: whatsapp_rust::wacore::types::message::MessageSource {
+            chat: parse(&p.chat)?,
+            sender: parse(&p.sender)?,
+            is_from_me: p.from_me,
+            is_group: p.is_group,
+            sender_alt: p.sender_alt.as_deref().and_then(parse),
+            ..Default::default()
+        },
+        id: p.id.into(),
+        push_name: p.push_name.into(),
+        timestamp: whatsapp_rust::chrono::DateTime::from_timestamp(p.timestamp, 0)?,
+        ..Default::default()
+    };
+    Some(InboundMessage::builder().message(Arc::new(message)).info(Arc::new(info)).build())
+}
+
+/// Retries one parked add-on (see `BridgeMessageUpdate::Encrypted`).
+pub async fn decrypt_parked(ctx: &MapCtx<'_>, bytes: &[u8]) -> Option<BridgeMessageUpdate> {
+    let m = unpark(bytes)?;
+    let env = envelope(ctx, &m.info).await;
+    match map_inbound(ctx, &env, &m, false).await {
+        Mapped::Update(u @ (BridgeMessageUpdate::Edit { .. } | BridgeMessageUpdate::PollVote { .. })) => Some(u),
+        _ => None,
+    }
 }
 
 /// Secret lookups try every combination of the chat's and the author's PN/LID spellings, since the
@@ -441,17 +525,18 @@ async fn decrypt_poll_vote(
     env: &Envelope,
     m: &InboundMessage,
     pu: &wa::message::PollUpdateMessage,
-) -> Option<BridgeMessageUpdate> {
-    let client = ctx.client?;
-    let key = pu.poll_creation_message_key.as_option()?;
-    let poll_id = key.id.clone()?;
-    let vote = pu.vote.as_option()?;
+) -> Addon<BridgeMessageUpdate> {
+    let Some(key) = pu.poll_creation_message_key.as_option() else { return Addon::Skip };
+    let Some(poll_id) = key.id.clone() else { return Addon::Skip };
+    let Some(vote) = pu.vote.as_option() else { return Addon::Skip };
     let (Some(payload), Some(iv)) = (vote.enc_payload.as_deref(), vote.enc_iv.as_deref()) else {
-        return None;
+        return Addon::Skip;
     };
     let target = map::target_key(key, env, ctx.canon);
+    // Without a client (not connected) there is no secret store to look in yet.
+    let Some(client) = ctx.client else { return Addon::NoSecret(target) };
     let src = &m.info.source;
-    let own = ctx.canon.own_pn().or_else(|| client.pn())?;
+    let Some(own) = ctx.canon.own_pn().or_else(|| client.pn()) else { return Addon::Skip };
     let creator = if target.from_me {
         own.clone()
     } else if let Some(p) = target.participant.as_deref().and_then(parse) {
@@ -461,8 +546,8 @@ async fn decrypt_poll_vote(
     };
     let voter = if src.is_from_me { own } else { src.sender.to_non_ad() };
     let Some(secret) = lookup_secret(client, ctx.canon, &src.chat, &creator, &poll_id).await else {
-        log::info!("poll vote {}: parent secret unknown; skipping", env.id);
-        return None;
+        log::info!("poll vote {}: parent secret unknown", env.id);
+        return Addon::NoSecret(target);
     };
     let hashes = match client
         .polls()
@@ -478,10 +563,10 @@ async fn decrypt_poll_vote(
         Ok(h) => h,
         Err(e) => {
             log::warn!("poll vote {} decrypt failed: {e}", env.id);
-            return None;
+            return Addon::Skip;
         }
     };
-    Some(BridgeMessageUpdate::PollVote {
+    Addon::Opened(BridgeMessageUpdate::PollVote {
         selected: ctx.polls.resolve(&poll_id, &hashes),
         target,
         voter_jid: env.sender.to_string(),
@@ -496,15 +581,25 @@ async fn decrypt_edit_fallback(
     ctx: &MapCtx<'_>,
     env: &Envelope,
     m: &InboundMessage,
-) -> Option<wa::Message> {
-    let client = ctx.client?;
+) -> Addon<wa::Message> {
     let base = m.message.get_base_message();
-    let edit = message_edit::extract_envelope(base)?;
-    let target_id = edit.target_id()?.to_string();
+    let Some(edit) = message_edit::extract_envelope(base) else { return Addon::Skip };
+    let Some(target_id) = edit.target_id().map(str::to_string) else { return Addon::Skip };
+    // Edits only ever target the editor's own message.
+    let target = BridgeMessageKey {
+        chat_jid: env.chat.to_string(),
+        id: target_id.clone(),
+        from_me: env.from_me,
+        participant: env.participant.clone(),
+    };
+    let Some(client) = ctx.client else { return Addon::NoSecret(target) };
     let src = &m.info.source;
-    let own = ctx.canon.own_pn().or_else(|| client.pn())?;
+    let Some(own) = ctx.canon.own_pn().or_else(|| client.pn()) else { return Addon::Skip };
     let author = edit.original_sender_for_dispatch(src.is_from_me, &src.sender, &own);
-    let secret = lookup_secret(client, ctx.canon, &src.chat, &author, &target_id).await?;
+    let Some(secret) = lookup_secret(client, ctx.canon, &src.chat, &author, &target_id).await else {
+        log::info!("encrypted edit {}: parent secret unknown", env.id);
+        return Addon::NoSecret(target);
+    };
     let alt_author = ctx.canon.alternate(&author);
     let alt_editor = src.sender_alt.clone().or_else(|| ctx.canon.alternate(&src.sender));
     match message_edit::decrypt_with_fallback(
@@ -517,10 +612,10 @@ async fn decrypt_edit_fallback(
         alt_author.as_ref(),
         alt_editor.as_ref(),
     ) {
-        Ok(inner) => message_edit::rewrap_as_legacy_edit(inner),
+        Ok(inner) => message_edit::rewrap_as_legacy_edit(inner).map_or(Addon::Skip, Addon::Opened),
         Err(e) => {
             log::warn!("encrypted edit {} decrypt failed: {e}", env.id);
-            None
+            Addon::Skip
         }
     }
 }

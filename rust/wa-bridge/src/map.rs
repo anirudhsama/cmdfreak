@@ -324,13 +324,16 @@ fn quoted(ctx: Option<&wa::ContextInfo>, canon: &Canon, polls: &PollCache) -> Op
     let (kind, snippet) = match ctx.quoted_message.as_option() {
         Some(q) => {
             let base = q.get_base_message();
-            let kind = map_content(base, canon, polls, "").map_or(MessageKind::Unsupported, |c| c.kind);
-            let mut snippet = message_text(base)
+            let content = map_content(base, canon, polls, "");
+            let kind = content.as_ref().map_or(MessageKind::Unsupported, |c| c.kind);
+            // Quoted media usually lacks download params, so the document name is read directly.
+            let mut snippet = content
+                .as_ref()
+                .and_then(quote_snippet)
+                .or_else(|| message_text(base))
                 .or_else(|| {
-                    base.poll_creation_message
-                        .as_option()
-                        .or(base.poll_creation_message_v3.as_option())
-                        .and_then(|p| p.name.clone())
+                    let d = base.document_message.as_option()?;
+                    some_nonempty(&d.file_name).or_else(|| some_nonempty(&d.title))
                 })
                 .unwrap_or_default();
             if snippet.chars().count() > 200 {
@@ -346,6 +349,20 @@ fn quoted(ctx: Option<&wa::ContextInfo>, canon: &Canon, polls: &PollCache) -> Op
         kind,
         snippet,
     })
+}
+
+/// What a quote block shows for the quoted content: its text (body, caption, business/template
+/// text), else a poll question, document name, contact name or place name.
+fn quote_snippet(c: &Content) -> Option<String> {
+    let nonempty = |s: Option<&str>| s.map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
+    nonempty(c.text.as_deref())
+        .or_else(|| nonempty(c.poll.as_ref().map(|p| p.question.as_str())))
+        .or_else(|| nonempty(c.media.as_ref().and_then(|m| m.file_name.as_deref())))
+        .or_else(|| nonempty(c.contact.as_ref().map(|k| k.display_name.as_str())))
+        .or_else(|| {
+            let l = c.location.as_ref()?;
+            nonempty(l.name.as_deref()).or_else(|| nonempty(l.address.as_deref()))
+        })
 }
 
 fn map_content(base: &wa::Message, canon: &Canon, polls: &PollCache, id: &str) -> Option<Content> {
