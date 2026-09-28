@@ -62,4 +62,62 @@ import Testing
         ])
         #expect(try db.message(F.bob, "B1")?.text == "v2")
     }
+
+    @Test func deleteForMeBeforeTheMessageKeepsItDeleted() async throws {
+        let db = try F.tempDB()
+        let ingest = try IngestActor(database: db)
+        try await ingest.apply([.chatAction(action: .deleteMessageForMe(target: F.key("D1", chat: F.bob)))])
+        try await ingest.apply([F.live(F.message("D1", chat: F.bob))])
+        #expect(try db.message(F.bob, "D1") == nil)
+        #expect(try db.chat(F.bob)?.unreadCount == 0)
+        // Deleted after it arrived, then a stale history copy: still gone, also after a restart.
+        try await ingest.apply([F.live(F.message("D2", chat: F.bob))])
+        try await ingest.apply([.chatAction(action: .deleteMessageForMe(target: F.key("D2", chat: F.bob)))])
+        let restarted = try IngestActor(database: db)
+        try await restarted.apply([F.history(messages: [F.message("D2", chat: F.bob), F.message("D3", chat: F.bob)])])
+        #expect(try db.message(F.bob, "D2") == nil)
+        #expect(try db.message(F.bob, "D3") != nil)
+    }
+
+    @Test func reactionAndVoteRemovalsOutliveStaleCopiesButNotNewerOnes() async throws {
+        let db = try F.tempDB()
+        let ingest = try IngestActor(database: db)
+        let removal = BridgeReaction(senderJid: F.alicePN, fromMe: false, emoji: "", timestamp: 20)
+        try await ingest.apply([F.live(updates: [
+            .reaction(target: F.key("G", chat: F.group), reaction: removal),
+            .pollVote(target: F.key("P", chat: F.group), voterJid: F.alicePN, selected: [], timestamp: 20),
+        ])])
+        // The target arrives from history carrying the older reaction inline, plus the older vote.
+        let old = BridgeReaction(senderJid: F.alicePN, fromMe: false, emoji: "🔥", timestamp: 10)
+        let poll = BridgePoll(question: "Lunch?", options: ["Yes", "No"], selectableCount: 1)
+        try await ingest.apply([F.history(
+            messages: [F.message("G", chat: F.group, sender: F.bob, reactions: [old]),
+                       F.message("P", chat: F.group, sender: F.bob, kind: .poll, text: nil, poll: poll)],
+            updates: [.pollVote(target: F.key("P", chat: F.group), voterJid: F.alicePN, selected: ["Yes"], timestamp: 10)])])
+        #expect(try db.count("SELECT COUNT(*) FROM reaction") == 0)
+        #expect(try db.count("SELECT COUNT(*) FROM poll_vote") == 0)
+        // Another stale copy later still does not resurrect them.
+        try await ingest.apply([F.history(messages: [F.message("G", chat: F.group, sender: F.bob, reactions: [old])])])
+        try await ingest.apply([F.live(updates: [.reaction(target: F.key("G", chat: F.group), reaction: old)])])
+        #expect(try db.count("SELECT COUNT(*) FROM reaction") == 0)
+        // A genuinely newer reaction and vote win over the older removal.
+        let newer = BridgeReaction(senderJid: F.alicePN, fromMe: false, emoji: "❤️", timestamp: 30)
+        try await ingest.apply([F.live(updates: [
+            .reaction(target: F.key("G", chat: F.group), reaction: newer),
+            .pollVote(target: F.key("P", chat: F.group), voterJid: F.alicePN, selected: ["No"], timestamp: 30),
+        ])])
+        #expect(try db.count("SELECT COUNT(*) FROM reaction WHERE emoji = '❤️'") == 1)
+        #expect(try db.count("SELECT COUNT(*) FROM poll_vote WHERE selected = '[\"No\"]'") == 1)
+    }
+
+    @Test func removalTombstonesFollowAliasMerges() async throws {
+        let db = try F.tempDB()
+        let ingest = try IngestActor(database: db)
+        try await ingest.apply([F.live(updates: [.reaction(target: F.key("M", chat: F.aliceLID),
+            reaction: BridgeReaction(senderJid: F.aliceLID, fromMe: false, emoji: "", timestamp: 20))])])
+        try await ingest.apply([.jidAliases(aliases: [BridgeJidAlias(lid: F.aliceLID, pn: F.alicePN)])])
+        try await ingest.apply([F.history(messages: [F.message("M", chat: F.alicePN, reactions: [
+            BridgeReaction(senderJid: F.alicePN, fromMe: false, emoji: "🔥", timestamp: 10)])])])
+        #expect(try db.count("SELECT COUNT(*) FROM reaction") == 0)
+    }
 }

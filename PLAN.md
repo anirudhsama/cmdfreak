@@ -125,7 +125,7 @@ Build only arm64. Universal binaries are not needed.
   - `remuxOggToCaf(src, dst)` (see voice notes).
   - `pinChat`, `archiveChat`, `muteChat`, `markChatRead`.
   - API notes: `send_message` is `pub fn … -> impl Future` returning `SendResult { message_id, … }` (`src/send/mod.rs:1417`, `:937`). `edit_message` is at `src/client/messaging.rs:170`. `revoke_message(to, id, RevokeType::{Sender, Admin{original_sender}})` is at `src/send/actions.rs:18`. `send_reaction(chat, wa::MessageKey, emoji)` is at `reaction.rs:35`; the message table stores the `participant` so the key can be rebuilt.
-- **Events:** a UniFFI `callback interface EventSink { fn onEvents(events: Vec<BridgeEvent>) }`, fed by an `EventHandler` impl.
+- **Events:** a UniFFI `callback interface EventSink { fn onEvents(events: Vec<BridgeEvent>) -> bool }`, fed by an `EventHandler` impl. The return value says whether the app persisted the batch; `false` fails the durability hook so the library leaves inbound messages unacked for redelivery (the hook gives up and acks after 3 failed saves of the same messages).
   - Coalesce events on the Rust side, flushing every ~16ms or 200 events, so Swift receives batches and not one hop per message.
   - Use the handler's `interest()` filter to drop event kinds we don't use.
 - **No protobufs across the boundary.** Map everything to flat UniFFI records: `BridgeChat`, `BridgeMessage`, `BridgeContact`, `BridgeReceipt`, `BridgePresence`, `BridgeGroup`, `BridgeHistoryChunk`, `BridgePairing` (QR string, pair code, success, error, logged out), and `BridgeConnection` (connecting, connected, disconnected with a reason).
@@ -177,7 +177,8 @@ The XcodeGen project runs it as a pre-build script only when the Rust sources ar
   - `media`: messageKey FK. Holds the download params, the metadata, `localPath`, and `downloadState`.
   - `reaction`.
   - `jid_alias`.
-  - `pending_mutation`: edits, revokes, reactions, and receipts waiting for their target message.
+  - `pending_mutation`: edits, revokes, reactions, and receipts waiting for their target message, plus encrypted edits/poll votes whose parent secret was not known yet (`BridgeMessageUpdate.encrypted`, retried through `decryptParked` once the target is stored).
+  - `tombstone`: delete-for-me and reaction/vote removals, so a later or stale copy never resurrects what was removed (a newer reaction or vote still wins).
   - `message_fts`: FTS5 over text and caption, populated now so search is cheap later.
   - `chat_tag`, `tag`: create them now but leave them unused in v1, so the tags feature needs no migration.
 - **`sortKey`:** `(timestamp, ingestSeq)`, where `timestamp` is the message's WhatsApp timestamp (`messageTimestamp` for history rows) and `ingestSeq` is a monotonically increasing integer assigned by `IngestActor`, used as the tie-breaker. Store it as one sortable integer column.

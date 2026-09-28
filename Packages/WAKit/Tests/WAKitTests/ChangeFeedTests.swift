@@ -82,7 +82,7 @@ import Testing
         let bridge = FakeBridge()
         nonisolated(unsafe) var sink: (any EventSink)?
         let client = try await WAClient(database: db) { s in sink = s; return bridge }
-        sink?.onEvents(events: [F.live(F.message("via-sink", chat: F.bob))])
+        _ = sink?.onEvents(events: [F.live(F.message("via-sink", chat: F.bob))])
         for _ in 0..<200 where try db.message(F.bob, "via-sink") == nil { try await Task.sleep(for: .milliseconds(10)) }
         #expect(try db.message(F.bob, "via-sink") != nil)
         _ = client

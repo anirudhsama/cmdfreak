@@ -183,12 +183,68 @@ import Testing
         let jids = (0..<120).map { "12036300000\($0)@g.us" }
         try await ingest.apply([F.live(F.message("g1", chat: F.group, sender: F.bob))] +
                                jids.map { F.live(F.message("x", chat: $0, sender: F.bob)) })
-        let groups = GroupService(bridge: bridge, ingest: ingest)
+        let groups = GroupService(bridge: bridge, ingest: ingest, batchInterval: .zero)
         await groups.fillMissingNames()
         #expect(bridge.calls.withLock { $0.overviews.map(\.count) } == [50, 50, 21])
         #expect(try db.count("SELECT COUNT(*) FROM chat WHERE kind = 'group' AND name IS NULL") == 0)
 
         try await groups.loadMetadata(jid: F.group)
         #expect(try db.count("SELECT COUNT(*) FROM group_participant WHERE groupJid = ?", [F.group]) == 2)
+    }
+
+    @Test func groupCountsFillForGroupsMissingThemAndGoStaleOnMembershipChanges() async throws {
+        let db = try F.tempDB()
+        let ingest = try IngestActor(database: db)
+        let bridge = FakeBridge()
+        try await ingest.apply([F.history(chats: [F.chat(F.group, name: "Named")])])
+        let groups = GroupService(bridge: bridge, ingest: ingest, batchInterval: .zero)
+        await groups.fillMissing()
+        // Named but without a count: still fetched.
+        #expect(bridge.calls.withLock { $0.overviews } == [[F.group]])
+        #expect(try db.chat(F.group)?.participantCount == 3)
+        // A subject change does not clobber the count; a membership change marks it stale.
+        try await ingest.apply([.group(group: BridgeGroup(jid: F.group, subject: "Renamed", participantCount: 0, participants: []))])
+        #expect(try db.chat(F.group)?.participantCount == 3)
+        await groups.fillMissing()
+        #expect(bridge.calls.withLock { $0.overviews.count } == 1)
+        try await ingest.apply([.group(group: BridgeGroup(jid: F.group, subject: nil, participantCount: 0, participants: []))])
+        #expect(try db.chat(F.group)?.participantCount == nil)
+        #expect(try db.chat(F.group)?.name == "Renamed")
+        await groups.fillMissing(stale: [F.group])
+        #expect(bridge.calls.withLock { $0.overviews.count } == 2)
+        #expect(try db.chat(F.group)?.participantCount == 3)
+    }
+
+    @Test func ownGroupSendsCarryOurParticipantAndOldRowsAreBackfilled() async throws {
+        let db = try F.tempDB()
+        let ingest = try IngestActor(database: db)
+        let ownLid = "1234@lid"
+        try await ingest.apply([.ownJid(pn: F.me, lid: ownLid)])
+        // Send result from the bridge: participant filled in (LID-addressed group).
+        let pending = try await ingest.insertOutgoing(chatJid: F.group, text: "hi", ownJid: F.me)
+        var sent = F.message("S1", chat: F.group, fromMe: true)
+        sent.participant = ownLid
+        try await ingest.completeSend(localId: pending.id, chatJid: F.group,
+                                      result: BridgeSendResult(messageId: "S1", timestamp: 1_700_000_000, message: sent))
+        #expect(try db.message(F.group, "S1")?.participant == ownLid)
+
+        // Own rows without one (history copies): filled from the group's addressing on ingest (others
+        // are LIDs here), and by the v6 backfill for rows stored earlier.
+        let lidGroup = "120363000000000002@g.us", pnGroup = "120363000000000003@g.us"
+        var other = F.message("o1", chat: lidGroup, sender: "5555@lid")
+        other.participant = "5555@lid"
+        var mine = F.message("m1", chat: lidGroup, fromMe: true)
+        mine.participant = nil
+        var minePn = F.message("m2", chat: pnGroup, fromMe: true)
+        minePn.participant = nil
+        try await ingest.apply([F.live(other, mine, minePn, F.message("o2", chat: pnGroup, sender: F.bob))])
+        #expect(try db.message(lidGroup, "m1")?.participant == ownLid)
+        try await db.pool.write { db in
+            try db.execute(sql: "UPDATE message SET participant = NULL WHERE fromMe = 1")
+            try AppDatabase.backfillOwnGroupParticipants(db)
+        }
+        #expect(try db.message(F.group, "S1")?.participant == F.me)  // no LID senders in that group
+        #expect(try db.message(lidGroup, "m1")?.participant == ownLid)
+        #expect(try db.message(pnGroup, "m2")?.participant == F.me)
     }
 }

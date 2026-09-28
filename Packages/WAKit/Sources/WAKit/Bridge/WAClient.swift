@@ -3,17 +3,35 @@ import GRDB
 import os
 import Synchronization
 
-/// One bridge batch on its way to `IngestActor`; `committed` is signalled once it has been applied.
+/// One bridge batch on its way to `IngestActor`; `done` is signalled once it has been applied
+/// (or has failed).
 struct IngestBatch: Sendable {
     let events: [BridgeEvent]
-    let committed: DispatchSemaphore?
+    let done: IngestCompletion?
+}
+
+/// Lets the sink thread wait for a batch's transaction and learn whether it committed.
+final class IngestCompletion: Sendable {
+    private let semaphore = DispatchSemaphore(value: 0)
+    private let result = Mutex(false)
+
+    func finish(committed: Bool) {
+        result.withLock { $0 = committed }
+        semaphore.signal()
+    }
+
+    /// Blocks until `finish`; returns whether the batch committed.
+    func wait() -> Bool {
+        semaphore.wait()
+        return result.withLock { $0 }
+    }
 }
 
 /// Receives bridge batches on the bridge's dedicated sink thread (never a tokio worker, never the
-/// main thread). Batches that ingest persists block here until their transaction has committed:
-/// the bridge treats `onEvents` returning as "persisted" and only then lets the library ack the
-/// server (durability hook) or send the next history chunk. Ingest never waits on this thread or
-/// the main actor, so the wait cannot deadlock.
+/// main thread). Batches that ingest persists block here until their transaction has finished,
+/// and `onEvents` reports whether it committed: only then does the bridge let the library ack the
+/// server (durability hook; `false` leaves the messages unacked for redelivery) or send the next
+/// history chunk. Ingest never waits on this thread or the main actor, so the wait cannot deadlock.
 final class EventRouter: EventSink, Sendable {
     private let ingest: AsyncStream<IngestBatch>.Continuation
     private let session: AsyncStream<[SessionEvent]>.Continuation
@@ -26,17 +44,17 @@ final class EventRouter: EventSink, Sendable {
         self.presence = presence
     }
 
-    func onEvents(events: [BridgeEvent]) {
+    func onEvents(events: [BridgeEvent]) -> Bool {
         let s = events.compactMap(SessionEvent.init)
         if !s.isEmpty { session.yield(s) }
         for case .chatPresence(let p) in events { presence.yield(p) }
         guard events.contains(where: \.isPersisted) else {
-            ingest.yield(IngestBatch(events: events, committed: nil))
-            return
+            ingest.yield(IngestBatch(events: events, done: nil))
+            return true
         }
-        let committed = DispatchSemaphore(value: 0)
-        guard case .enqueued = ingest.yield(IngestBatch(events: events, committed: committed)) else { return }
-        committed.wait()
+        let done = IngestCompletion()
+        guard case .enqueued = ingest.yield(IngestBatch(events: events, done: done)) else { return false }
+        return done.wait()
     }
 }
 
@@ -160,12 +178,27 @@ public final class WAClient: Sendable {
         Task.detached(priority: .userInitiated) {
             try? await ingest.prunePendingMutations(olderThan: Int64(Date().timeIntervalSince1970) - 14 * 86_400)
             for await batch in ingestStream {
-                var reads: [String: [BridgeMessageKey]] = [:]
-                do { reads = try await ingest.applyBatch(batch.events) } catch { WAKit.log.error("ingest failed: \(error)") }
-                batch.committed?.signal()
-                if !reads.isEmpty { await receipts.add(reads) }
-                if batch.events.contains(where: \.completesSyncPhase) {
-                    Task { await groups.fillMissingNames() }
+                var result = IngestResult()
+                do {
+                    result = try await ingest.applyBatch(batch.events)
+                    batch.done?.finish(committed: true)
+                } catch {
+                    WAKit.log.error("ingest failed: \(error)")
+                    batch.done?.finish(committed: false)
+                }
+                if !result.reads.isEmpty { await receipts.add(result.reads) }
+                if !result.parked.isEmpty {
+                    do {
+                        try await ingest.retryParked(result.parked) { envelopes in await bridge.decryptParked(envelopes: envelopes) }
+                    } catch {
+                        WAKit.log.error("parked add-on retry failed: \(error)")
+                    }
+                }
+                let staleGroups = batch.events.compactMap { event -> String? in
+                    if case .group(let g) = event, g.isMembershipChange { g.jid } else { nil }
+                }
+                if !staleGroups.isEmpty || batch.events.contains(where: \.completesSyncPhase) {
+                    Task { await groups.fillMissing(stale: staleGroups) }
                 }
             }
         }
@@ -379,6 +412,13 @@ public final class WAClient: Sendable {
     public func setRead(_ chatJid: String, _ read: Bool) async throws {
         try await ingest.applyLocal(.markRead(chatJid: chatJid, read: read))
         try await bridge.markChatRead(chat: chatJid, read: read)
+    }
+}
+
+extension WaBridgeProtocol {
+    /// Default for bridges that cannot decrypt (test and preview stubs): nothing opens.
+    public func decryptParked(envelopes: [Data]) async -> [BridgeMessageUpdate?] {
+        Array(repeating: nil, count: envelopes.count)
     }
 }
 

@@ -11,6 +11,23 @@ enum MessageMutation: Codable, Hashable, Sendable {
     case reaction(senderJid: String, fromMe: Bool, emoji: String, timestamp: Int64)
     case pollVote(voterJid: String, selected: [String], timestamp: Int64)
     case status(rank: Int)
+    /// An encrypted edit or poll vote whose parent secret the bridge lacked; retried through
+    /// `WaBridge.decryptParked` once the target is stored.
+    case encrypted(envelope: Data)
+}
+
+/// A parked encrypted add-on whose target has been stored; `retryParked` decrypts and applies it.
+public struct ParkedEnvelope: Sendable, Hashable {
+    let rowId: Int64
+    let envelope: Data
+}
+
+/// What one applied batch leaves for the caller to do after commit.
+struct IngestResult {
+    /// Incoming messages read in the focused chat (per chat) to mark read.
+    var reads: [String: [BridgeMessageKey]] = [:]
+    /// Encrypted add-ons whose target arrived in this batch.
+    var parked: [ParkedEnvelope] = []
 }
 
 /// Changes accumulated during one write transaction, published to the feed after commit.
@@ -26,6 +43,7 @@ struct ChangeSet {
     /// Incoming live messages that landed in the focused chat: not counted unread, so the caller
     /// sends read receipts for them after commit.
     var readWhileFocused: [String: [BridgeMessageKey]] = [:]
+    var parked: [ParkedEnvelope] = []
 
     mutating func add(_ chat: String, _ id: String) { added[chat, default: []].append(id); dirty.insert(chat) }
     mutating func update(_ chat: String, _ id: String) { updated[chat, default: []].insert(id); dirty.insert(chat) }
@@ -58,6 +76,8 @@ public actor IngestActor {
     private var ingestSeq: Int64
     private var persistedSeq: Int64
     private var pendingCount: Int
+    /// Delete-for-me tombstones exist (skips the per-insert lookup while there are none).
+    private var hasMessageTombstones: Bool
 
     static let maxAddsBeforeReload = 300
 
@@ -65,16 +85,18 @@ public actor IngestActor {
         self.database = database
         self.feed = feed
         self.focus = focus
-        let (aliases, seq, pending) = try database.pool.read { db in
+        let (aliases, seq, pending, tombstones) = try database.pool.read { db in
             let a = try JidAliasRecord.fetchAll(db)
             let s = try String.fetchOne(db, sql: "SELECT value FROM meta WHERE key = 'ingestSeq'").flatMap { Int64($0) } ?? 0
             let p = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM pending_mutation") ?? 0
-            return (Dictionary(a.map { ($0.lid, $0.pn) }, uniquingKeysWith: { _, b in b }), s, p)
+            let t = try Bool.fetchOne(db, sql: "SELECT 1 FROM tombstone WHERE kind = 'message' LIMIT 1") ?? false
+            return (Dictionary(a.map { ($0.lid, $0.pn) }, uniquingKeysWith: { _, b in b }), s, p, t)
         }
         self.aliases = aliases
         self.ingestSeq = seq
         self.persistedSeq = seq
         self.pendingCount = pending
+        self.hasMessageTombstones = tombstones
     }
 
     // MARK: - Public entry points
@@ -84,11 +106,30 @@ public actor IngestActor {
         _ = try applyBatch(events)
     }
 
-    /// `apply`, returning the incoming messages read in the focused chat (per chat) to mark read.
-    func applyBatch(_ events: [BridgeEvent]) throws -> [String: [BridgeMessageKey]] {
+    /// `apply`, returning what the caller does after commit (read receipts, parked add-ons to decrypt).
+    func applyBatch(_ events: [BridgeEvent]) throws -> IngestResult {
         try perform { db, cs in
             for event in events { try self.handle(event, db, &cs) }
-            return cs.readWhileFocused
+            return IngestResult(reads: cs.readWhileFocused, parked: cs.parked)
+        }
+    }
+
+    /// Decrypts parked add-ons (`decrypt` is `WaBridge.decryptParked`) and applies the ones that
+    /// opened; those that still cannot be opened stay parked until pruned.
+    public func retryParked(_ parked: [ParkedEnvelope], decrypt: @Sendable ([Data]) async -> [BridgeMessageUpdate?]) async throws {
+        guard !parked.isEmpty else { return }
+        let results = await decrypt(parked.map(\.envelope))
+        let opened = zip(parked, results).compactMap { p, u -> (Int64, BridgeMessageUpdate)? in
+            guard let u, !u.isEncrypted else { return nil }
+            return (p.rowId, u)
+        }
+        guard !opened.isEmpty else { return }
+        try perform { db, cs in
+            for (rowId, update) in opened {
+                try db.execute(sql: "DELETE FROM pending_mutation WHERE id = ?", arguments: [rowId])
+                self.pendingCount = max(0, self.pendingCount - db.changesCount)
+                try self.applyUpdate(update, db, &cs)
+            }
         }
     }
 
@@ -186,8 +227,9 @@ public actor IngestActor {
             let localPath = try storedPath
                 ?? String.fetchOne(db, sql: "SELECT localPath FROM media WHERE chatJid = ? AND messageId = ?", arguments: [jid, localId])
             try db.execute(sql: """
-                UPDATE message SET id = ?, timestamp = ?, status = MAX(status, ?) WHERE chatJid = ? AND id = ?
-                """, arguments: [newId, result.timestamp, MessageStatus.sent.rank, jid, localId])
+                UPDATE message SET id = ?, timestamp = ?, status = MAX(status, ?), participant = COALESCE(?, participant)
+                WHERE chatJid = ? AND id = ?
+                """, arguments: [newId, result.timestamp, MessageStatus.sent.rank, result.message.participant, jid, localId])
             if let media = result.message.media {
                 var rec = Self.mediaRecord(media, chatJid: jid, messageId: newId)
                 rec.localPath = localPath
@@ -287,6 +329,7 @@ public actor IngestActor {
                 """, arguments: [jid, name])
         }
         for jid in cs.dirty { try refreshPreview(db, jid) }
+        try AppDatabase.backfillOwnGroupParticipants(db, groups: Array(cs.added.keys))
         if ingestSeq != persistedSeq {
             try db.execute(sql: "INSERT OR REPLACE INTO meta (key, value) VALUES ('ingestSeq', ?)", arguments: [String(ingestSeq)])
             persistedSeq = ingestSeq
@@ -402,6 +445,9 @@ public actor IngestActor {
 
         if !m.fromMe, let name = m.pushName, !name.isEmpty, !sender.isEmpty { cs.pushNames[sender] = name }
 
+        // Deleted for me: a later (history or redelivered) copy must not bring it back.
+        if hasMessageTombstones, try Self.tombstone(db, chatJid, m.id, .message) != nil { return }
+
         let existing = try MessageRecord.fetchOne(db, sql: "SELECT * FROM message WHERE chatJid = ? AND id = ?",
                                                   arguments: [chatJid, m.id])
         let incomingStatus = m.status.map { MessageStatus(rank: $0.rank) }
@@ -455,7 +501,9 @@ public actor IngestActor {
             try Self.mediaRecord(media, chatJid: chatJid, messageId: m.id).insert(db, onConflict: .ignore)
         }
         for r in m.reactions where !r.emoji.isEmpty {
-            try ReactionRecord(chatJid: chatJid, messageId: m.id, senderJid: canon(r.senderJid), emoji: r.emoji,
+            let sender = canon(r.senderJid)
+            if let removedAt = try Self.tombstone(db, chatJid, m.id, .reaction, sender), removedAt > r.timestamp { continue }
+            try ReactionRecord(chatJid: chatJid, messageId: m.id, senderJid: sender, emoji: r.emoji,
                                fromMe: r.fromMe, timestamp: r.timestamp).upsert(db)
         }
         cs.add(chatJid, m.id)
@@ -525,11 +573,23 @@ public actor IngestActor {
             try applyOrPark(db, target, .reaction(senderJid: canon(r.senderJid), fromMe: r.fromMe, emoji: r.emoji, timestamp: r.timestamp), &cs)
         case .pollVote(let target, let voter, let selected, let timestamp):
             try applyOrPark(db, target, .pollVote(voterJid: canon(voter), selected: selected, timestamp: timestamp), &cs)
+        case .encrypted(let target, let envelope):
+            // Never applied inline: retried by `retryParked` once the target is inserted.
+            try park(db, canon(target.chatJid), target.id, .encrypted(envelope: envelope))
         }
     }
 
     private func applyOrPark(_ db: Database, _ target: BridgeMessageKey, _ mutation: MessageMutation, _ cs: inout ChangeSet) throws {
         let chatJid = canon(target.chatJid)
+        // Removals are remembered whether or not the target is here yet, so a stale copy of the
+        // reaction or vote (history, a late redelivery) arriving later cannot resurrect it.
+        switch mutation {
+        case .reaction(let sender, _, let emoji, let ts) where emoji.isEmpty:
+            try Self.recordTombstone(db, chatJid, target.id, .reaction, sender, ts)
+        case .pollVote(let voter, let selected, let ts) where selected.isEmpty:
+            try Self.recordTombstone(db, chatJid, target.id, .vote, voter, ts)
+        default: break
+        }
         if try !applyMutation(db, chatJid, target.id, mutation, &cs) {
             try park(db, chatJid, target.id, mutation)
         }
@@ -547,14 +607,25 @@ public actor IngestActor {
         let rows = try Row.fetchAll(db, sql: "SELECT id, payload FROM pending_mutation WHERE chatJid = ? AND messageId = ? ORDER BY id",
                                     arguments: [chatJid, messageId])
         guard !rows.isEmpty else { return }
+        var applied: [Int64] = []
         for row in rows {
             let payload: String = row["payload"]
-            if let mutation = try? JSONDecoder().decode(MessageMutation.self, from: Data(payload.utf8)) {
+            let rowId: Int64 = row["id"]
+            switch try? JSONDecoder().decode(MessageMutation.self, from: Data(payload.utf8)) {
+            case .encrypted(let envelope):
+                // Stays parked until the caller has decrypted it after commit.
+                cs.parked.append(ParkedEnvelope(rowId: rowId, envelope: envelope))
+            case let mutation?:
                 try applyMutation(db, chatJid, messageId, canonicalised(mutation), &cs)
+                applied.append(rowId)
+            case nil:
+                applied.append(rowId)
             }
         }
-        try db.execute(sql: "DELETE FROM pending_mutation WHERE chatJid = ? AND messageId = ?", arguments: [chatJid, messageId])
-        pendingCount = max(0, pendingCount - rows.count)
+        guard !applied.isEmpty else { return }
+        try db.execute(sql: "DELETE FROM pending_mutation WHERE id IN (\(applied.map { _ in "?" }.joined(separator: ",")))",
+                       arguments: StatementArguments(applied))
+        pendingCount = max(0, pendingCount - applied.count)
     }
 
     /// Parked mutations keep the sender JID they arrived with; an alias learned since then applies.
@@ -562,8 +633,30 @@ public actor IngestActor {
         switch mutation {
         case .reaction(let sender, let fromMe, let emoji, let ts): .reaction(senderJid: canon(sender), fromMe: fromMe, emoji: emoji, timestamp: ts)
         case .pollVote(let voter, let selected, let ts): .pollVote(voterJid: canon(voter), selected: selected, timestamp: ts)
-        case .edit, .revoke, .status: mutation
+        case .edit, .revoke, .status, .encrypted: mutation
         }
+    }
+
+    // MARK: Tombstones
+
+    enum TombstoneKind: String {
+        /// Deleted for me; `senderJid` is empty.
+        case message
+        /// A sender removed their reaction / cleared their vote at `timestamp`.
+        case reaction, vote
+    }
+
+    /// The tombstone's timestamp, if there is one.
+    static func tombstone(_ db: Database, _ chatJid: String, _ id: String, _ kind: TombstoneKind, _ sender: String = "") throws -> Int64? {
+        try Int64.fetchOne(db, sql: "SELECT timestamp FROM tombstone WHERE chatJid = ? AND messageId = ? AND kind = ? AND senderJid = ?",
+                           arguments: [chatJid, id, kind.rawValue, sender])
+    }
+
+    static func recordTombstone(_ db: Database, _ chatJid: String, _ id: String, _ kind: TombstoneKind, _ sender: String, _ ts: Int64) throws {
+        try db.execute(sql: """
+            INSERT INTO tombstone (chatJid, messageId, kind, senderJid, timestamp) VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(chatJid, messageId, kind, senderJid) DO UPDATE SET timestamp = MAX(timestamp, excluded.timestamp)
+            """, arguments: [chatJid, id, kind.rawValue, sender, ts])
     }
 
     /// Votes on polls the bridge has not seen this session arrive as lowercase hex SHA-256 of the
@@ -598,6 +691,9 @@ public actor IngestActor {
             try db.execute(sql: "UPDATE message SET revoked = 1, text = NULL WHERE chatJid = ? AND id = ?", arguments: key)
             try db.execute(sql: "DELETE FROM media WHERE chatJid = ? AND messageId = ?", arguments: key)
         case .reaction(let sender, let fromMe, let emoji, let ts):
+            if !emoji.isEmpty, let removedAt = try Self.tombstone(db, chatJid, id, .reaction, sender), removedAt > ts {
+                return true
+            }
             if emoji.isEmpty {
                 try db.execute(sql: "DELETE FROM reaction WHERE chatJid = ? AND messageId = ? AND senderJid = ? AND timestamp <= ?",
                                arguments: key + [sender, ts])
@@ -610,6 +706,9 @@ public actor IngestActor {
                     """, arguments: key + [sender, emoji, fromMe, ts])
             }
         case .pollVote(let voter, let selected, let ts):
+            if !selected.isEmpty, let clearedAt = try Self.tombstone(db, chatJid, id, .vote, voter), clearedAt > ts {
+                return true
+            }
             if selected.isEmpty {
                 try db.execute(sql: "DELETE FROM poll_vote WHERE chatJid = ? AND messageId = ? AND voterJid = ? AND timestamp <= ?",
                                arguments: key + [voter, ts])
@@ -627,6 +726,8 @@ public actor IngestActor {
             try db.execute(sql: "UPDATE message SET status = ? WHERE chatJid = ? AND id = ? AND status < ?",
                            arguments: [rank] + key + [rank])
             guard db.changesCount > 0 else { return true }
+        case .encrypted:
+            return false
         }
         cs.update(chatJid, id)
         return true
@@ -730,8 +831,15 @@ public actor IngestActor {
             try clearMessages(canon(jid), upTo: cutoff, db, &cs)
         case .deleteMessageForMe(let target):
             let jid = canon(target.chatJid)
+            // Remembered even when the message is not here yet, so it never appears later.
+            try Self.recordTombstone(db, jid, target.id, .message, "", 0)
+            hasMessageTombstones = true
             try db.execute(sql: "DELETE FROM message WHERE chatJid = ? AND id = ?", arguments: [jid, target.id])
             if db.changesCount > 0 { cs.delete(jid, target.id) }
+            if pendingCount > 0 {
+                try db.execute(sql: "DELETE FROM pending_mutation WHERE chatJid = ? AND messageId = ?", arguments: [jid, target.id])
+                pendingCount = max(0, pendingCount - db.changesCount)
+            }
         }
     }
 
@@ -749,8 +857,14 @@ public actor IngestActor {
 
     private func handleGroup(_ g: BridgeGroup, _ db: Database) throws {
         try db.execute(sql: "INSERT OR IGNORE INTO chat (jid, kind) VALUES (?, 'group')", arguments: [g.jid])
-        try db.execute(sql: "UPDATE chat SET name = COALESCE(?, name), participantCount = ? WHERE jid = ?",
-                       arguments: [g.subject.nonEmpty, Int(g.participantCount), g.jid])
+        // A zero count is unknown: keep the stored one, except that a membership change (no
+        // subject) makes it stale, so it is cleared for `GroupService` to re-fetch.
+        let count: Int? = g.participantCount > 0 ? Int(g.participantCount) : nil
+        try db.execute(sql: """
+            UPDATE chat SET name = COALESCE(?, name),
+                participantCount = CASE WHEN ? IS NOT NULL THEN ? WHEN ? THEN NULL ELSE participantCount END
+            WHERE jid = ?
+            """, arguments: [g.subject.nonEmpty, count, count, g.isMembershipChange, g.jid])
         guard !g.participants.isEmpty else { return }
         try db.execute(sql: "DELETE FROM group_participant WHERE groupJid = ?", arguments: [g.jid])
         for p in g.participants {
@@ -852,6 +966,8 @@ public actor IngestActor {
         try db.execute(sql: "UPDATE OR REPLACE reaction SET senderJid = ? WHERE senderJid = ?", arguments: [pn, lid])
         try db.execute(sql: "UPDATE OR REPLACE poll_vote SET voterJid = ? WHERE voterJid = ?", arguments: [pn, lid])
         try db.execute(sql: "UPDATE OR REPLACE group_participant SET jid = ? WHERE jid = ?", arguments: [pn, lid])
+        try db.execute(sql: "UPDATE OR REPLACE tombstone SET chatJid = ? WHERE chatJid = ?", arguments: [pn, lid])
+        try db.execute(sql: "UPDATE OR REPLACE tombstone SET senderJid = ? WHERE senderJid = ?", arguments: [pn, lid])
 
         if pendingCount > 0 {
             try db.execute(sql: "UPDATE pending_mutation SET chatJid = ? WHERE chatJid = ?", arguments: [pn, lid])
@@ -924,6 +1040,15 @@ public actor IngestActor {
             isAnimated: m.isAnimated, localPath: nil, downloadState: .none
         )
     }
+}
+
+extension BridgeGroup {
+    /// Members were added or removed: the stored participant count is stale.
+    var isMembershipChange: Bool { subject == nil && participantCount == 0 && participants.isEmpty }
+}
+
+extension BridgeMessageUpdate {
+    var isEncrypted: Bool { if case .encrypted = self { true } else { false } }
 }
 
 extension SendMediaKind {

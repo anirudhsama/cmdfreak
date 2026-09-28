@@ -166,13 +166,45 @@ import Testing
     }
 
     /// Calls the sink the way the bridge does: from a plain thread that may block.
-    private func deliver(_ sink: any EventSink, _ events: [BridgeEvent]) async {
-        await withCheckedContinuation { (c: CheckedContinuation<Void, Never>) in
+    @discardableResult
+    private func deliver(_ sink: any EventSink, _ events: [BridgeEvent]) async -> Bool {
+        await withCheckedContinuation { (c: CheckedContinuation<Bool, Never>) in
             Thread.detachNewThread {
-                sink.onEvents(events: events)
-                c.resume()
+                c.resume(returning: sink.onEvents(events: events))
             }
         }
+    }
+
+    @Test func onEventsReportsAFailedSaveSoTheBridgeDoesNotAck() async throws {
+        let db = try F.tempDB()
+        let (client, sink) = try await makeClient(db, FakeBridge())
+        try await db.pool.write { db in
+            try db.execute(sql: "CREATE TRIGGER boom BEFORE INSERT ON message WHEN NEW.id = 'boom' BEGIN SELECT RAISE(ABORT, 'boom'); END")
+        }
+        #expect(await deliver(sink, [F.live(F.message("ok", chat: F.bob))]))
+        #expect(await deliver(sink, [F.live(F.message("boom", chat: F.bob), F.message("fine", chat: F.bob))]) == false)
+        // The whole batch rolled back; nothing half-applied.
+        #expect(try db.message(F.bob, "fine") == nil)
+        // Session-only batches never fail.
+        #expect(await deliver(sink, [.connection(state: .connected)]))
+        _ = client
+    }
+
+    @Test func parkedEncryptedVoteIsDecryptedOnceThePollArrives() async throws {
+        let db = try F.tempDB()
+        let bridge = FakeBridge()
+        let target = F.key("P", chat: F.bob, fromMe: true)
+        bridge.parkedResult = .pollVote(target: target, voterJid: F.bob, selected: ["Yes"], timestamp: 1_700_000_010)
+        let (client, sink) = try await makeClient(db, bridge)
+        await deliver(sink, [F.live(updates: [.encrypted(target: target, envelope: Data([1, 2, 3]))])])
+        #expect(try db.count("SELECT COUNT(*) FROM pending_mutation") == 1)
+        let poll = BridgePoll(question: "Lunch?", options: ["Yes", "No"], selectableCount: 1)
+        await deliver(sink, [F.live(F.message("P", chat: F.bob, fromMe: true, kind: .poll, text: nil, poll: poll))])
+        for _ in 0..<200 where try db.count("SELECT COUNT(*) FROM poll_vote") == 0 { try await Task.sleep(for: .milliseconds(10)) }
+        #expect(bridge.calls.withLock { $0.decryptParked } == [[Data([1, 2, 3])]])
+        #expect(try db.count("SELECT COUNT(*) FROM poll_vote WHERE voterJid = ? AND selected = '[\"Yes\"]'", [F.bob]) == 1)
+        #expect(try db.count("SELECT COUNT(*) FROM pending_mutation") == 0)
+        _ = client
     }
 
     @Test func onEventsReturnsOnlyAfterCommit() async throws {

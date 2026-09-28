@@ -2,30 +2,52 @@ import Foundation
 import GRDB
 import os
 
-/// Fills in group names with batched overview fetches and loads participants lazily.
+/// Fills in group names and participant counts with batched overview fetches and loads
+/// participants lazily.
 public actor GroupService {
     public static let batchSize = 50
 
     private let bridge: any WaBridgeProtocol
     private let ingest: IngestActor
+    /// Pause between overview batches, so a large backlog does not burst IQs at the server.
+    private let batchInterval: Duration
     private var filling = false
+    private var rerun = false
     private var attempted: Set<String> = []
 
-    public init(bridge: any WaBridgeProtocol, ingest: IngestActor) {
+    public init(bridge: any WaBridgeProtocol, ingest: IngestActor, batchInterval: Duration = .seconds(2)) {
         self.bridge = bridge
         self.ingest = ingest
+        self.batchInterval = batchInterval
     }
 
-    /// Fetches subjects for group chats that have no name yet, in batches. Safe to call repeatedly.
-    public func fillMissingNames() async {
-        guard !filling else { return }
+    /// Fetches subjects and participant counts for group chats missing either, in throttled
+    /// batches; each group is asked about once per session unless `stale` names it again (its
+    /// membership changed). Safe to call repeatedly: a call during a run schedules one more pass.
+    public func fillMissing(stale: [String] = []) async {
+        attempted.subtract(stale)
+        guard !filling else { rerun = true; return }
         filling = true
         defer { filling = false }
+        repeat {
+            rerun = false
+            await fillPass()
+        } while rerun
+    }
+
+    public func fillMissingNames() async { await fillMissing() }
+
+    private func fillPass() async {
         do {
             let jids = try await ingest.database.reader.read { db in
-                try String.fetchAll(db, sql: "SELECT jid FROM chat WHERE kind = 'group' AND (name IS NULL OR name = '')")
+                try String.fetchAll(db, sql: """
+                    SELECT jid FROM chat WHERE kind = 'group'
+                      AND (name IS NULL OR name = '' OR participantCount IS NULL OR participantCount = 0)
+                    ORDER BY lastActivityAt DESC
+                    """)
             }.filter { !attempted.contains($0) }
             for start in stride(from: 0, to: jids.count, by: Self.batchSize) {
+                if start > 0 { try await Task.sleep(for: batchInterval) }
                 let batch = Array(jids[start..<min(start + Self.batchSize, jids.count)])
                 attempted.formUnion(batch)
                 let groups = try await bridge.fetchGroupOverviews(jids: batch)

@@ -236,7 +236,62 @@ extension AppDatabase {
                 """)
         }
 
+        // Deletions that must outlive their target: delete-for-me (kind 'message', no sender) and a
+        // sender's reaction removal / vote clear (kind 'reaction' / 'vote', at `timestamp`). A later
+        // or stale copy of the message, reaction or vote is not applied over them. No foreign key:
+        // the target may never have been stored.
+        m.registerMigration("v5") { db in
+            try db.create(table: "tombstone", options: .withoutRowID) { t in
+                t.column("chatJid", .text).notNull()
+                t.column("messageId", .text).notNull()
+                t.column("kind", .text).notNull()
+                t.column("senderJid", .text).notNull().defaults(to: "")
+                t.column("timestamp", .integer).notNull()
+                t.primaryKey(["chatJid", "messageId", "kind", "senderJid"])
+            }
+        }
+
+        // Our own group messages were stored without a key participant, so reactions, edits and
+        // revokes of them went out with an incomplete key. Best effort: the participant our own
+        // messages in that group already carry, else our LID when the group's other senders are
+        // LID-addressed, else our phone-number JID.
+        m.registerMigration("v6") { db in
+            try Self.backfillOwnGroupParticipants(db)
+        }
+
         return m
+    }
+
+    /// Fills the key participant of our own group messages stored without one (history copies of
+    /// our messages carry none), in `groups` or everywhere.
+    static func backfillOwnGroupParticipants(_ db: Database, groups only: [String]? = nil) throws {
+        let own = try String.fetchOne(db, sql: "SELECT value FROM meta WHERE key = 'ownPn'")
+        let ownLid = try String.fetchOne(db, sql: "SELECT value FROM meta WHERE key = 'ownLid'")
+        guard own != nil || ownLid != nil else { return }
+        let groups = try only?.filter { $0.hasSuffix("@g.us") } ?? String.fetchAll(db, sql: """
+            SELECT DISTINCT chatJid FROM message WHERE fromMe = 1 AND participant IS NULL AND chatJid LIKE '%@g.us'
+            """)
+        for group in groups {
+            if only != nil {
+                let missing = try Bool.fetchOne(db, sql: "SELECT 1 FROM message WHERE chatJid = ? AND fromMe = 1 AND participant IS NULL LIMIT 1",
+                                                arguments: [group]) ?? false
+                guard missing else { continue }
+            }
+            var participant = try String.fetchOne(db, sql: """
+                SELECT participant FROM message WHERE chatJid = ? AND fromMe = 1 AND participant IS NOT NULL
+                GROUP BY participant ORDER BY COUNT(*) DESC LIMIT 1
+                """, arguments: [group])
+            if participant == nil {
+                let lidAddressed = try Bool.fetchOne(db, sql: """
+                    SELECT participant LIKE '%@lid' FROM message
+                    WHERE chatJid = ? AND fromMe = 0 AND participant IS NOT NULL ORDER BY sortKey DESC LIMIT 1
+                    """, arguments: [group]) ?? false
+                participant = (lidAddressed ? ownLid : own).map { JID.user($0) + "@" + ($0.split(separator: "@").last.map(String.init) ?? "") }
+            }
+            guard let participant else { continue }
+            try db.execute(sql: "UPDATE message SET participant = ? WHERE chatJid = ? AND fromMe = 1 AND participant IS NULL",
+                           arguments: [participant, group])
+        }
     }
 
     /// Fills an empty quote snippet (and kind) from the quoted message when it is stored locally.

@@ -91,10 +91,17 @@ final class FakeBridge: WaBridgeProtocol, @unchecked Sendable {
         var overviews: [[String]] = []
         var sentTexts: [String] = []
         var nudges = 0
+        var decryptParked: [[Data]] = []
     }
 
     let calls = Mutex(Calls())
     var sendFails = false
+    /// What `decryptParked` opens every envelope to (nil: nothing opens).
+    var parkedResult: BridgeMessageUpdate?
+    func decryptParked(envelopes: [Data]) async -> [BridgeMessageUpdate?] {
+        calls.withLock { $0.decryptParked.append(envelopes) }
+        return envelopes.map { _ in parkedResult }
+    }
     var downloadDelay: Duration = .milliseconds(50)
 
     func archiveChat(chat: String, archived: Bool) async throws {}
