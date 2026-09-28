@@ -106,4 +106,5 @@ risk.
 
 ## License
 
-[MIT](LICENSE). whatsapp-rust is also MIT licensed.
+[MIT](LICENSE). whatsapp-rust is also MIT licensed. The chat bubble and phone in the app icon are
+from [Lucide](https://lucide.dev) ([ISC](https://github.com/lucide-icons/lucide/blob/main/LICENSE)).
