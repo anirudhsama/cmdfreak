@@ -138,24 +138,15 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, N
         updateTitle()
     }
 
-    /// Selection changed in the list (click, menu, search or command bar): swap content, update the
-    /// title bar, move focus into the chat unless search ↑/↓ are driving, and let WAKit mark
-    /// the chat read.
+    /// Selection changed in the list (click, menu, search or command bar): swap content (the chat
+    /// view reports focus and marks the chat read), update the title bar, and move focus into the
+    /// chat unless search ↑/↓ are driving.
     private func showChat(_ jid: String?) {
         selectedChatJid = jid
         chatContainer.show(chatJid: jid)
         updateTitle()
         if !chatListColumn.isMovingFromSearch { _ = chatContainer.focusCompose() }
-        guard let jid else {
-            client.setFocus(chatJid: nil, windowIsKey: window?.isKeyWindow ?? false)
-            return
-        }
-        usage.recordVisit(of: jid)
-        if window?.isKeyWindow == true {
-            Task { await client.openChat(jid) }
-        } else {
-            client.setFocus(chatJid: jid, windowIsKey: false)
-        }
+        if let jid { usage.recordVisit(of: jid) }
     }
 
     /// The window title names the current filter (shown centered over the chat list); the chat's
@@ -390,16 +381,10 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, N
 
     public func windowDidBecomeKey(_ notification: Notification) {
         chatList.windowKeyStateChanged()
-        if let jid = selectedChatJid {
-            Task { await client.openChat(jid) }
-        } else {
-            client.setFocus(chatJid: nil, windowIsKey: true)
-        }
     }
 
     public func windowDidResignKey(_ notification: Notification) {
         chatList.windowKeyStateChanged()
-        client.setFocus(chatJid: selectedChatJid, windowIsKey: false)
     }
 
     // MARK: NSToolbarDelegate

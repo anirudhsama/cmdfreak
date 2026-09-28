@@ -6,6 +6,9 @@ import os
 /// The chat content area: message list + glass compose. One instance serves every chat; `show`
 /// swaps the loaded window. Mount it as the split view's content item and call `show(chatJid:)`
 /// when the selection changes, or await `open(chatJid:)` to preload before showing it.
+///
+/// Sole owner of `WAClient` focus: it reports the shown chat and its window's key state, and marks
+/// the chat read (`openChat`) whenever it is shown in, or its window becomes, the key window.
 @MainActor
 public final class ChatViewController: NSViewController {
     public let client: WAClient
@@ -87,27 +90,39 @@ public final class ChatViewController: NSViewController {
     public override func viewDidAppear() {
         super.viewDidAppear()
         observeWindowKey()
-        updateFocus()
+        reportFocus(markRead: false)
     }
 
     public override func viewWillDisappear() {
         super.viewWillDisappear()
+        stopObservingWindowKey()
         client.setFocus(chatJid: nil, windowIsKey: false)
     }
 
     private func observeWindowKey() {
-        keyObservers.forEach { NotificationCenter.default.removeObserver($0) }
-        keyObservers = []
+        stopObservingWindowKey()
         guard let window = view.window else { return }
         for name in [NSWindow.didBecomeKeyNotification, NSWindow.didResignKeyNotification] {
             keyObservers.append(NotificationCenter.default.addObserver(forName: name, object: window, queue: .main) { [weak self] _ in
-                MainActor.assumeIsolated { self?.updateFocus() }
+                MainActor.assumeIsolated { self?.reportFocus(markRead: true) }
             })
         }
     }
 
-    private func updateFocus() {
-        client.setFocus(chatJid: chatJid, windowIsKey: view.window?.isKeyWindow ?? false)
+    private func stopObservingWindowKey() {
+        keyObservers.forEach { NotificationCenter.default.removeObserver($0) }
+        keyObservers = []
+    }
+
+    /// Reports the shown chat and whether its window is key. With `markRead`, a chat in a key
+    /// window is opened instead: WAKit clears its unread state and sends read receipts.
+    private func reportFocus(markRead: Bool) {
+        let windowIsKey = view.window?.isKeyWindow ?? false
+        if markRead, windowIsKey, let chatJid {
+            Task { [client] in await client.openChat(chatJid) }
+        } else {
+            client.setFocus(chatJid: chatJid, windowIsKey: windowIsKey)
+        }
     }
 
     private func setChatVisible(_ visible: Bool) {
@@ -121,7 +136,11 @@ public final class ChatViewController: NSViewController {
     /// Shows `chatJid` (nil clears the view). If the preloader already prepared this chat at the
     /// current width the first frame is synchronous; otherwise one async hop.
     public func show(chatJid: String?) {
-        guard chatJid != self.chatJid else { return }
+        guard chatJid != self.chatJid else {
+            // Re-selecting the open chat reads it again (e.g. after Mark as Unread).
+            if chatJid != nil { reportFocus(markRead: true) }
+            return
+        }
         if let old = self.chatJid { drafts[old] = compose.text }
         self.chatJid = chatJid
         replyTarget = nil
@@ -130,11 +149,11 @@ public final class ChatViewController: NSViewController {
         compose.setBar(nil)
         compose.text = chatJid.flatMap { drafts[$0] } ?? ""
         pausedTimer?.invalidate()
+        reportFocus(markRead: true)
 
         guard let chatJid else {
             list.clear()
             setChatVisible(false)
-            updateFocus()
             return
         }
         setChatVisible(true)
@@ -146,7 +165,6 @@ public final class ChatViewController: NSViewController {
         if let prepared = preloader.takePrepared(chatJid: chatJid, width: width) {
             list.show(prepared, changes: changes)
             Signposts.poi.endInterval("OpenChat", state, "prepared")
-            didOpen(chatJid)
             return
         }
         list.clear()
@@ -159,18 +177,10 @@ public final class ChatViewController: NSViewController {
                 _ = self.preloader.takePrepared(chatJid: chatJid, width: width)
                 self.list.show(prepared, changes: changes)
                 Signposts.poi.endInterval("OpenChat", state, "loaded")
-                self.didOpen(chatJid)
             } catch {
                 Signposts.log.error("open chat failed: \(error)")
                 Signposts.poi.endInterval("OpenChat", state, "failed")
             }
-        }
-    }
-
-    private func didOpen(_ chatJid: String) {
-        updateFocus()
-        if view.window?.isKeyWindow ?? false {
-            Task { await client.openChat(chatJid) }
         }
     }
 
