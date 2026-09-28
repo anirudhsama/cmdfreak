@@ -40,6 +40,12 @@ final class CommandBarPanelController: NSObject, NSWindowDelegate {
         hosting.sizingOptions = []
         hosting.frame = NSRect(x: 0, y: 0, width: CommandBarMetrics.width, height: CommandBarMetrics.height)
         hosting.autoresizingMask = [.width, .height]
+        // Clip the window itself to the glass shape; otherwise its square backdrop and shadow
+        // show past the rounded corners.
+        hosting.wantsLayer = true
+        hosting.layer?.cornerRadius = CommandBarMetrics.cornerRadius
+        hosting.layer?.cornerCurve = .continuous
+        hosting.layer?.masksToBounds = true
         panel.contentView = hosting
         model.onDismissRequest = { [weak self] in self?.hide() }
     }
@@ -58,6 +64,8 @@ final class CommandBarPanelController: NSObject, NSWindowDelegate {
         position(over: owner)
         installKeyMonitor()
         panel.makeKeyAndOrderFront(nil)
+        // The shadow is computed from the window's alpha; recompute it for the rounded shape.
+        panel.invalidateShadow()
     }
 
     func hide() {
