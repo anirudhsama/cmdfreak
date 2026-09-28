@@ -82,6 +82,9 @@ enum MainMenu {
         }
         menu.addItem(item("Previous Sidebar Item", #selector(MainWindowController.previousRailItem(_:)), key(NSUpArrowFunctionKey), [.command, .option]))
         menu.addItem(item("Next Sidebar Item", #selector(MainWindowController.nextRailItem(_:)), key(NSDownArrowFunctionKey), [.command, .option]))
+        // ⌥⌘[ / ⌥⌘], alongside the chats' ⇧⌘[ / ⇧⌘]. Hidden: the arrows are the visible binding.
+        menu.addItem(hidden(item("Show Previous Sidebar Item", #selector(MainWindowController.previousRailItem(_:)), "[", [.command, .option])))
+        menu.addItem(hidden(item("Show Next Sidebar Item", #selector(MainWindowController.nextRailItem(_:)), "]", [.command, .option])))
         menu.addItem(.separator())
         menu.addItem(item("Toggle Sidebar", #selector(NSSplitViewController.toggleSidebar(_:)), "s", [.command, .control]))
         menu.addItem(item("Enter Full Screen", #selector(NSWindow.toggleFullScreen(_:)), "f", [.command, .control]))

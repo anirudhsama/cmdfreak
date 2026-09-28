@@ -155,6 +155,10 @@ enum ShortcutSelfTest {
         await menu(key(NSUpArrowFunctionKey), 126, [.command, .option, .numericPad, .function])
         check("⌥⌘↑ previous sidebar item", main.debugRailTitle == "Chats")
         check("⌥⌘↑ disabled on the first sidebar item", !isEnabled(key(NSUpArrowFunctionKey), [.command, .option]))
+        await menu("]", 30, [.command, .option])
+        check("⌥⌘] next sidebar item", main.debugRailTitle == "Unread")
+        await menu("[", 33, [.command, .option])
+        check("⌥⌘[ previous sidebar item", main.debugRailTitle == "Chats")
         let widthsBefore = main.debugSplitWidths
         main.debugToggleSidebar()
         try? await Task.sleep(for: .milliseconds(400))
