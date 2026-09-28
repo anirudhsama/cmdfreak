@@ -341,25 +341,34 @@ final class ChatListCollectionView: NSCollectionView {
         super.keyDown(with: event)
     }
 
-    /// A click opens the chat (via selection) and moves on to its composer, as WhatsApp does;
-    /// after the collection view's own handling, so it doesn't take focus back.
+    /// A click opens the chat (via selection) and moves on to its composer, as WhatsApp does. On
+    /// mouse-up: the collection view takes focus for itself while handling the click.
+    private var clickedItem = false
+
     override func mouseDown(with event: NSEvent) {
-        super.mouseDown(with: event)
-        guard event.modifierFlags.isDisjoint(with: [.command, .shift]), event.clickCount == 1 else { return }
         let point = convert(event.locationInWindow, from: nil)
-        guard indexPathForItem(at: point) != nil else { return }
+        clickedItem = event.modifierFlags.isDisjoint(with: [.command, .shift]) && event.clickCount == 1
+            && indexPathForItem(at: point) != nil
+        super.mouseDown(with: event)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        super.mouseUp(with: event)
+        guard clickedItem else { return }
+        clickedItem = false
         DispatchQueue.main.async { [weak self] in self?.onFocusCompose?() }
     }
 
+    // The window updates `firstResponder` only after these return, so report once it has.
     override func becomeFirstResponder() -> Bool {
         let ok = super.becomeFirstResponder()
-        onFocusChange?()
+        DispatchQueue.main.async { [weak self] in self?.onFocusChange?() }
         return ok
     }
 
     override func resignFirstResponder() -> Bool {
         let ok = super.resignFirstResponder()
-        onFocusChange?()
+        DispatchQueue.main.async { [weak self] in self?.onFocusChange?() }
         return ok
     }
 }

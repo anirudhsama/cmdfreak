@@ -51,10 +51,11 @@ struct ChatRowView: View {
         .frame(height: ChatRowMetrics.height)
         .foregroundStyle(.primary)
         .background {
-            // Gray, as in WhatsApp; a touch darker while the list has keyboard focus.
+            // Green tint while the list has keyboard focus (like the rail's selection), gray otherwise,
+            // so it is clear whether ↑/↓ will move through chats or the composer has focus.
             if state.isSelected {
                 RoundedRectangle(cornerRadius: ChatRowMetrics.selectionCornerRadius, style: .continuous)
-                    .fill(appearance.isEmphasized ? Color.primary.opacity(0.11) : Color(nsColor: .unemphasizedSelectedContentBackgroundColor))
+                    .fill(appearance.isEmphasized ? Color.waGreen.opacity(0.18) : Color(nsColor: .unemphasizedSelectedContentBackgroundColor))
             }
         }
         .overlay(alignment: .bottom) {
