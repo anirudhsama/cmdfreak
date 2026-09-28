@@ -893,12 +893,21 @@ final class MessageListController: NSViewController {
     }
 
     private func quickLook(_ url: URL, item: MessageItem) {
+        // A just-finished download isn't in `rows` yet, so the target uses the given URL rather
+        // than its row's download state.
         previewItems = rows.messages.compactMap { m -> PreviewItem? in
-            guard let media = m.media, media.downloadState == .downloaded, let p = media.localPath, m.message.kind != .audio, m.message.kind != .voice else { return nil }
-            return PreviewItem(url: URL(filePath: p), title: media.fileName ?? LayoutPlanner.timeText(m.message.timestamp), messageId: m.id)
+            guard let media = m.media, m.message.kind != .audio, m.message.kind != .voice else { return nil }
+            let title = media.fileName ?? LayoutPlanner.timeText(m.message.timestamp)
+            if m.id == item.id { return PreviewItem(url: url, title: title, messageId: m.id) }
+            guard media.downloadState == .downloaded, let p = media.localPath else { return nil }
+            return PreviewItem(url: URL(filePath: p), title: title, messageId: m.id)
         }
-        previewIndex = previewItems.firstIndex { $0.messageId == item.id } ?? 0
-        if previewItems.isEmpty { previewItems = [PreviewItem(url: url, title: "", messageId: item.id)] }
+        if let i = previewItems.firstIndex(where: { $0.messageId == item.id }) {
+            previewIndex = i
+        } else {
+            previewItems = [PreviewItem(url: url, title: item.media?.fileName ?? "", messageId: item.id)]
+            previewIndex = 0
+        }
         view.window?.makeFirstResponder(tableView)
         guard let panel = QLPreviewPanel.shared() else { return }
         if panel.isVisible, panel.dataSource === self {
