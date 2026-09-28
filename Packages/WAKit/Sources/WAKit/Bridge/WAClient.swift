@@ -195,6 +195,8 @@ public final class WAClient: Sendable {
     public let avatars: AvatarService
     public var feed: MessageChangeFeed { ingest.feed }
     public var focus: ChatFocus { ingest.focus }
+    /// Messages to notify about and notifications to withdraw. Single consumer.
+    public var notices: AsyncStream<NoticeEvent> { ingest.notices }
     /// Typing/recording/paused notifications, not persisted. Single consumer (the chat list).
     public let chatPresence: AsyncStream<BridgeChatPresence>
 
@@ -307,12 +309,17 @@ public final class WAClient: Sendable {
     /// Clears unread state locally and sends read receipts. Call when a chat is shown in a key window.
     public func openChat(_ chatJid: String) async {
         focus.set(chatJid: chatJid, windowIsKey: true)
+        await markRead(chatJid)
+    }
+
+    /// Clears unread state locally and sends read receipts without changing focus.
+    public func markRead(_ chatJid: String) async {
         do {
             let result = try await ingest.chatOpened(chatJid)
             if !result.unreadKeys.isEmpty { try await bridge.markRead(chat: chatJid, messages: result.unreadKeys) }
             if result.wasMarkedUnread { try await bridge.markChatRead(chat: chatJid, read: true) }
         } catch {
-            WAKit.log.error("openChat \(chatJid, privacy: .private) failed: \(error)")
+            WAKit.log.error("markRead \(chatJid, privacy: .private) failed: \(error)")
         }
     }
 

@@ -28,6 +28,8 @@ struct IngestResult {
     var reads: [String: [BridgeMessageKey]] = [:]
     /// Encrypted add-ons whose target arrived in this batch.
     var parked: [ParkedEnvelope] = []
+    /// Also yielded on `IngestActor.notices`.
+    var notices: [NoticeEvent] = []
 }
 
 /// Changes accumulated during one write transaction, published to the feed after commit.
@@ -46,6 +48,27 @@ struct ChangeSet {
     var parked: [ParkedEnvelope] = []
     /// Group chats where a reported own participant arrived for an existing row.
     var participantEvidence: Set<String> = []
+    /// Chat → its newest incoming live message that may alert; resolved into `notices` at commit.
+    /// `timestamp` is when it became readable: the send time, or now for a decrypted placeholder.
+    var alerts: [String: (id: String, timestamp: Int64)] = [:]
+    /// Retractions (read, removed), published before this batch's incoming notices.
+    var notices: [NoticeEvent] = []
+
+    /// Keeps the newest candidate per chat, whatever order the batch delivers them in.
+    mutating func alert(_ chat: String, _ id: String, _ timestamp: Int64) {
+        if let current = alerts[chat], current.timestamp > timestamp { return }
+        alerts[chat] = (id, timestamp)
+    }
+
+    mutating func chatRead(_ chat: String) {
+        alerts[chat] = nil
+        notices.append(.chatRead(chat))
+    }
+
+    mutating func removed(_ chat: String, _ id: String) {
+        if alerts[chat]?.id == id { alerts[chat] = nil }
+        notices.append(.messageRemoved(chatJid: chat, messageId: id))
+    }
 
     mutating func add(_ chat: String, _ id: String) { added[chat, default: []].append(id); dirty.insert(chat) }
     mutating func update(_ chat: String, _ id: String) { updated[chat, default: []].insert(id); dirty.insert(chat) }
@@ -69,6 +92,9 @@ public actor IngestActor {
     public nonisolated let database: AppDatabase
     public nonisolated let feed: MessageChangeFeed
     public nonisolated let focus: ChatFocus
+    /// Notification events after each commit. Single consumer.
+    public nonisolated let notices: AsyncStream<NoticeEvent>
+    private nonisolated let noticesContinuation: AsyncStream<NoticeEvent>.Continuation
 
     private nonisolated let queue = DispatchSerialQueue(label: "BetterWA.ingest", qos: .userInitiated)
     public nonisolated var unownedExecutor: UnownedSerialExecutor { queue.asUnownedSerialExecutor() }
@@ -82,11 +108,14 @@ public actor IngestActor {
     private var hasMessageTombstones: Bool
 
     static let maxAddsBeforeReload = 300
+    /// Older incoming messages (an offline backlog after sleep) arrive silently.
+    static let maxAlertAge: Int64 = 120
 
     public init(database: AppDatabase, feed: MessageChangeFeed = MessageChangeFeed(), focus: ChatFocus = ChatFocus()) throws {
         self.database = database
         self.feed = feed
         self.focus = focus
+        (notices, noticesContinuation) = AsyncStream<NoticeEvent>.makeStream(bufferingPolicy: .bufferingNewest(256))
         let (aliases, seq, pending, tombstones) = try database.pool.read { db in
             let a = try JidAliasRecord.fetchAll(db)
             let s = try String.fetchOne(db, sql: "SELECT value FROM meta WHERE key = 'ingestSeq'").flatMap { Int64($0) } ?? 0
@@ -113,6 +142,8 @@ public actor IngestActor {
         try perform { db, cs in
             for event in events { try self.handle(event, db, &cs) }
             return IngestResult(reads: cs.readWhileFocused, parked: cs.parked)
+        } after: { result, cs in
+            result.notices = cs.notices
         }
     }
 
@@ -162,7 +193,7 @@ public actor IngestActor {
     /// The UI opened `chatJid`: clears unread and marked-unread, returns what to mark read remotely.
     public func chatOpened(_ chatJid: String) throws -> OpenChatResult {
         let jid = canon(chatJid)
-        return try perform { db, _ in
+        return try perform { db, cs in
             guard let chat = try ChatRecord.fetchOne(db, key: jid) else {
                 return OpenChatResult(unreadKeys: [], wasMarkedUnread: false)
             }
@@ -177,6 +208,7 @@ public actor IngestActor {
                 try db.execute(sql: "UPDATE chat SET unreadCount = 0, markedUnread = 0, stateAt = ? WHERE jid = ?",
                                arguments: [Self.now, jid])
             }
+            cs.chatRead(jid)
             return OpenChatResult(unreadKeys: keys, wasMarkedUnread: chat.markedUnread)
         }
     }
@@ -330,10 +362,11 @@ public actor IngestActor {
     /// One write transaction. In-memory bookkeeping mutated inside it (aliases, sequence numbers,
     /// pending count) is restored if the transaction rolls back.
     @discardableResult
-    private func perform<T>(_ body: (Database, inout ChangeSet) throws -> T) throws -> T {
+    private func perform<T>(_ body: (Database, inout ChangeSet) throws -> T,
+                            after: (inout T, ChangeSet) -> Void = { _, _ in }) throws -> T {
         var cs = ChangeSet()
         let saved = (aliases, ingestSeq, persistedSeq, pendingCount)
-        let result: T
+        var result: T
         do {
             result = try database.pool.write { db -> T in
                 let r = try body(db, &cs)
@@ -345,6 +378,8 @@ public actor IngestActor {
             throw error
         }
         publish(cs)
+        for n in cs.notices { noticesContinuation.yield(n) }
+        after(&result, cs)
         return result
     }
 
@@ -358,6 +393,7 @@ public actor IngestActor {
                 """, arguments: [jid, name])
         }
         for jid in cs.dirty { try refreshPreview(db, jid) }
+        if !cs.alerts.isEmpty { try resolveAlerts(db, &cs) }
         try AppDatabase.backfillOwnGroupParticipants(db, groups: Array(Set(cs.added.keys).union(cs.participantEvidence)))
         if ingestSeq != persistedSeq {
             try db.execute(sql: "INSERT OR REPLACE INTO meta (key, value) VALUES ('ingestSeq', ?)", arguments: [String(ingestSeq)])
@@ -485,14 +521,17 @@ public actor IngestActor {
         let incomingStatus = m.status.map { MessageStatus(rank: $0.rank) }
         if var old = existing {
             if old.kind == .undecryptable, m.kind != .undecryptable {
-                try upgradePlaceholder(&old, with: m, status: incomingStatus, db, &cs)
+                try upgradePlaceholder(&old, with: m, status: incomingStatus, live: live, db, &cs)
                 return
             }
             // Re-delivery (history after live, or our own send echoed): merge forward-only fields.
             var sets: [String] = []
             var args: [any DatabaseValueConvertible] = []
             if let s = incomingStatus, s.rank > old.status.rank { sets.append("status = ?"); args.append(s.rank) }
-            if m.revoked, !old.revoked { sets.append("revoked = 1, text = NULL") }
+            if m.revoked, !old.revoked {
+                sets.append("revoked = 1, text = NULL")
+                cs.removed(chatJid, m.id)
+            }
             if let e = m.editedAt, e > (old.editedAt ?? 0), !m.revoked, !old.revoked {
                 sets.append("text = ?, editedAt = ?"); args.append(m.text); args.append(e)
             }
@@ -554,6 +593,8 @@ public actor IngestActor {
                 cs.readWhileFocused[chatJid, default: []].append(rec.key)
             } else {
                 try db.execute(sql: "UPDATE chat SET unreadCount = unreadCount + 1 WHERE jid = ?", arguments: [chatJid])
+                // A placeholder alerts once its real content arrives (`upgradePlaceholder`).
+                if m.kind != .undecryptable { cs.alert(chatJid, m.id, m.timestamp) }
             }
         }
         try applyPending(db, chatJid, m.id, &cs)
@@ -572,7 +613,7 @@ public actor IngestActor {
     /// stub). Takes its content; keeps the row's position, a higher status, and mutations already
     /// applied to the placeholder (revoke, a newer edit, reactions, votes). Unread was counted
     /// when the placeholder arrived.
-    private func upgradePlaceholder(_ old: inout MessageRecord, with m: BridgeMessage, status: MessageStatus?,
+    private func upgradePlaceholder(_ old: inout MessageRecord, with m: BridgeMessage, status: MessageStatus?, live: Bool,
                                     _ db: Database, _ cs: inout ChangeSet) throws {
         old.kind = m.kind
         old.extra = Self.extra(m)
@@ -594,6 +635,11 @@ public actor IngestActor {
             old.editedAt = m.editedAt ?? old.editedAt
         }
         try old.update(db)
+        // Alerts only while the chat is still unread (not read since the placeholder arrived).
+        if live, !old.fromMe, !old.revoked, old.kind != .system, !focus.isReading(old.chatJid),
+           try Bool.fetchOne(db, sql: "SELECT unreadCount > 0 FROM chat WHERE jid = ?", arguments: [old.chatJid]) == true {
+            cs.alert(old.chatJid, old.id, Self.now)  // the retry may land minutes after the send
+        }
         try db.execute(sql: "DELETE FROM media WHERE chatJid = ? AND messageId = ?", arguments: [old.chatJid, old.id])
         if let media = m.media, !old.revoked {
             try Self.mediaRecord(media, chatJid: old.chatJid, messageId: old.id).insert(db)
@@ -750,6 +796,7 @@ public actor IngestActor {
         case .revoke:
             try db.execute(sql: "UPDATE message SET revoked = 1, text = NULL WHERE chatJid = ? AND id = ?", arguments: key)
             try db.execute(sql: "DELETE FROM media WHERE chatJid = ? AND messageId = ?", arguments: key)
+            cs.removed(chatJid, id)
         case .reaction(let sender, let fromMe, let emoji, let ts):
             if !emoji.isEmpty, try Self.reactionSuppressed(db, chatJid, id, sender, fromMe: fromMe, timestamp: ts) {
                 return true
@@ -804,6 +851,7 @@ public actor IngestActor {
         case .read, .played: status = .read
         case .readSelf, .playedSelf:
             try db.execute(sql: "UPDATE chat SET unreadCount = 0, stateAt = ? WHERE jid = ?", arguments: [Self.now, chatJid])
+            cs.chatRead(chatJid)
             return
         case .retry, .other:
             return
@@ -871,6 +919,7 @@ public actor IngestActor {
             let jid = canon(jid)
             if read {
                 try db.execute(sql: "UPDATE chat SET unreadCount = 0, markedUnread = 0, stateAt = ? WHERE jid = ?", arguments: [Self.now, jid])
+                cs.chatRead(jid)
             } else {
                 try db.execute(sql: "UPDATE chat SET markedUnread = 1, stateAt = ? WHERE jid = ?", arguments: [Self.now, jid])
             }
@@ -886,6 +935,7 @@ public actor IngestActor {
                 try db.execute(sql: "DELETE FROM chat WHERE jid = ?", arguments: [jid])
                 try db.execute(sql: "DELETE FROM pending_mutation WHERE chatJid = ?", arguments: [jid])
                 cs.reload.insert(jid)
+                cs.chatRead(jid)
             }
         case .clear(let jid, let cutoff):
             try clearMessages(canon(jid), upTo: cutoff, db, &cs)
@@ -896,12 +946,23 @@ public actor IngestActor {
             hasMessageTombstones = true
             try db.execute(sql: "DELETE FROM message WHERE chatJid = ? AND id = ?", arguments: [jid, target.id])
             if db.changesCount > 0 { cs.delete(jid, target.id) }
+            cs.removed(jid, target.id)
             try dropPending(db, jid, target.id)
         }
     }
 
     /// Deletes messages at or before `cutoff` (all when nil); unread never exceeds what is left.
     private func clearMessages(_ jid: String, upTo cutoff: Int64?, _ db: Database, _ cs: inout ChangeSet) throws {
+        if let cutoff {
+            // Newer messages survive, and so do their notifications: withdraw only what goes.
+            let gone = try String.fetchAll(db, sql: """
+                SELECT id FROM message WHERE chatJid = ? AND fromMe = 0 AND timestamp <= ?
+                ORDER BY sortKey DESC LIMIT 500
+                """, arguments: [jid, cutoff])
+            for id in gone { cs.removed(jid, id) }
+        } else {
+            cs.chatRead(jid)
+        }
         try db.execute(sql: "DELETE FROM message WHERE chatJid = ? AND (? IS NULL OR timestamp <= ?)", arguments: [jid, cutoff, cutoff])
         try db.execute(sql: """
             UPDATE chat SET unreadCount = MIN(unreadCount,
@@ -929,6 +990,36 @@ public actor IngestActor {
             try GroupParticipantRecord(groupJid: g.jid, jid: canon(p.jid), isAdmin: p.isAdmin, isSuperAdmin: p.isSuperAdmin)
                 .insert(db, onConflict: .replace)
         }
+    }
+
+    // MARK: Notifications
+
+    /// Turns `cs.alerts` into incoming notices, oldest first. Only chats the list shows alert (not
+    /// status updates or newsletters), and not when muted or archived; revoked messages and anything
+    /// older than `maxAlertAge` stay silent.
+    private func resolveAlerts(_ db: Database, _ cs: inout ChangeSet) throws {
+        let cutoff = Self.now - Self.maxAlertAge
+        let own = try ChatListQuery.ownJid(db)
+        var incoming: [IncomingNotice] = []
+        for (jid, alert) in cs.alerts {
+            let id = alert.id
+            guard alert.timestamp >= cutoff,
+                  let chat = try ChatRecord.fetchOne(db, key: jid), [.dm, .group, .broadcast].contains(chat.kind),
+                  !chat.isMuted(), !chat.archived,
+                  let m = try MessageRecord.fetchOne(db, sql: "SELECT * FROM message WHERE chatJid = ? AND id = ?", arguments: [jid, id]),
+                  !m.revoked else { continue }
+            let contact = chat.kind == .dm ? try ContactRecord.fetchOne(db, key: jid) : nil
+            var sender: String?
+            if chat.kind != .dm {
+                sender = try ContactRecord.fetchOne(db, key: m.senderJid)?.displayName.flatMap(ChatListQuery.unmasked)
+                    ?? m.pushName.nonEmpty ?? JID.phoneDisplay(m.senderJid)
+            }
+            incoming.append(IncomingNotice(
+                chatJid: jid, messageId: id, chatTitle: ChatListQuery.title(chat, contact, ownJid: own),
+                senderName: sender, kind: m.kind, text: m.text, timestamp: m.timestamp,
+                avatarPath: chat.avatarPath))
+        }
+        cs.notices += incoming.sorted { $0.timestamp < $1.timestamp }.map(NoticeEvent.incoming)
     }
 
     private func refreshPreview(_ db: Database, _ jid: String) throws {
@@ -960,6 +1051,7 @@ public actor IngestActor {
         guard !lid.isEmpty, !pn.isEmpty, lid != pn else { return }
         guard aliases[lid] != pn else { return }
         aliases[lid] = pn
+        if let a = cs.alerts.removeValue(forKey: lid) { cs.alert(pn, a.id, a.timestamp) }
         try JidAliasRecord(lid: lid, pn: pn).upsert(db)
 
         // Contacts

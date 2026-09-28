@@ -289,6 +289,12 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, N
         Task { await reveal(candidate.jid, archived: candidate.archived, waitForList: false) }
     }
 
+    /// Brings the window forward on `jid` (a notification click). Notified chats are never archived.
+    public func openChat(_ jid: String) {
+        showWindow(nil)
+        Task { await reveal(jid, archived: false, waitForList: false) }
+    }
+
     private func reveal(_ jid: String, archived: Bool, waitForList: Bool) async {
         // Unread/Groups/tag filters may not contain the chat; fall back to the list that does.
         let home: RailItem = archived ? .archived : .chats

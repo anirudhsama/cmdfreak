@@ -222,6 +222,45 @@ extension AppDatabase {
     }
 }
 
+/// The Dock badge: unread chats that would notify (not muted, not archived).
+public struct BadgeState: Hashable, Sendable {
+    public var count = 0
+    /// The soonest mute (within 30 days) that lapses on an unread chat. Time passing changes no
+    /// row, so the observer must recount then itself.
+    public var nextMuteExpiry: Int64?
+
+    static func fetch(_ db: Database) throws -> BadgeState {
+        let now = Int64(Date().timeIntervalSince1970)
+        let row = try Row.fetchOne(db, sql: """
+            SELECT
+              COUNT(*) FILTER (WHERE mutedUntil IS NULL OR mutedUntil <= ?),
+              MIN(mutedUntil) FILTER (WHERE mutedUntil > ? AND mutedUntil <= ?)
+            FROM chat
+            WHERE (unreadCount > 0 OR markedUnread) AND archived = 0
+              AND (lastActivityAt IS NOT NULL OR pinnedAt IS NOT NULL)
+              AND kind IN ('dm', 'group', 'broadcast')
+            """, arguments: [now, now, now + 30 * 86_400])
+        return BadgeState(count: row?[0] ?? 0, nextMuteExpiry: row?[1])
+    }
+}
+
+extension AppDatabase {
+    /// Observes the Dock badge; the first value is delivered synchronously.
+    @MainActor
+    public func observeBadge(onChange: @escaping @MainActor (BadgeState) -> Void) -> AnyDatabaseCancellable {
+        ValueObservation.trackingConstantRegion(BadgeState.fetch).removeDuplicates().start(
+            in: pool,
+            scheduling: .immediate,
+            onError: { error in WAKit.log.error("badge observation: \(error)") },
+            onChange: { state in MainActor.assumeIsolated { onChange(state) } }
+        )
+    }
+
+    public func badgeState() throws -> BadgeState {
+        try reader.read(BadgeState.fetch)
+    }
+}
+
 func placeholders(_ n: Int) -> String {
     Array(repeating: "?", count: n).joined(separator: ",")
 }

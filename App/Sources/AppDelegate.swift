@@ -8,6 +8,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var client: WAClient!
     private var mainWindow: MainWindowController?
     private var onboarding: OnboardingWindowController?
+    private var notifications: NotificationController?
+    private var badgeObservation: AnyDatabaseCancellable?
+    private var muteExpiryTask: Task<Void, Never>?
     private var onboardingModel: OnboardingModel?
     private var sessionToken: ObservationToken?
     private var liveSeedTask: Task<Void, Never>?
@@ -33,6 +36,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         NSApp.mainMenu = MainMenu.build()
+        if notificationsEnabled {
+            let controller = NotificationController(client: client)
+            controller.openChat = { [weak self] jid in
+                guard let self, client.session.canShowMainWindow else { return }
+                updateWindows()
+                mainWindow?.openChat(jid)
+            }
+            notifications = controller
+        }
+        badgeObservation = client.database.observeBadge { [weak self] in self?.showBadge($0) }
 
         #if DEBUG
         if let forced = DevSupport.forcedOnboarding {
@@ -67,6 +80,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return try WAClient(database: AppDatabase.openDefault())
     }
 
+    /// Seeded debug runs stay silent unless they simulate live traffic.
+    private var notificationsEnabled: Bool {
+        #if DEBUG
+        if DevSupport.seedCount != nil { return DevSupport.seedLive }
+        #endif
+        return true
+    }
+
     /// Onboarding until the first history chunk lands (or when logged out); the main window otherwise.
     private func updateWindows() {
         let session = client.session
@@ -74,6 +95,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             onboarding?.close()
             onboarding = nil
             onboardingModel = nil
+            if mainWindow == nil { notifications?.requestAuthorization() }
             let window = mainWindow ?? MainWindowController(client: client)
             mainWindow = window
             window.showWindow(nil)
@@ -87,6 +109,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 if case .unpaired = session.state { model.start() }
             }
             onboarding?.showWindow(nil)
+        }
+    }
+
+    /// Also recounts when the next mute lapses, which no database write signals.
+    private func showBadge(_ state: BadgeState) {
+        NSApp.dockTile.badgeLabel = state.count > 0 ? String(state.count) : nil
+        muteExpiryTask?.cancel()
+        guard let expiry = state.nextMuteExpiry else { return }
+        let delay = max(0, expiry - Int64(Date().timeIntervalSince1970)) + 1
+        muteExpiryTask = Task { [weak self, database = client.database] in
+            try? await Task.sleep(for: .seconds(delay))
+            guard !Task.isCancelled, let state = try? database.badgeState() else { return }
+            self?.showBadge(state)
         }
     }
 
