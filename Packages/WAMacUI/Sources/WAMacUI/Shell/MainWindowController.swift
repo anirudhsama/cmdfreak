@@ -54,9 +54,6 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, N
         // The filter name is drawn centered over the chat list instead (`listTitleView`).
         window.titleVisibility = .hidden
         window.titlebarSeparatorStyle = .none
-        // Otherwise the titlebar paints a blurred band with a hard bottom edge down to the end of
-        // the accessories; transparent leaves the edge to the scroll views' soft fade.
-        window.titlebarAppearsTransparent = true
         // Unified (not compact): the list header's title, subtitle and "+" need the taller bar.
         window.toolbarStyle = .unified
         window.minSize = NSSize(width: 760, height: 480)
