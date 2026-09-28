@@ -102,9 +102,7 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, N
             self?.updateTitle()
         }
         chatList.onSelect = { [weak self] jid in self?.showChat(jid) }
-        chatList.onTypeAhead = { [weak self] text in self?.chatContainer.beginComposing(with: text) }
-        chatList.onFocusCompose = { [weak self] in _ = self?.chatContainer.focusCompose() }
-        chatContainer.onEscapeToChatList = { [weak self] in self?.chatList.focus() }
+        chatListColumn.onFocusCompose = { [weak self] in _ = self?.chatContainer.focusCompose() }
 
         presenceTask = Task { [weak self, client] in
             for await presence in client.chatPresence {
@@ -130,7 +128,6 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, N
         }
         split.normalizeRailWidth()
         window?.makeKeyAndOrderFront(sender)
-        chatList.focus()
     }
 
     // MARK: Navigation
@@ -141,12 +138,14 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, N
         updateTitle()
     }
 
-    /// Selection changed in the list (click, arrows, or menu): swap content, update the title bar,
-    /// and let WAKit mark the chat read.
+    /// Selection changed in the list (click, menu, search or command bar): swap content, update the
+    /// title bar, move focus into the chat unless search ↑/↓ are driving, and let WAKit mark
+    /// the chat read.
     private func showChat(_ jid: String?) {
         selectedChatJid = jid
         chatContainer.show(chatJid: jid)
         updateTitle()
+        if !chatListColumn.isMovingFromSearch { _ = chatContainer.focusCompose() }
         guard let jid else {
             client.setFocus(chatJid: nil, windowIsKey: window?.isKeyWindow ?? false)
             return
@@ -226,7 +225,8 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, N
         chatList.actions.togglePin(chat)
     }
 
-    @objc public func focusChatList(_ sender: Any?) { chatList.focus() }
+    /// ⌘F: the chat list's search field.
+    @objc public func focusSearch(_ sender: Any?) { chatListColumn.searchBar.focus() }
 
     /// Shows or clears the typing indicator on a row (normally driven by `client.chatPresence`).
     public func setTyping(chatJid: String, _ typing: Bool) {
@@ -310,7 +310,6 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, N
             }
         }
         chatList.select(jid)
-        if !chatContainer.focusCompose() { chatList.focus() }
     }
 
     // MARK: Chat-view seams (Esc, ⇧⌘O, Space)
@@ -331,10 +330,9 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, N
         (window?.firstResponder as? NSTextInputClient)?.hasMarkedText() ?? false
     }
 
-    /// Esc: the chat view clears reply/edit state first; otherwise focus moves to the chat list.
-    @objc public func cancelOrFocusChatList(_ sender: Any?) {
-        if chatContainer.cancelTransientState() { return }
-        chatList.focus()
+    /// Esc: leaves the message list, or cancels a reply/edit. Never leaves the chat.
+    @objc public func cancelTransientState(_ sender: Any?) {
+        _ = chatContainer.cancelTransientState()
     }
 
     /// ⇧⌘O: forwarded to the chat view's attach flow.
@@ -350,10 +348,12 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, N
     public func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         let chat = chatList.selectedItem?.chat
         switch menuItem.action {
-        case #selector(cancelOrFocusChatList(_:)):
-            menuItem.title = chatContainer.transientStateTitle ?? "Focus Chat List"
-            // Disabled items do not claim the key, so Esc still reaches other windows and input methods.
-            return windowIsKeyForMenus && !isComposingMarkedText
+        case #selector(cancelTransientState(_:)):
+            let title = chatContainer.transientStateTitle
+            menuItem.title = title ?? "Cancel"
+            // Disabled items do not claim the key, so Esc still reaches the composer, the search
+            // field, other windows and input methods.
+            return windowIsKeyForMenus && !isComposingMarkedText && title != nil
         case #selector(attachFile(_:)):
             return windowIsKeyForMenus && chatContainer.canAttach
         case #selector(quickLookSelection(_:)):

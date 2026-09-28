@@ -95,7 +95,7 @@ final class ChatRowState: Identifiable {
     }
 }
 
-/// Shared by every row: whether selection should draw emphasized (list focused in a key window).
+/// Shared by every row: whether selection should draw emphasized (the window is key).
 @MainActor @Observable
 final class ChatListAppearance {
     var isEmphasized = false

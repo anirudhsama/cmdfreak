@@ -47,7 +47,6 @@ public enum ChatHarness {
         self.client = client
 
         let vc = ChatViewController(client: client)
-        vc.onEscapeWithNothingToClear = { NSLog("harness: Esc with nothing to clear → shell would focus the chat list") }
         controller = vc
 
         let window = NSWindow(

@@ -11,12 +11,8 @@ final class ChatListViewController: NSViewController, NSCollectionViewDelegate {
     let actions: ChatActions
     let appearance = ChatListAppearance()
 
-    /// Fires on user- or keyboard-driven selection changes. `nil` when the selection clears.
+    /// Fires on click-, menu- or search-driven selection changes. `nil` when the selection clears.
     var onSelect: ((String?) -> Void)?
-    /// Printable text typed while the list has keyboard focus.
-    var onTypeAhead: ((String) -> Void)?
-    /// Tab in the list, or a click on a row: the open chat's composer should take focus.
-    var onFocusCompose: (() -> Void)?
 
     var filter: ChatFilter {
         didSet { if filter != oldValue { startObserving() } }
@@ -75,13 +71,6 @@ final class ChatListViewController: NSViewController, NSCollectionViewDelegate {
         collectionView.allowsMultipleSelection = false
         collectionView.delegate = self
         collectionView.register(ChatRowItem.self, forItemWithIdentifier: ChatRowItem.identifier)
-        collectionView.onTypeAhead = { [weak self] text in self?.onTypeAhead?(text) }
-        collectionView.onMove = { [weak self] offset in self?.selectAdjacent(offset: offset) }
-        collectionView.onFocusCompose = { [weak self] in
-            guard let self, selectedJid != nil else { return }
-            onFocusCompose?()
-        }
-        collectionView.onFocusChange = { [weak self] in self?.updateEmphasis() }
 
         scrollView.documentView = collectionView
         scrollView.drawsBackground = false
@@ -270,13 +259,8 @@ final class ChatListViewController: NSViewController, NSCollectionViewDelegate {
         selectedJid.flatMap { jid in states[jid]?.item }
     }
 
-    func focus() {
-        view.window?.makeFirstResponder(collectionView)
-    }
-
     private func updateEmphasis() {
-        let window = collectionView.window
-        appearance.isEmphasized = window?.isKeyWindow == true && window?.firstResponder === collectionView
+        appearance.isEmphasized = collectionView.window?.isKeyWindow == true
     }
 
     func windowKeyStateChanged() { updateEmphasis() }
@@ -303,72 +287,54 @@ final class ChatListViewController: NSViewController, NSCollectionViewDelegate {
         guard let path = indexPaths.first, let jid = dataSource.itemIdentifier(for: path) else { return }
         guard jid != selectedJid else { return }
         selectedJid = jid
+        syncSelectionToCollectionView()
         onSelect?(jid)
     }
 
     func collectionView(_ collectionView: NSCollectionView, didDeselectItemsAt indexPaths: Set<IndexPath>) {
-        // Only user-driven clearing (e.g. ⌘-click) reaches here with nothing left selected.
+        // A chat stays open once chosen: undo user-driven clearing (⌘-click, a click below the rows).
         guard collectionView.selectionIndexPaths.isEmpty, selectedJid != nil else { return }
-        guard let path = indexPaths.first, dataSource.itemIdentifier(for: path) == selectedJid else { return }
-        if states[selectedJid!] != nil {
-            selectedJid = nil
-            onSelect?(nil)
-        }
+        syncSelectionToCollectionView()
     }
 }
 
-/// Collection view that forwards printable typing to the compose seam and reports focus changes.
-/// ↑/↓ move the open chat; Tab and clicks hand focus to the composer.
+/// Never takes keyboard focus: focus lives in the open chat, and chats switch by click, menu
+/// shortcut or the search field.
 final class ChatListCollectionView: NSCollectionView {
-    var onTypeAhead: ((String) -> Void)?
-    var onMove: ((Int) -> Void)?
-    var onFocusCompose: (() -> Void)?
-    var onFocusChange: (() -> Void)?
-
-    override func keyDown(with event: NSEvent) {
-        if event.modifierFlags.isDisjoint(with: [.command, .control, .option, .shift]) {
-            switch event.keyCode {
-            case 126: onMove?(-1); return  // ↑
-            case 125: onMove?(1); return  // ↓
-            case 48: onFocusCompose?(); return  // Tab
-            default: break
-            }
-        }
-        if let text = event.typedText {
-            onTypeAhead?(text)
-            return
-        }
-        super.keyDown(with: event)
-    }
-
-    /// A click opens the chat (via selection) and moves on to its composer, as WhatsApp does. On
-    /// mouse-up: the collection view takes focus for itself while handling the click.
-    private var clickedItem = false
-
-    override func mouseDown(with event: NSEvent) {
-        let point = convert(event.locationInWindow, from: nil)
-        clickedItem = event.modifierFlags.isDisjoint(with: [.command, .shift]) && event.clickCount == 1
-            && indexPathForItem(at: point) != nil
-        super.mouseDown(with: event)
-    }
-
-    override func mouseUp(with event: NSEvent) {
-        super.mouseUp(with: event)
-        guard clickedItem else { return }
-        clickedItem = false
-        DispatchQueue.main.async { [weak self] in self?.onFocusCompose?() }
-    }
-
-    // The window updates `firstResponder` only after these return, so report once it has.
-    override func becomeFirstResponder() -> Bool {
-        let ok = super.becomeFirstResponder()
-        DispatchQueue.main.async { [weak self] in self?.onFocusChange?() }
-        return ok
-    }
-
-    override func resignFirstResponder() -> Bool {
-        let ok = super.resignFirstResponder()
-        DispatchQueue.main.async { [weak self] in self?.onFocusChange?() }
-        return ok
-    }
+    override var acceptsFirstResponder: Bool { false }
+    // `makeFirstResponder` does not consult `acceptsFirstResponder`; clicks go through it.
+    override func becomeFirstResponder() -> Bool { false }
 }
+
+#if DEBUG
+extension ChatListViewController {
+    var debugRefusesFocus: Bool {
+        guard let window = view.window else { return false }
+        let previous = window.firstResponder
+        defer { window.makeFirstResponder(previous) }
+        window.makeFirstResponder(collectionView)
+        return window.firstResponder !== collectionView
+    }
+
+    /// A synthetic click (mouse-down and -up) on the visible part of the row at `index`; the
+    /// floating sidebar covers the list's leading edge. Delivered to the collection view directly:
+    /// a window that is not key (a locked test session) swallows the first click.
+    func debugClick(row index: Int, modifiers: NSEvent.ModifierFlags = []) {
+        guard let window, let frameView = window.contentView?.superview, items.indices.contains(index),
+              let frame = collectionView.layoutAttributesForItem(at: IndexPath(item: index, section: 0))?.frame else { return }
+        let candidates = stride(from: frame.maxX - 20, to: frame.minX, by: -20).map {
+            collectionView.convert(NSPoint(x: $0, y: frame.midY), to: nil)
+        }
+        guard let point = candidates.first(where: { frameView.hitTest($0)?.isDescendant(of: collectionView) == true }) else { return }
+        func event(_ type: NSEvent.EventType) -> NSEvent? {
+            NSEvent.mouseEvent(with: type, location: point, modifierFlags: modifiers, timestamp: ProcessInfo.processInfo.systemUptime,
+                               windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1)
+        }
+        guard let down = event(.leftMouseDown), let up = event(.leftMouseUp) else { return }
+        collectionView.mouseDown(with: down)
+        collectionView.mouseUp(with: up)
+    }
+
+    private var window: NSWindow? { view.window }
+}
+#endif

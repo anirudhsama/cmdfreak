@@ -65,6 +65,14 @@ extension MainWindowController {
         window?.firstResponder.map { String(describing: type(of: $0)) } ?? "nil"
     }
 
+    public func debugListRefusesFocus() -> Bool { chatList.debugRefusesFocus }
+    public func debugClickRow(at index: Int) { chatList.debugClick(row: index) }
+    public func debugCommandClickSelectedRow() {
+        guard let jid = chatList.selectedJid, let index = chatList.items.firstIndex(where: { $0.id == jid }) else { return }
+        chatList.debugClick(row: index, modifiers: .command)
+    }
+    public var debugSearchIsEditing: Bool { chatListColumn.searchBar.isEditing }
+
     public var debugRailIsArchived: Bool { railModel.selection == .archived }
 
     public func debugChat(_ jid: String) -> ChatRecord? {

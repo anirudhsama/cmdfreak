@@ -3,21 +3,12 @@ import SwiftUI
 import WAKit
 
 /// Content side of the split view: hosts the single `ChatViewController`, or an empty state when no
-/// chat is selected. `beginComposing(with:)` receives text typed while the chat list had focus.
+/// chat is selected.
 @MainActor
 public final class ChatContainerViewController: NSViewController {
     public let client: WAClient
     public let chatView: ChatViewController
     public private(set) var chatJid: String?
-
-    /// Second Esc with nothing to clear in compose; the shell focuses the chat list.
-    public var onEscapeToChatList: (() -> Void)? {
-        get { chatView.onEscapeWithNothingToClear }
-        set { chatView.onEscapeWithNothingToClear = newValue }
-    }
-
-    /// Debug override for the shortcut self-test; when set, type-ahead text goes here instead of compose.
-    public var composeTextSink: ((String) -> Void)?
 
     private let emptyState = NSHostingView(rootView: EmptyChatView())
     /// The open chat's avatar, name and subtitle in the toolbar strip over the conversation,
@@ -76,14 +67,6 @@ public final class ChatContainerViewController: NSViewController {
         emptyState.isHidden = chatJid != nil
     }
 
-    /// Forwarded from the chat list when the user starts typing while it has focus.
-    public func beginComposing(with text: String) {
-        if let composeTextSink { return composeTextSink(text) }
-        guard chatJid != nil else { return }
-        chatView.insertComposeText(text)
-        chatView.focusCompose()
-    }
-
     // Keyboard seam for the shell's menu shortcuts (Esc, ⇧⌘O, Space, command-bar focus).
 
     /// Esc. Returns true when the chat view consumed it (cleared reply/edit state).
@@ -94,7 +77,7 @@ public final class ChatContainerViewController: NSViewController {
     public func attachFile() { chatView.attachFile() }
     public var canQuickLook: Bool { chatJid != nil && chatView.canQuickLookSelection }
     public func quickLook() { chatView.quickLookSelection() }
-    /// After the command bar opens a chat. Returns false when there is no chat to compose in.
+    /// After a chat switch or a search hand-off. Returns false when there is no chat to compose in.
     public func focusCompose() -> Bool {
         guard chatJid != nil else { return false }
         chatView.focusCompose()

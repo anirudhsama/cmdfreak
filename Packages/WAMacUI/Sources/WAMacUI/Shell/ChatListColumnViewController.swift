@@ -16,6 +16,10 @@ final class ChatListColumnViewController: NSViewController {
     let chatList: ChatListViewController
     private let footer: NSHostingView<SidebarFooter>
     let searchBar = ChatSearchBar()
+    /// Return or Esc in the search field: the open chat's composer should take focus.
+    var onFocusCompose: (() -> Void)?
+    /// True while ↑/↓ in the search field switch chats; focus should stay in the field.
+    private(set) var isMovingFromSearch = false
     private(set) lazy var searchAccessory = SoftEdgeAccessory(content: searchBar, horizontalInset: 14)
     private let session: SessionService
     private var footerHeight: NSLayoutConstraint!
@@ -40,12 +44,19 @@ final class ChatListColumnViewController: NSViewController {
             root.addSubview(v)
         }
         searchBar.onChange = { [weak self] text in self?.chatList.searchText = text }
+        searchBar.onMove = { [weak self] offset in
+            guard let self else { return }
+            isMovingFromSearch = true
+            defer { isMovingFromSearch = false }
+            chatList.selectAdjacent(offset: offset)
+        }
         searchBar.onCommit = { [weak self] in
             guard let self else { return }
-            if chatList.selectedJid == nil || chatList.indexPath(for: chatList.selectedJid!) == nil {
+            // Return on a search that hides the open chat opens the top result.
+            if !searchBar.text.isEmpty, chatList.selectedJid.flatMap(chatList.indexPath(for:)) == nil {
                 chatList.selectAdjacent(offset: 1)
             }
-            chatList.focus()
+            onFocusCompose?()
         }
         footer.sizingOptions = []
         footerHeight = footer.heightAnchor.constraint(equalToConstant: 0)

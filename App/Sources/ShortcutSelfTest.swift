@@ -150,35 +150,44 @@ enum ShortcutSelfTest {
         await menu("1", 18, [.command, .option])
         check("⌥⌘1 chats filter", !main.debugRailIsArchived)
 
-        // Esc from elsewhere in the window focuses the list; typing in the list goes to compose.
-        main.selectChat(at: 1)
-        main.window?.makeFirstResponder(nil)
-        check("Esc is claimed by the menu in the main window", await menu("\u{1b}", 53, []))
-        check("Esc focuses the chat list", main.debugFirstResponder.contains("ChatListCollectionView"))
-        var sunk = ""
-        main.chatContainer.composeTextSink = { sunk += $0 }
-        check("Space is not claimed by Quick Look without a media selection", !(await menu(" ", 49, [])))
-        await view("h", 4, [])
-        await view(" ", 49, [])
-        check("printable keys and Space in the list go to compose", sunk == "h ")
-        main.chatContainer.composeTextSink = nil
-
-        // Focus: ↑/↓ in the list move the open chat, Tab hands off to its composer, Esc comes back.
+        // Focus lives in the open chat: switching chats lands in its composer, the list never
+        // takes focus, and Esc never leaves the chat.
         let listJids = main.visibleChatJids(limit: 5)
         main.selectChat(at: 1)
-        main.focusChatList(nil)
-        await view(key(NSDownArrowFunctionKey), 125, [.numericPad, .function])
-        check("↓ in the list opens the next chat", main.selectedChatJid == listJids[2])
-        await view(key(NSUpArrowFunctionKey), 126, [.numericPad, .function])
-        check("↑ in the list opens the previous chat", main.selectedChatJid == listJids[1])
-        check("the list keeps focus while ↑/↓ move", main.debugFirstResponder.contains("ChatListCollectionView"))
-        await view("\t", 48, [])
-        check("Tab in the list focuses the composer", main.debugFirstResponder.contains("ComposeTextView"))
-        await menu("\u{1b}", 53, [])
-        check("Esc in the composer focuses the list", main.debugFirstResponder.contains("ChatListCollectionView"))
+        check("opening a chat focuses its composer", main.debugFirstResponder.contains("ComposeTextView"))
+        await menu("]", 30, [.command])
+        check("⌘] keeps focus in the composer", main.selectedChatJid == listJids[2] && main.debugFirstResponder.contains("ComposeTextView"))
+        check("the chat list refuses focus", main.debugListRefusesFocus())
+        check("Esc in the composer with nothing to cancel is not claimed", !(await menu("\u{1b}", 53, [])))
+        await command(#selector(NSResponder.cancelOperation(_:)))
+        check("Esc in the composer keeps the chat and its focus",
+              main.selectedChatJid == listJids[2] && main.debugFirstResponder.contains("ComposeTextView"))
+        check("Space is not claimed by Quick Look without a media selection", !(await menu(" ", 49, [])))
+        main.debugClickRow(at: 3)
+        try? await Task.sleep(for: .milliseconds(150))
+        check("a click on a row opens it and focuses its composer",
+              main.selectedChatJid == listJids[3] && main.debugFirstResponder.contains("ComposeTextView"))
+        main.debugCommandClickSelectedRow()
+        try? await Task.sleep(for: .milliseconds(150))
+        check("⌘-click does not deselect the open chat", main.selectedChatJid == listJids[3] && main.chatContainer.chatJid == listJids[3])
+
+        // Search: ⌘F focuses it, ↑/↓ move the open chat while it keeps focus, Return and Esc hand off.
+        check("⌘F focuses search", await menu("f", 3, [.command]) && main.debugSearchIsEditing)
+        let searchJids = main.visibleChatJids(limit: 60)
+        let start = main.selectedChatJid.flatMap { searchJids.firstIndex(of: $0) } ?? 0
+        await command(#selector(NSResponder.moveDown(_:)))
+        check("↓ in search opens the next chat", main.selectedChatJid == searchJids[start + 1])
+        await command(#selector(NSResponder.moveUp(_:)))
+        check("↑ in search opens the previous chat", main.selectedChatJid == searchJids[start])
+        check("search keeps focus while ↑/↓ move", main.debugSearchIsEditing)
+        await command(#selector(NSResponder.insertNewline(_:)))
+        check("Return in search focuses the composer", main.debugFirstResponder.contains("ComposeTextView"))
+        await menu("f", 3, [.command])
+        await command(#selector(NSResponder.cancelOperation(_:)))
+        check("Esc in search focuses the composer", main.debugFirstResponder.contains("ComposeTextView"))
 
         // Disabled items.
-        check("⌘F present and disabled", menuItem("f", [.command]) != nil && !isEnabled("f", [.command]))
+        check("⌘F present and enabled", menuItem("f", [.command]) != nil && isEnabled("f", [.command]))
         check("⇧⌘O present and enabled with a chat open",
               menuItem("o", [.command, .shift]) != nil && isEnabled("o", [.command, .shift]) == (main.chatContainer.chatJid != nil))
         let quickLook = NSApp.mainMenu?.item(withTitle: "Chat")?.submenu?.item(withTitle: "Quick Look")
@@ -219,6 +228,13 @@ enum ShortcutSelfTest {
         let handled = NSApp.mainMenu?.performKeyEquivalent(with: event(chars, keyCode, mods)) ?? false
         try? await Task.sleep(for: .milliseconds(wait))
         return handled
+    }
+
+    /// A key binding's command on the main window's first responder, as the text input system would
+    /// send it (synthetic keys do not reach text views without an active input context).
+    private static func command(_ selector: Selector) async {
+        main?.window?.firstResponder?.doCommand(by: selector)
+        try? await Task.sleep(for: .milliseconds(80))
     }
 
     /// The command bar's key-monitor handler.

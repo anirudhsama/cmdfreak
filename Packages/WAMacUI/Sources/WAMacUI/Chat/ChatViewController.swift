@@ -11,8 +11,6 @@ public final class ChatViewController: NSViewController {
     public let client: WAClient
     public let preloader: ChatOpenPreloader
 
-    /// Esc with nothing to clear (no reply/edit bar): the shell should focus the chat list.
-    public var onEscapeWithNothingToClear: (() -> Void)?
     public private(set) var chatJid: String?
 
     private let list: MessageListController
@@ -73,10 +71,7 @@ public final class ChatViewController: NSViewController {
         compose.onHeightChange = { [weak self] h in self?.list.setBottomInset(h) }
         compose.onSend = { [weak self] text in self?.send(text) }
         compose.onTyping = { [weak self] in self?.noteTyping() }
-        compose.onEscape = { [weak self] in
-            guard let self else { return }
-            if !self.clearStaged() { self.onEscapeWithNothingToClear?() }
-        }
+        compose.onEscape = { [weak self] in self?.clearStaged() }
         compose.onArrowUpEmpty = { [weak self] in self?.list.selectNewestMessage() }
         compose.onReplyShortcut = { [weak self] in self?.replyToNewestIncoming() }
         compose.onAttach = { [weak self] in self?.attachFile() }
@@ -469,6 +464,6 @@ extension ChatViewController: MessageListActions {
     }
 
     func escapeFromList() {
-        if !handleEscape() { onEscapeWithNothingToClear?() }
+        handleEscape()
     }
 }

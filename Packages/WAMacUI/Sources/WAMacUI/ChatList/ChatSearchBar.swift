@@ -7,7 +7,9 @@ final class ChatSearchBar: NSView, NSTextFieldDelegate {
     static let height: CGFloat = 36
 
     var onChange: ((String) -> Void)?
-    /// ↓ or Return: hand keyboard focus to the list.
+    /// ↑/↓ while editing: move the open chat by this offset; focus stays here.
+    var onMove: ((Int) -> Void)?
+    /// Return, or Esc (after clearing): hand keyboard focus to the open chat.
     var onCommit: (() -> Void)?
 
     private let glass = NSGlassEffectView()
@@ -16,6 +18,7 @@ final class ChatSearchBar: NSView, NSTextFieldDelegate {
     private let clearButton = NSButton()
 
     var text: String { field.stringValue }
+    var isEditing: Bool { field.currentEditor() != nil }
 
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -100,10 +103,17 @@ final class ChatSearchBar: NSView, NSTextFieldDelegate {
     func control(_ control: NSControl, textView: NSTextView, doCommandBy selector: Selector) -> Bool {
         switch selector {
         case #selector(NSResponder.cancelOperation(_:)):
-            if field.stringValue.isEmpty { onCommit?() } else { clear() }
-            return true
-        case #selector(NSResponder.moveDown(_:)), #selector(NSResponder.insertNewline(_:)):
+            clear()
             onCommit?()
+            return true
+        case #selector(NSResponder.insertNewline(_:)):
+            onCommit?()
+            return true
+        case #selector(NSResponder.moveUp(_:)):
+            onMove?(-1)
+            return true
+        case #selector(NSResponder.moveDown(_:)):
+            onMove?(1)
             return true
         default:
             return false

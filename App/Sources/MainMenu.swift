@@ -64,10 +64,8 @@ enum MainMenu {
         menu.addItem(item("Delete", #selector(NSText.delete(_:))))
         menu.addItem(item("Select All", #selector(NSText.selectAll(_:)), "a"))
         menu.addItem(.separator())
-        // Reserved for message search (post-v1); the item exists so the shortcut is spoken for.
-        let find = item("Find…", nil, "f")
-        find.isEnabled = false
-        menu.addItem(find)
+        // Focuses the chat list's search field.
+        menu.addItem(item("Find…", #selector(MainWindowController.focusSearch(_:)), "f"))
         menu.addItem(.separator())
         menu.addItem(item("Emoji & Symbols", #selector(NSApplication.orderFrontCharacterPalette(_:)), " ", [.command, .control]))
         return menu
@@ -101,7 +99,7 @@ enum MainMenu {
         menu.addItem(item("Archive", #selector(MainWindowController.toggleArchive(_:)), "a", [.command, .shift]))
         menu.addItem(.separator())
         // Esc and Space have no modifier, so they are armed only while live (see PlainKeyEquivalents).
-        let escape = item("Focus Chat List", #selector(MainWindowController.cancelOrFocusChatList(_:)), "\u{1b}", [])
+        let escape = item("Cancel", #selector(MainWindowController.cancelTransientState(_:)), "\u{1b}", [])
         let quickLook = item("Quick Look", #selector(MainWindowController.quickLookSelection(_:)), " ", [])
         menu.addItem(escape)
         menu.addItem(quickLook)
