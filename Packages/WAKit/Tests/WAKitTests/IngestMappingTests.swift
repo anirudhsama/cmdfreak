@@ -207,7 +207,11 @@ import Testing
         #expect(try db.chat(F.group)?.participantCount == 3)
         await groups.fillMissing()
         #expect(bridge.calls.withLock { $0.overviews.count } == 1)
+        // A count-less overview (truncated answer) is not a membership change: the count stays.
         try await ingest.apply([.group(group: BridgeGroup(jid: F.group, subject: nil, participantCount: 0, participants: []))])
+        #expect(try db.chat(F.group)?.participantCount == 3)
+        try await ingest.apply([.group(group: BridgeGroup(jid: F.group, subject: nil, participantCount: 0, participants: [],
+                                                          membershipChanged: true))])
         #expect(try db.chat(F.group)?.participantCount == nil)
         #expect(try db.chat(F.group)?.name == "Renamed")
         await groups.fillMissing(stale: [F.group])
@@ -246,5 +250,53 @@ import Testing
         #expect(try db.message(F.group, "S1")?.participant == F.me)  // no LID senders in that group
         #expect(try db.message(lidGroup, "m1")?.participant == ownLid)
         #expect(try db.message(pnGroup, "m2")?.participant == F.me)
+    }
+
+    @Test func failedOverviewFetchIsRetriedOnTheNextPass() async throws {
+        let db = try F.tempDB()
+        let ingest = try IngestActor(database: db)
+        let bridge = FakeBridge()
+        try await ingest.apply([F.history(chats: [F.chat(F.group, name: "Named")])])
+        let groups = GroupService(bridge: bridge, ingest: ingest, batchInterval: .zero)
+        bridge.overviewsFail = true
+        await groups.fillMissing()
+        bridge.overviewsFail = false
+        await groups.fillMissing()
+        #expect(bridge.calls.withLock { $0.overviews.count } == 2)
+        #expect(try db.chat(F.group)?.participantCount == 3)
+    }
+
+    @Test func aGuessedOwnParticipantNeverOutvotesTheServer() async throws {
+        let db = try F.tempDB()
+        let ingest = try IngestActor(database: db)
+        let ownLid = "1234@lid"
+        try await ingest.apply([.ownJid(pn: F.me, lid: ownLid)])
+        // History copies of our messages (no participant) in a group with no LID evidence yet:
+        // guessed as our phone-number JID.
+        var h1 = F.message("h1", chat: F.group, fromMe: true, ts: 100), h2 = F.message("h2", chat: F.group, fromMe: true, ts: 101)
+        h1.participant = nil; h2.participant = nil
+        try await ingest.apply([F.history(messages: [h1, h2])])
+        #expect(try db.message(F.group, "h1")?.participant == F.me)
+        // A send whose addressing was unknown (bridge reported none) does not add a vote either.
+        let pending = try await ingest.insertOutgoing(chatJid: F.group, text: "x", ownJid: F.me)
+        var unknown = F.message("s0", chat: F.group, fromMe: true, ts: 150)
+        unknown.participant = nil
+        try await ingest.completeSend(localId: pending.id, chatJid: F.group,
+                                      result: BridgeSendResult(messageId: "s0", timestamp: 150, message: unknown))
+        // One live echo reports our LID: every guessed row follows it, however many there are.
+        var echo = F.message("e1", chat: F.group, fromMe: true, ts: 200)
+        echo.participant = ownLid
+        try await ingest.apply([F.live(echo)])
+        for id in ["h1", "h2", "s0"] { #expect(try db.message(F.group, id)?.participant == ownLid) }
+        // A later history copy of our message is filled from the echo, not the old guess.
+        var h3 = F.message("h3", chat: F.group, fromMe: true, ts: 300)
+        h3.participant = nil
+        try await ingest.apply([F.history(messages: [h3])])
+        #expect(try db.message(F.group, "h3")?.participant == ownLid)
+        // A redelivered echo of a guessed row fixes that row too.
+        var redelivered = F.message("h1", chat: F.group, fromMe: true, ts: 100)
+        redelivered.participant = ownLid
+        try await ingest.apply([F.live(redelivered)])
+        #expect(try db.count("SELECT COUNT(*) FROM message WHERE id = 'h1' AND participantInferred = 0") == 1)
     }
 }

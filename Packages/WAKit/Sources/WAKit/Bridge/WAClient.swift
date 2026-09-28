@@ -58,6 +58,67 @@ final class EventRouter: EventSink, Sendable {
     }
 }
 
+/// Retries parked encrypted add-ons (edits, poll votes that arrived before their original) whose
+/// target is stored. The first try runs right after the target's commit, but the library may not
+/// have flushed the parent's secret to its store yet, so a sweep follows after a short delay and on
+/// every connect. Each envelope gets `maxAttempts` tries per session; what never opens stays parked
+/// until the 14-day prune.
+actor ParkedRetrier {
+    static let maxAttempts = 4
+    static let sweepLimit = 200
+
+    private let ingest: IngestActor
+    private let bridge: any WaBridgeProtocol
+    private let delay: Duration
+    private var attempts: [Int64: Int] = [:]
+    private var scheduled = false
+
+    init(ingest: IngestActor, bridge: any WaBridgeProtocol, delay: Duration = .seconds(3)) {
+        self.ingest = ingest
+        self.bridge = bridge
+        self.delay = delay
+    }
+
+    /// Tries `parked` now (targets just committed).
+    func retry(_ parked: [ParkedEnvelope]) async {
+        let due = parked.filter { attempts[$0.rowId, default: 0] < Self.maxAttempts }
+        guard !due.isEmpty else { return }
+        for p in due { attempts[p.rowId, default: 0] += 1 }
+        do {
+            let bridge = self.bridge
+            let opened = try await ingest.retryParked(due) { await bridge.decryptParked(envelopes: $0) }
+            for id in opened { attempts[id] = nil }
+        } catch {
+            WAKit.log.error("parked add-on retry failed: \(error)")
+        }
+    }
+
+    /// One pass over every parked add-on whose target is stored.
+    func sweep() async {
+        do {
+            let ready = try await ingest.parkedEncryptedReady(limit: Self.sweepLimit * Self.maxAttempts)
+            await retry(Array(ready.filter { attempts[$0.rowId, default: 0] < Self.maxAttempts }.prefix(Self.sweepLimit)))
+        } catch {
+            WAKit.log.error("parked add-on sweep failed: \(error)")
+        }
+    }
+
+    /// Runs `sweep` after the delay; calls while one is pending coalesce.
+    func scheduleSweep() {
+        guard !scheduled else { return }
+        scheduled = true
+        Task {
+            try? await Task.sleep(for: delay)
+            await runScheduled()
+        }
+    }
+
+    private func runScheduled() async {
+        scheduled = false
+        await sweep()
+    }
+}
+
 /// Sends read receipts for messages that arrived while their chat was open, batched per chat.
 actor ReadReceiptBatcher {
     private let bridge: any WaBridgeProtocol
@@ -173,10 +234,13 @@ public final class WAClient: Sendable {
         self.groups = groups
         avatars = AvatarService(bridge: bridge, ingest: ingest)
         let receipts = ReadReceiptBatcher(bridge: bridge)
+        let retrier = ParkedRetrier(ingest: ingest, bridge: bridge)
 
         // Single consumer: batches are applied one at a time, in bridge order.
         Task.detached(priority: .userInitiated) {
-            try? await ingest.prunePendingMutations(olderThan: Int64(Date().timeIntervalSince1970) - 14 * 86_400)
+            let now = Int64(Date().timeIntervalSince1970)
+            try? await ingest.prunePendingMutations(olderThan: now - 14 * 86_400)
+            try? await ingest.pruneTombstones(olderThan: now - 90 * 86_400)
             for await batch in ingestStream {
                 var result = IngestResult()
                 do {
@@ -188,14 +252,14 @@ public final class WAClient: Sendable {
                 }
                 if !result.reads.isEmpty { await receipts.add(result.reads) }
                 if !result.parked.isEmpty {
-                    do {
-                        try await ingest.retryParked(result.parked) { envelopes in await bridge.decryptParked(envelopes: envelopes) }
-                    } catch {
-                        WAKit.log.error("parked add-on retry failed: \(error)")
-                    }
+                    await retrier.retry(result.parked)
+                    await retrier.scheduleSweep()
+                }
+                if batch.events.contains(where: { if case .connection(.connected) = $0 { true } else { false } }) {
+                    await retrier.scheduleSweep()
                 }
                 let staleGroups = batch.events.compactMap { event -> String? in
-                    if case .group(let g) = event, g.isMembershipChange { g.jid } else { nil }
+                    if case .group(let g) = event, g.membershipChanged { g.jid } else { nil }
                 }
                 if !staleGroups.isEmpty || batch.events.contains(where: \.completesSyncPhase) {
                     Task { await groups.fillMissing(stale: staleGroups) }

@@ -252,45 +252,54 @@ extension AppDatabase {
         }
 
         // Our own group messages were stored without a key participant, so reactions, edits and
-        // revokes of them went out with an incomplete key. Best effort: the participant our own
-        // messages in that group already carry, else our LID when the group's other senders are
-        // LID-addressed, else our phone-number JID.
+        // revokes of them went out with an incomplete key. Fill them in (see
+        // `backfillOwnGroupParticipants`); `participantInferred` marks a guessed value, which never
+        // counts as evidence and is replaced once the server tells us the real one.
         m.registerMigration("v6") { db in
+            try db.alter(table: "message") { t in t.add(column: "participantInferred", .boolean).notNull().defaults(to: false) }
             try Self.backfillOwnGroupParticipants(db)
         }
 
         return m
     }
 
-    /// Fills the key participant of our own group messages stored without one (history copies of
-    /// our messages carry none), in `groups` or everywhere.
+    /// Fills (or re-guesses) the key participant of our own group messages that have none or only
+    /// a guessed one (history copies of our messages carry none), in `groups` or everywhere. The
+    /// value comes from, in order: the newest own message whose participant the server or a send
+    /// reported (never a guessed one, so a wrong guess cannot reinforce itself); our JID in the
+    /// namespace of the newest other sender (the group's current addressing); our phone-number JID.
     static func backfillOwnGroupParticipants(_ db: Database, groups only: [String]? = nil) throws {
         let own = try String.fetchOne(db, sql: "SELECT value FROM meta WHERE key = 'ownPn'")
         let ownLid = try String.fetchOne(db, sql: "SELECT value FROM meta WHERE key = 'ownLid'")
         guard own != nil || ownLid != nil else { return }
+        let needsWork = "fromMe = 1 AND (participant IS NULL OR participantInferred = 1)"
         let groups = try only?.filter { $0.hasSuffix("@g.us") } ?? String.fetchAll(db, sql: """
-            SELECT DISTINCT chatJid FROM message WHERE fromMe = 1 AND participant IS NULL AND chatJid LIKE '%@g.us'
+            SELECT DISTINCT chatJid FROM message WHERE \(needsWork) AND chatJid LIKE '%@g.us'
             """)
+        let bare = { (jid: String) in JID.user(jid) + "@" + (jid.split(separator: "@").last.map(String.init) ?? "") }
         for group in groups {
             if only != nil {
-                let missing = try Bool.fetchOne(db, sql: "SELECT 1 FROM message WHERE chatJid = ? AND fromMe = 1 AND participant IS NULL LIMIT 1",
+                let missing = try Bool.fetchOne(db, sql: "SELECT 1 FROM message WHERE chatJid = ? AND \(needsWork) LIMIT 1",
                                                 arguments: [group]) ?? false
                 guard missing else { continue }
             }
             var participant = try String.fetchOne(db, sql: """
-                SELECT participant FROM message WHERE chatJid = ? AND fromMe = 1 AND participant IS NOT NULL
-                GROUP BY participant ORDER BY COUNT(*) DESC LIMIT 1
+                SELECT participant FROM message
+                WHERE chatJid = ? AND fromMe = 1 AND participant IS NOT NULL AND participantInferred = 0
+                ORDER BY sortKey DESC LIMIT 1
                 """, arguments: [group])
             if participant == nil {
                 let lidAddressed = try Bool.fetchOne(db, sql: """
                     SELECT participant LIKE '%@lid' FROM message
                     WHERE chatJid = ? AND fromMe = 0 AND participant IS NOT NULL ORDER BY sortKey DESC LIMIT 1
                     """, arguments: [group]) ?? false
-                participant = (lidAddressed ? ownLid : own).map { JID.user($0) + "@" + ($0.split(separator: "@").last.map(String.init) ?? "") }
+                participant = (lidAddressed ? ownLid : own).map(bare)
             }
             guard let participant else { continue }
-            try db.execute(sql: "UPDATE message SET participant = ? WHERE chatJid = ? AND fromMe = 1 AND participant IS NULL",
-                           arguments: [participant, group])
+            try db.execute(sql: """
+                UPDATE message SET participant = ?, participantInferred = 1
+                WHERE chatJid = ? AND \(needsWork) AND IFNULL(participant, '') != ?
+                """, arguments: [participant, group, participant])
         }
     }
 

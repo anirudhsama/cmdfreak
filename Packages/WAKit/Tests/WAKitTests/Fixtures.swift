@@ -123,8 +123,10 @@ final class FakeBridge: WaBridgeProtocol, @unchecked Sendable {
             BridgeGroupParticipant(jid: F.bob, isAdmin: false, isSuperAdmin: false),
         ])
     }
+    var overviewsFail = false
     func fetchGroupOverviews(jids: [String]) async throws -> [BridgeGroup] {
         calls.withLock { $0.overviews.append(jids) }
+        if overviewsFail { throw BridgeError.Network("offline") }
         return jids.map { BridgeGroup(jid: $0, subject: "Group \($0.prefix(4))", participantCount: 3, participants: []) }
     }
     func importCapture(captureDir: String) async throws {}

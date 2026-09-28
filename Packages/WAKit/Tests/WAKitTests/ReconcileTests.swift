@@ -253,4 +253,33 @@ import Testing
         try await client.ingest.apply([.ownJid(pn: F.me, lid: nil), .pairing(state: .loggedOut(reason: "401"))])
         #expect(try db.count(identity) == 0)
     }
+
+@Suite struct ParkedRetrierTests {
+    @Test func sweepRetriesParkedAddOnsTheFirstTryMissedAndStopsAfterTheBound() async throws {
+        let db = try F.tempDB()
+        let ingest = try IngestActor(database: db)
+        let bridge = FakeBridge()
+        let target = F.key("P", chat: F.bob, fromMe: true)
+        let poll = BridgePoll(question: "Lunch?", options: ["Yes", "No"], selectableCount: 1)
+        try await ingest.apply([F.live(updates: [.encrypted(target: target, envelope: Data([1]))])])
+        try await ingest.apply([F.live(F.message("P", chat: F.bob, fromMe: true, kind: .poll, text: nil, poll: poll))])
+        let retrier = ParkedRetrier(ingest: ingest, bridge: bridge, delay: .milliseconds(10))
+        // The secret was not in the library's store yet: nothing opens, the row stays parked.
+        await retrier.sweep()
+        #expect(try db.count("SELECT COUNT(*) FROM pending_mutation") == 1)
+        // A later sweep (after a connect or the post-ingest delay) opens it.
+        bridge.parkedResult = .pollVote(target: target, voterJid: F.bob, selected: ["No"], timestamp: 1_700_000_010)
+        await retrier.scheduleSweep()
+        for _ in 0..<200 where try db.count("SELECT COUNT(*) FROM poll_vote") == 0 { try await Task.sleep(for: .milliseconds(10)) }
+        #expect(try db.count("SELECT COUNT(*) FROM poll_vote") == 1)
+        #expect(try db.count("SELECT COUNT(*) FROM pending_mutation") == 0)
+
+        // One that never opens is tried a bounded number of times, then left for the prune.
+        bridge.parkedResult = nil
+        try await ingest.apply([F.live(updates: [.encrypted(target: target, envelope: Data([2]))])])
+        for _ in 0..<(ParkedRetrier.maxAttempts + 3) { await retrier.sweep() }
+        #expect(bridge.calls.withLock { $0.decryptParked.filter { $0 == [Data([2])] }.count } == ParkedRetrier.maxAttempts)
+        #expect(try db.count("SELECT COUNT(*) FROM pending_mutation") == 1)
+    }
+}
 }

@@ -49,9 +49,10 @@ public actor GroupService {
             for start in stride(from: 0, to: jids.count, by: Self.batchSize) {
                 if start > 0 { try await Task.sleep(for: batchInterval) }
                 let batch = Array(jids[start..<min(start + Self.batchSize, jids.count)])
-                attempted.formUnion(batch)
                 let groups = try await bridge.fetchGroupOverviews(jids: batch)
                 try await ingest.applyGroups(groups)
+                // Only an answered batch counts as asked: a failed IQ is retried on the next pass.
+                attempted.formUnion(batch)
             }
         } catch {
             WAKit.log.error("group overviews failed: \(error)")

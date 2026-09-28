@@ -82,6 +82,9 @@ pub struct BridgeGroup {
     pub participant_count: u32,
     /// Empty for overviews; populated by `fetch_group_metadata`.
     pub participants: Vec<BridgeGroupParticipant>,
+    /// Members were added or removed: a stored participant count is stale (re-fetch it).
+    #[uniffi(default = false)]
+    pub membership_changed: bool,
 }
 
 // MARK: - Messages
@@ -401,8 +404,8 @@ pub enum BridgeEvent {
     JidAliases { aliases: Vec<BridgeJidAlias> },
     ChatAction { action: BridgeChatAction },
     /// Group subject or membership changed. `participant_count == 0` means unknown here. A
-    /// membership change (members added or removed) arrives with `subject == None` and a zero
-    /// count: the stored count is stale, re-fetch it (`fetch_group_overviews`).
+    /// membership change (members added or removed) sets `membership_changed`: the stored count is
+    /// stale, re-fetch it (`fetch_group_overviews`).
     Group { group: BridgeGroup },
     PictureChanged { jid: String },
     HistoryChunk { chunk: BridgeHistoryChunk },

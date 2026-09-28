@@ -44,6 +44,8 @@ struct ChangeSet {
     /// sends read receipts for them after commit.
     var readWhileFocused: [String: [BridgeMessageKey]] = [:]
     var parked: [ParkedEnvelope] = []
+    /// Group chats where a reported own participant arrived for an existing row.
+    var participantEvidence: Set<String> = []
 
     mutating func add(_ chat: String, _ id: String) { added[chat, default: []].append(id); dirty.insert(chat) }
     mutating func update(_ chat: String, _ id: String) { updated[chat, default: []].insert(id); dirty.insert(chat) }
@@ -115,15 +117,16 @@ public actor IngestActor {
     }
 
     /// Decrypts parked add-ons (`decrypt` is `WaBridge.decryptParked`) and applies the ones that
-    /// opened; those that still cannot be opened stay parked until pruned.
-    public func retryParked(_ parked: [ParkedEnvelope], decrypt: @Sendable ([Data]) async -> [BridgeMessageUpdate?]) async throws {
-        guard !parked.isEmpty else { return }
+    /// opened, returning their row ids; the rest stay parked for `ParkedRetrier` or until pruned.
+    @discardableResult
+    public func retryParked(_ parked: [ParkedEnvelope], decrypt: @Sendable ([Data]) async -> [BridgeMessageUpdate?]) async throws -> Set<Int64> {
+        guard !parked.isEmpty else { return [] }
         let results = await decrypt(parked.map(\.envelope))
         let opened = zip(parked, results).compactMap { p, u -> (Int64, BridgeMessageUpdate)? in
             guard let u, !u.isEncrypted else { return nil }
             return (p.rowId, u)
         }
-        guard !opened.isEmpty else { return }
+        guard !opened.isEmpty else { return [] }
         try perform { db, cs in
             for (rowId, update) in opened {
                 try db.execute(sql: "DELETE FROM pending_mutation WHERE id = ?", arguments: [rowId])
@@ -131,6 +134,7 @@ public actor IngestActor {
                 try self.applyUpdate(update, db, &cs)
             }
         }
+        return Set(opened.map(\.0))
     }
 
     /// Forgets our own identity after a logout, so the next launch starts unpaired.
@@ -227,9 +231,10 @@ public actor IngestActor {
             let localPath = try storedPath
                 ?? String.fetchOne(db, sql: "SELECT localPath FROM media WHERE chatJid = ? AND messageId = ?", arguments: [jid, localId])
             try db.execute(sql: """
-                UPDATE message SET id = ?, timestamp = ?, status = MAX(status, ?), participant = COALESCE(?, participant)
+                UPDATE message SET id = ?, timestamp = ?, status = MAX(status, ?),
+                    participant = COALESCE(?, participant), participantInferred = CASE WHEN ? IS NULL THEN participantInferred ELSE 0 END
                 WHERE chatJid = ? AND id = ?
-                """, arguments: [newId, result.timestamp, MessageStatus.sent.rank, result.message.participant, jid, localId])
+                """, arguments: [newId, result.timestamp, MessageStatus.sent.rank, result.message.participant, result.message.participant, jid, localId])
             if let media = result.message.media {
                 var rec = Self.mediaRecord(media, chatJid: jid, messageId: newId)
                 rec.localPath = localPath
@@ -286,6 +291,30 @@ public actor IngestActor {
         }
     }
 
+    /// Drops reaction/vote removal tombstones older than `cutoff`. Stale copies that could revive
+    /// those come from history sync around the removal; delete-for-me tombstones are kept for good,
+    /// since on-demand history can bring back a message of any age (and there are few of them).
+    public func pruneTombstones(olderThan cutoff: Int64) throws {
+        try perform { db, _ in
+            try db.execute(sql: "DELETE FROM tombstone WHERE kind != 'message' AND timestamp < ?", arguments: [cutoff])
+        }
+    }
+
+    /// Parked encrypted add-ons whose target is stored, oldest first (for the retry sweep).
+    public func parkedEncryptedReady(limit: Int) throws -> [ParkedEnvelope] {
+        try database.pool.read { db in
+            try Row.fetchAll(db, sql: """
+                SELECT p.id, p.payload FROM pending_mutation p
+                JOIN message m ON m.chatJid = p.chatJid AND m.id = p.messageId
+                WHERE p.payload LIKE '{"encrypted"%' ORDER BY p.id LIMIT ?
+                """, arguments: [limit]).compactMap { row in
+                guard case .encrypted(let envelope)? = try? JSONDecoder().decode(MessageMutation.self, from: Data((row["payload"] as String).utf8))
+                else { return nil }
+                return ParkedEnvelope(rowId: row["id"], envelope: envelope)
+            }
+        }
+    }
+
     /// Drops parked mutations whose target never arrived.
     public func prunePendingMutations(olderThan cutoff: Int64) throws {
         try perform { db, _ in
@@ -329,7 +358,7 @@ public actor IngestActor {
                 """, arguments: [jid, name])
         }
         for jid in cs.dirty { try refreshPreview(db, jid) }
-        try AppDatabase.backfillOwnGroupParticipants(db, groups: Array(cs.added.keys))
+        try AppDatabase.backfillOwnGroupParticipants(db, groups: Array(Set(cs.added.keys).union(cs.participantEvidence)))
         if ingestSeq != persistedSeq {
             try db.execute(sql: "INSERT OR REPLACE INTO meta (key, value) VALUES ('ingestSeq', ?)", arguments: [String(ingestSeq)])
             persistedSeq = ingestSeq
@@ -446,7 +475,10 @@ public actor IngestActor {
         if !m.fromMe, let name = m.pushName, !name.isEmpty, !sender.isEmpty { cs.pushNames[sender] = name }
 
         // Deleted for me: a later (history or redelivered) copy must not bring it back.
-        if hasMessageTombstones, try Self.tombstone(db, chatJid, m.id, .message) != nil { return }
+        if hasMessageTombstones, try Self.tombstone(db, chatJid, m.id, .message) != nil {
+            try dropPending(db, chatJid, m.id)
+            return
+        }
 
         let existing = try MessageRecord.fetchOne(db, sql: "SELECT * FROM message WHERE chatJid = ? AND id = ?",
                                                   arguments: [chatJid, m.id])
@@ -468,6 +500,15 @@ public actor IngestActor {
                 try db.execute(sql: "UPDATE message SET \(sets.joined(separator: ", ")) WHERE chatJid = ? AND id = ?",
                                arguments: StatementArguments(args + [chatJid, m.id]))
                 cs.update(chatJid, m.id)
+            }
+            if m.fromMe, let p = m.participant {
+                // A reported participant (live echo) replaces a missing or guessed one; the
+                // group's other guessed rows are re-derived from it at commit.
+                try db.execute(sql: """
+                    UPDATE message SET participant = ?, participantInferred = 0
+                    WHERE chatJid = ? AND id = ? AND (participant IS NULL OR participantInferred = 1)
+                    """, arguments: [p, chatJid, m.id])
+                if db.changesCount > 0 { cs.dirty.insert(chatJid); cs.participantEvidence.insert(chatJid) }
             }
             if m.revoked || old.revoked {
                 // Same as applyMutation(.revoke): a revoked message keeps no media.
@@ -502,7 +543,7 @@ public actor IngestActor {
         }
         for r in m.reactions where !r.emoji.isEmpty {
             let sender = canon(r.senderJid)
-            if let removedAt = try Self.tombstone(db, chatJid, m.id, .reaction, sender), removedAt > r.timestamp { continue }
+            if try Self.reactionSuppressed(db, chatJid, m.id, sender, fromMe: r.fromMe, timestamp: r.timestamp) { continue }
             try ReactionRecord(chatJid: chatJid, messageId: m.id, senderJid: sender, emoji: r.emoji,
                                fromMe: r.fromMe, timestamp: r.timestamp).upsert(db)
         }
@@ -596,6 +637,7 @@ public actor IngestActor {
     }
 
     private func park(_ db: Database, _ chatJid: String, _ messageId: String, _ mutation: MessageMutation) throws {
+        if hasMessageTombstones, try Self.tombstone(db, chatJid, messageId, .message) != nil { return }
         let payload = String(decoding: try JSONEncoder().encode(mutation), as: UTF8.self)
         try db.execute(sql: "INSERT INTO pending_mutation (chatJid, messageId, payload, createdAt) VALUES (?, ?, ?, ?)",
                        arguments: [chatJid, messageId, payload, Int64(Date().timeIntervalSince1970)])
@@ -628,6 +670,12 @@ public actor IngestActor {
         pendingCount = max(0, pendingCount - applied.count)
     }
 
+    private func dropPending(_ db: Database, _ chatJid: String, _ messageId: String) throws {
+        guard pendingCount > 0 else { return }
+        try db.execute(sql: "DELETE FROM pending_mutation WHERE chatJid = ? AND messageId = ?", arguments: [chatJid, messageId])
+        pendingCount = max(0, pendingCount - db.changesCount)
+    }
+
     /// Parked mutations keep the sender JID they arrived with; an alias learned since then applies.
     private func canonicalised(_ mutation: MessageMutation) -> MessageMutation {
         switch mutation {
@@ -650,6 +698,18 @@ public actor IngestActor {
     static func tombstone(_ db: Database, _ chatJid: String, _ id: String, _ kind: TombstoneKind, _ sender: String = "") throws -> Int64? {
         try Int64.fetchOne(db, sql: "SELECT timestamp FROM tombstone WHERE chatJid = ? AND messageId = ? AND kind = ? AND senderJid = ?",
                            arguments: [chatJid, id, kind.rawValue, sender])
+    }
+
+    /// Clock skew allowed between our own removal (stamped by this Mac, or by another device) and
+    /// our own later re-reaction (stamped by whichever device made it).
+    static let ownReactionSkew: Int64 = 60
+
+    /// A reaction is dropped only when a removal by the same sender is known to be newer. A
+    /// timestamp of 0 is unknown (some history copies carry none) and is never suppressed.
+    static func reactionSuppressed(_ db: Database, _ chatJid: String, _ id: String, _ sender: String,
+                                   fromMe: Bool, timestamp ts: Int64) throws -> Bool {
+        guard ts > 0, let removedAt = try tombstone(db, chatJid, id, .reaction, sender) else { return false }
+        return removedAt > ts + (fromMe ? ownReactionSkew : 0)
     }
 
     static func recordTombstone(_ db: Database, _ chatJid: String, _ id: String, _ kind: TombstoneKind, _ sender: String, _ ts: Int64) throws {
@@ -691,7 +751,7 @@ public actor IngestActor {
             try db.execute(sql: "UPDATE message SET revoked = 1, text = NULL WHERE chatJid = ? AND id = ?", arguments: key)
             try db.execute(sql: "DELETE FROM media WHERE chatJid = ? AND messageId = ?", arguments: key)
         case .reaction(let sender, let fromMe, let emoji, let ts):
-            if !emoji.isEmpty, let removedAt = try Self.tombstone(db, chatJid, id, .reaction, sender), removedAt > ts {
+            if !emoji.isEmpty, try Self.reactionSuppressed(db, chatJid, id, sender, fromMe: fromMe, timestamp: ts) {
                 return true
             }
             if emoji.isEmpty {
@@ -706,7 +766,7 @@ public actor IngestActor {
                     """, arguments: key + [sender, emoji, fromMe, ts])
             }
         case .pollVote(let voter, let selected, let ts):
-            if !selected.isEmpty, let clearedAt = try Self.tombstone(db, chatJid, id, .vote, voter), clearedAt > ts {
+            if !selected.isEmpty, ts > 0, let clearedAt = try Self.tombstone(db, chatJid, id, .vote, voter), clearedAt > ts {
                 return true
             }
             if selected.isEmpty {
@@ -836,10 +896,7 @@ public actor IngestActor {
             hasMessageTombstones = true
             try db.execute(sql: "DELETE FROM message WHERE chatJid = ? AND id = ?", arguments: [jid, target.id])
             if db.changesCount > 0 { cs.delete(jid, target.id) }
-            if pendingCount > 0 {
-                try db.execute(sql: "DELETE FROM pending_mutation WHERE chatJid = ? AND messageId = ?", arguments: [jid, target.id])
-                pendingCount = max(0, pendingCount - db.changesCount)
-            }
+            try dropPending(db, jid, target.id)
         }
     }
 
@@ -857,14 +914,15 @@ public actor IngestActor {
 
     private func handleGroup(_ g: BridgeGroup, _ db: Database) throws {
         try db.execute(sql: "INSERT OR IGNORE INTO chat (jid, kind) VALUES (?, 'group')", arguments: [g.jid])
-        // A zero count is unknown: keep the stored one, except that a membership change (no
-        // subject) makes it stale, so it is cleared for `GroupService` to re-fetch.
+        // A zero count is unknown: keep the stored one, except that a membership change
+        // (`membershipChanged`) makes it stale, so it is cleared for `GroupService` to re-fetch.
         let count: Int? = g.participantCount > 0 ? Int(g.participantCount) : nil
+        let stale = g.membershipChanged && count == nil
         try db.execute(sql: """
             UPDATE chat SET name = COALESCE(?, name),
                 participantCount = CASE WHEN ? IS NOT NULL THEN ? WHEN ? THEN NULL ELSE participantCount END
             WHERE jid = ?
-            """, arguments: [g.subject.nonEmpty, count, count, g.isMembershipChange, g.jid])
+            """, arguments: [g.subject.nonEmpty, count, count, stale, g.jid])
         guard !g.participants.isEmpty else { return }
         try db.execute(sql: "DELETE FROM group_participant WHERE groupJid = ?", arguments: [g.jid])
         for p in g.participants {
@@ -966,8 +1024,15 @@ public actor IngestActor {
         try db.execute(sql: "UPDATE OR REPLACE reaction SET senderJid = ? WHERE senderJid = ?", arguments: [pn, lid])
         try db.execute(sql: "UPDATE OR REPLACE poll_vote SET voterJid = ? WHERE voterJid = ?", arguments: [pn, lid])
         try db.execute(sql: "UPDATE OR REPLACE group_participant SET jid = ? WHERE jid = ?", arguments: [pn, lid])
-        try db.execute(sql: "UPDATE OR REPLACE tombstone SET chatJid = ? WHERE chatJid = ?", arguments: [pn, lid])
-        try db.execute(sql: "UPDATE OR REPLACE tombstone SET senderJid = ? WHERE senderJid = ?", arguments: [pn, lid])
+        // Folded into the PN spelling keeping the newest removal time, then the LID rows go.
+        try db.execute(sql: """
+            INSERT INTO tombstone (chatJid, messageId, kind, senderJid, timestamp)
+            SELECT CASE WHEN chatJid = ?1 THEN ?2 ELSE chatJid END, messageId, kind,
+                   CASE WHEN senderJid = ?1 THEN ?2 ELSE senderJid END, timestamp
+            FROM tombstone WHERE chatJid = ?1 OR senderJid = ?1
+            ON CONFLICT(chatJid, messageId, kind, senderJid) DO UPDATE SET timestamp = MAX(timestamp, excluded.timestamp)
+            """, arguments: [lid, pn])
+        try db.execute(sql: "DELETE FROM tombstone WHERE chatJid = ?1 OR senderJid = ?1", arguments: [lid])
 
         if pendingCount > 0 {
             try db.execute(sql: "UPDATE pending_mutation SET chatJid = ? WHERE chatJid = ?", arguments: [pn, lid])
@@ -1040,11 +1105,6 @@ public actor IngestActor {
             isAnimated: m.isAnimated, localPath: nil, downloadState: .none
         )
     }
-}
-
-extension BridgeGroup {
-    /// Members were added or removed: the stored participant count is stale.
-    var isMembershipChange: Bool { subject == nil && participantCount == 0 && participants.isEmpty }
 }
 
 extension BridgeMessageUpdate {

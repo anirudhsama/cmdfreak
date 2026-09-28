@@ -120,4 +120,62 @@ import Testing
             BridgeReaction(senderJid: F.alicePN, fromMe: false, emoji: "🔥", timestamp: 10)])])])
         #expect(try db.count("SELECT COUNT(*) FROM reaction") == 0)
     }
+
+    @Test func unknownTimestampsAndOwnClockSkewDoNotSuppressReactions() async throws {
+        let db = try F.tempDB()
+        let ingest = try IngestActor(database: db)
+        try await ingest.apply([F.live(F.message("M", chat: F.group, sender: F.bob))])
+        // Our removal stamped by this Mac at 1000; our re-reaction from the phone, whose clock is 20s behind.
+        try await ingest.apply([F.live(updates: [.reaction(target: F.key("M", chat: F.group),
+            reaction: BridgeReaction(senderJid: F.me, fromMe: true, emoji: "", timestamp: 1000))])])
+        try await ingest.apply([F.live(updates: [.reaction(target: F.key("M", chat: F.group),
+            reaction: BridgeReaction(senderJid: F.me, fromMe: true, emoji: "👍", timestamp: 980))])])
+        #expect(try db.count("SELECT COUNT(*) FROM reaction WHERE senderJid = ?", [F.me]) == 1)
+        // Someone else's removal, then a history copy of their reaction without a timestamp: kept.
+        try await ingest.apply([F.live(F.message("N", chat: F.group, sender: F.bob))])
+        try await ingest.apply([F.live(updates: [.reaction(target: F.key("N", chat: F.group),
+            reaction: BridgeReaction(senderJid: F.alicePN, fromMe: false, emoji: "", timestamp: 1000))])])
+        try await ingest.apply([F.history(messages: [F.message("N", chat: F.group, sender: F.bob, reactions: [
+            BridgeReaction(senderJid: F.alicePN, fromMe: false, emoji: "🔥", timestamp: 0)])])])
+        #expect(try db.count("SELECT COUNT(*) FROM reaction WHERE messageId = 'N'") == 1)
+    }
+
+    @Test func aliasMergeKeepsTheNewestRemovalTime() async throws {
+        let db = try F.tempDB()
+        let ingest = try IngestActor(database: db)
+        let remove = { (sender: String, ts: Int64) in
+            F.live(updates: [.reaction(target: F.key("M", chat: F.group), reaction: BridgeReaction(senderJid: sender, fromMe: false, emoji: "", timestamp: ts))])
+        }
+        // Newer removal under the PN, older under the LID (not yet known to be the same person).
+        try await ingest.apply([remove(F.alicePN, 50), remove(F.aliceLID, 20)])
+        try await ingest.apply([.jidAliases(aliases: [BridgeJidAlias(lid: F.aliceLID, pn: F.alicePN)])])
+        #expect(try db.count("SELECT COUNT(*) FROM tombstone") == 1)
+        #expect(try db.count("SELECT COUNT(*) FROM tombstone WHERE senderJid = ? AND timestamp = 50", [F.alicePN]) == 1)
+        try await ingest.apply([F.history(messages: [F.message("M", chat: F.group, sender: F.bob, reactions: [
+            BridgeReaction(senderJid: F.alicePN, fromMe: false, emoji: "🔥", timestamp: 30)])])])
+        #expect(try db.count("SELECT COUNT(*) FROM reaction") == 0)
+    }
+
+    @Test func nothingParksForADeletedMessageAndOldRemovalsArePruned() async throws {
+        let db = try F.tempDB()
+        let ingest = try IngestActor(database: db)
+        try await ingest.apply([.chatAction(action: .deleteMessageForMe(target: F.key("D", chat: F.bob)))])
+        try await ingest.apply([F.live(updates: [.edit(target: F.key("D", chat: F.bob), text: "x", editedAt: 5)])])
+        #expect(try db.count("SELECT COUNT(*) FROM pending_mutation") == 0)
+        // Parked before the delete and still there when the (deleted) message shows up: dropped then.
+        try await ingest.apply([F.live(updates: [.edit(target: F.key("E", chat: F.bob), text: "x", editedAt: 5)])])
+        try await db.pool.write { db in
+            try db.execute(sql: "INSERT INTO tombstone (chatJid, messageId, kind, senderJid, timestamp) VALUES (?, 'E', 'message', '', 0)",
+                           arguments: [F.bob])
+        }
+        let restarted = try IngestActor(database: db)
+        try await restarted.apply([F.live(F.message("E", chat: F.bob))])
+        #expect(try db.count("SELECT COUNT(*) FROM pending_mutation") == 0)
+        // Reaction/vote removals expire; delete-for-me tombstones stay.
+        try await restarted.apply([F.live(updates: [.reaction(target: F.key("R", chat: F.bob),
+            reaction: BridgeReaction(senderJid: F.bob, fromMe: false, emoji: "", timestamp: 100))])])
+        try await restarted.pruneTombstones(olderThan: 1_000)
+        #expect(try db.count("SELECT COUNT(*) FROM tombstone WHERE kind = 'reaction'") == 0)
+        #expect(try db.count("SELECT COUNT(*) FROM tombstone WHERE kind = 'message'") == 2)
+    }
 }

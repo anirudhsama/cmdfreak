@@ -13,8 +13,11 @@
 //! Inbound user messages take the durability-hook path: the hook maps its batch, pushes it through
 //! the pipeline and returns only after the sink has persisted it, so the library acks to the server
 //! only once Swift has committed the message. The `Event::Messages` that follows carries
-//! `hook_committed == true` and is skipped to avoid delivering it twice. History chunks use the same
-//! wait, so exactly one chunk is in flight against Swift's commit.
+//! `hook_committed == true` and is skipped to avoid delivering it twice. When the sink reports a
+//! failed save the hook returns `Err`: the library then neither acks nor dispatches
+//! `Event::Messages` for the batch (it returns before dispatch), and the server redelivers it on
+//! the next connect. History chunks use the same wait, so exactly one chunk is in flight against
+//! Swift's commit.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -186,6 +189,12 @@ async fn pipeline(
                 }
             }
             Input::Ready(events, done) => {
+                // A waiter's batch is one sink call (one Swift transaction) of its own: events
+                // already buffered go first, so a failure in them is never charged to the hook's
+                // messages (which would count towards giving up on them).
+                if done.is_some() && !buf.is_empty() {
+                    flush(&shared, &mut buf, &mut waiters);
+                }
                 buf.extend(events);
                 waiters.extend(done);
             }
@@ -425,14 +434,17 @@ async fn connect_inner(shared: Arc<Shared>, session: std::path::PathBuf) -> R<()
     let path = session.to_str().ok_or_else(|| BridgeError::Io("non-UTF-8 data dir".into()))?;
     let store = SqliteStore::new(path).await.map_err(|e| BridgeError::Store(e.to_string()))?;
     let generation = shared.generation.fetch_add(1, Ordering::SeqCst) + 1;
-    let bot = Bot::builder()
+    let builder = Bot::builder()
         .with_backend(store)
         .with_event_delivery(EventDelivery::Ordered { capacity: ORDERED_CAPACITY })
         .with_event_handler(BusHandler { shared: Arc::downgrade(&shared), generation })
-        .with_inbound_durability_hook(DurabilityHook::new(Arc::downgrade(&shared)))
-        .build()
-        .await
-        .map_err(|e| BridgeError::Store(e.to_string()))?;
+        .with_inbound_durability_hook(DurabilityHook::new(Arc::downgrade(&shared)));
+    #[cfg(test)]
+    let builder = builder
+        .with_transport_factory(sink_tests::NoNetwork)
+        .with_http_client(sink_tests::NoNetwork)
+        .with_version((2, 3000, 1));
+    let bot = builder.build().await.map_err(|e| BridgeError::Store(e.to_string()))?;
     let client = bot.client();
     shared.canon.set_own(client.pn(), client.lid());
     *shared.client.write().unwrap() = Some(client);
@@ -443,18 +455,22 @@ async fn connect_inner(shared: Arc<Shared>, session: std::path::PathBuf) -> R<()
 
 /// Stops the bot, forgets the client and our identity, and removes the session store files.
 /// With `only_generation`, does nothing unless that client is still the current one.
+///
+/// Holds the bot lock throughout: a `connect()` arriving meanwhile (e.g. "Link again" right after
+/// the phone unlinked us) waits and then builds a fresh client and store, instead of having them
+/// torn down and unlinked under it.
 async fn reset_session(shared: &Shared, session: &std::path::Path, only_generation: Option<u64>) -> R<()> {
-    let handle = {
-        let mut guard = shared.bot.lock().await;
-        if only_generation.is_some_and(|g| g != shared.generation.load(Ordering::SeqCst)) {
-            return Ok(());
-        }
-        // This client is finished; a later connect() builds the next generation.
-        shared.generation.fetch_add(1, Ordering::SeqCst);
-        guard.take()
-    };
-    if let Some(h) = handle {
+    let mut guard = shared.bot.lock().await;
+    if only_generation.is_some_and(|g| g != shared.generation.load(Ordering::SeqCst)) {
+        return Ok(());
+    }
+    // This client is finished; a later connect() builds the next generation.
+    shared.generation.fetch_add(1, Ordering::SeqCst);
+    if let Some(h) = guard.take() {
         h.shutdown().await;
+        // Widens the shutdown window so the race test reliably lands a connect() inside it.
+        #[cfg(test)]
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
     *shared.client.write().unwrap() = None;
     shared.canon.set_own(None, None);
@@ -752,6 +768,7 @@ impl WaBridge {
                             subject: o.subject,
                             participant_count: o.participant_count.unwrap_or(0),
                             participants: vec![],
+                            membership_changed: false,
                         }),
                         GroupOverviewResult::Truncated { id, participant_count } => {
                             out.push(BridgeGroup {
@@ -759,6 +776,7 @@ impl WaBridge {
                                 subject: None,
                                 participant_count,
                                 participants: vec![],
+                                membership_changed: false,
                             })
                         }
                         _ => {}
@@ -801,6 +819,7 @@ impl WaBridge {
                 subject: md.subject,
                 participant_count: participants.len() as u32,
                 participants,
+                membership_changed: false,
             })
         })
         .await
@@ -941,11 +960,13 @@ pub(crate) async fn own_participant(shared: &Shared, client: &Client, chat: &Jid
     if !chat.is_group() {
         return None;
     }
+    // Unknown addressing: leave it unset rather than guess (the app then fills it from the
+    // group's other messages).
     let lid_addressed = match client.groups().routing_info(chat).await {
         Ok(info) => info.addressing_mode == AddressingMode::Lid,
         Err(e) => {
             log::warn!("group addressing mode unknown for own participant: {e}");
-            false
+            return None;
         }
     };
     own_participant_for(shared, lid_addressed).or_else(|| {
@@ -1077,6 +1098,35 @@ mod sink_tests {
         }
     }
 
+    /// Transport and HTTP stand-ins for bots built in tests: every dial and request fails, so
+    /// nothing ever reaches the network.
+    pub(crate) struct NoNetwork;
+
+    #[whatsapp_rust::async_trait]
+    impl whatsapp_rust::transport::TransportFactory for NoNetwork {
+        async fn create_transport(
+            &self,
+        ) -> Result<
+            (
+                Arc<dyn whatsapp_rust::transport::Transport>,
+                whatsapp_rust::async_channel::Receiver<whatsapp_rust::transport::TransportEvent>,
+            ),
+            anyhow::Error,
+        > {
+            anyhow::bail!("no network in tests")
+        }
+    }
+
+    #[whatsapp_rust::async_trait]
+    impl whatsapp_rust::http::HttpClient for NoNetwork {
+        async fn execute(
+            &self,
+            _request: whatsapp_rust::http::HttpRequest,
+        ) -> anyhow::Result<whatsapp_rust::http::HttpResponse> {
+            anyhow::bail!("no network in tests")
+        }
+    }
+
     /// Stands in for a Swift sink whose ingest transaction fails.
     struct FailingSink(AtomicBool);
 
@@ -1172,6 +1222,64 @@ mod sink_tests {
         assert!(!std::path::Path::new(&format!("{}-wal", bridge.session_path().display())).exists());
         assert!(bridge.shared.canon.own_pn().is_none());
         assert!(bridge.shared.client().is_none());
+    }
+
+    #[test]
+    fn reset_with_a_running_bot_does_not_tear_down_a_connect_that_follows_it() {
+        let sink = Arc::new(SlowSink { committed: AtomicBool::new(false), batches: Mutex::new(vec![]) });
+        let dir = temp_dir("reset-race");
+        let bridge = WaBridge::new(dir.to_string_lossy().into(), sink).unwrap();
+        let session = bridge.session_path();
+        let shared = bridge.shared.clone();
+        bridge.rt.block_on(async move {
+            connect_inner(shared.clone(), session.clone()).await.unwrap();
+            assert!(shared.bot.lock().await.is_some());
+            let first = shared.generation.load(Ordering::SeqCst);
+            // The server logs us out; the user relinks at once while the old bot shuts down.
+            let reset = tokio::spawn({
+                let (shared, session) = (shared.clone(), session.clone());
+                async move { reset_session(&shared, &session, Some(first)).await }
+            });
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            connect_inner(shared.clone(), session.clone()).await.unwrap();
+            reset.await.unwrap().unwrap();
+            // The new client, its store and the bot survive the old reset.
+            assert!(shared.client().is_some());
+            assert!(shared.bot.lock().await.is_some());
+            assert!(session.exists());
+            assert!(shared.generation.load(Ordering::SeqCst) > first);
+            // A late LoggedOut from the old client changes nothing.
+            reset_session(&shared, &session, Some(first)).await.unwrap();
+            assert!(shared.client().is_some() && session.exists());
+            // The current one resets fully.
+            let current = shared.generation.load(Ordering::SeqCst);
+            reset_session(&shared, &session, Some(current)).await.unwrap();
+            assert!(shared.client().is_none() && shared.bot.lock().await.is_none() && !session.exists());
+        });
+    }
+
+    /// Records batches; fails any batch that contains `OfflineSyncCompleted { count: 666 }`.
+    struct PickySink(Mutex<Vec<usize>>);
+
+    impl EventSink for PickySink {
+        fn on_events(&self, events: Vec<BridgeEvent>) -> bool {
+            self.0.lock().unwrap().push(events.len());
+            !events.iter().any(|e| matches!(e, BridgeEvent::OfflineSyncCompleted { count: 666 }))
+        }
+    }
+
+    #[test]
+    fn a_hook_batch_is_its_own_sink_call() {
+        let sink = Arc::new(PickySink(Mutex::new(vec![])));
+        let bridge = WaBridge::new(temp_dir("hook-alone").to_string_lossy().into(), sink.clone()).unwrap();
+        let shared = bridge.shared.clone();
+        let ok = bridge.rt.block_on(async move {
+            // A buffered non-hook event the app fails on, then a hook batch right behind it.
+            shared.emit(vec![BridgeEvent::OfflineSyncCompleted { count: 666 }]);
+            shared.emit_and_wait(vec![BridgeEvent::OfflineSyncCompleted { count: 1 }]).await
+        });
+        assert_eq!(ok, Some(true));
+        assert_eq!(*sink.0.lock().unwrap(), vec![1, 1]);
     }
 
     #[test]

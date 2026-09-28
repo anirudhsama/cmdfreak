@@ -178,18 +178,19 @@ pub async fn map_event(ctx: &MapCtx<'_>, event: &Event) -> Vec<BridgeEvent> {
             // Subject changes carry the new name. Membership changes only mark the stored count
             // stale (subject `None`, count 0); the app re-fetches it with the batched overviews.
             // The participant list itself is fetched lazily when the group is opened.
-            let subject = match &*g.action {
-                GroupNotificationAction::Subject { subject, .. } => Some(Some(subject.clone())),
-                GroupNotificationAction::Add { .. } | GroupNotificationAction::Remove { .. } => Some(None),
+            let change = match &*g.action {
+                GroupNotificationAction::Subject { subject, .. } => Some((Some(subject.clone()), false)),
+                GroupNotificationAction::Add { .. } | GroupNotificationAction::Remove { .. } => Some((None, true)),
                 _ => None,
             };
-            if let Some(subject) = subject {
+            if let Some((subject, membership_changed)) = change {
                 out.push(BridgeEvent::Group {
                     group: BridgeGroup {
                         jid: g.group_jid.to_string(),
                         subject,
                         participant_count: 0,
                         participants: vec![],
+                        membership_changed,
                     },
                 });
             }
