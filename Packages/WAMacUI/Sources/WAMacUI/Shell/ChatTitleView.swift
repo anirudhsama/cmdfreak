@@ -1,8 +1,7 @@
 import AppKit
 
 /// Title and subtitle in the toolbar (the chat list's filter name, centered over the list).
-/// The compact toolbar gives items 24pt, less than two stacked labels need, so the lines are
-/// placed by baseline (as the window's own title and subtitle are) and their boxes overlap.
+/// The lines are placed by baseline, as the window's own title and subtitle are.
 @MainActor
 final class ChatTitleView: NSView {
     private let titleField = NSTextField(labelWithString: "")
@@ -37,10 +36,10 @@ final class ChatTitleView: NSView {
                 fill,
             ])
         }
-        heightAnchor.constraint(equalToConstant: 24).isActive = true
+        heightAnchor.constraint(equalToConstant: 30).isActive = true
         twoLine = [
-            titleField.firstBaselineAnchor.constraint(equalTo: topAnchor, constant: 11),
-            subtitleField.firstBaselineAnchor.constraint(equalTo: topAnchor, constant: 24),
+            titleField.firstBaselineAnchor.constraint(equalTo: topAnchor, constant: 13),
+            subtitleField.firstBaselineAnchor.constraint(equalTo: topAnchor, constant: 27),
         ]
         oneLine = [titleField.centerYAnchor.constraint(equalTo: centerYAnchor)]
         NSLayoutConstraint.activate(twoLine)

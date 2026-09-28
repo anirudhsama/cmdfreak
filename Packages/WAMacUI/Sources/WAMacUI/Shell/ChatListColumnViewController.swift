@@ -16,8 +16,7 @@ final class ChatListColumnViewController: NSViewController {
     let chatList: ChatListViewController
     private let footer: NSHostingView<SidebarFooter>
     let searchBar = ChatSearchBar()
-    private(set) lazy var searchAccessory = SoftEdgeAccessory(
-        content: searchBar, insets: NSEdgeInsets(top: 4, left: 14, bottom: 8, right: 14))
+    private(set) lazy var searchAccessory = SoftEdgeAccessory(content: searchBar, horizontalInset: 14)
     private let session: SessionService
     private var footerHeight: NSLayoutConstraint!
     private var token: ObservationToken?

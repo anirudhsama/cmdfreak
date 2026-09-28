@@ -117,6 +117,7 @@ final class MessageListController: NSViewController {
         scrollView.automaticallyAdjustsContentInsets = false
         scrollView.contentView.postsBoundsChangedNotifications = true
         scrollView.scrollerStyle = .overlay
+        scrollView.wantsLayer = true
         view = scrollView
 
         NotificationCenter.default.addObserver(self, selector: #selector(boundsChanged), name: NSView.boundsDidChangeNotification, object: scrollView.contentView)
@@ -124,8 +125,33 @@ final class MessageListController: NSViewController {
         startProgressObservation()
     }
 
+    /// Fades messages out under the toolbar and chat header. The system's soft scroll edge only
+    /// reaches the chat list column, so the conversation draws its own over the same band.
+    private let topFade: CAGradientLayer = {
+        let g = CAGradientLayer()
+        g.colors = [NSColor.clear.cgColor, NSColor.black.cgColor]
+        return g
+    }()
+
+    private func updateTopFade() {
+        guard let layer = scrollView.layer else { return }
+        let band = view.safeAreaInsets.top
+        let h = layer.bounds.height
+        guard band > 0, h > band else { return }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        topFade.frame = layer.bounds
+        // The scroll view's layer is flipped: y = 0 is the top edge.
+        topFade.startPoint = CGPoint(x: 0.5, y: 0)
+        topFade.endPoint = CGPoint(x: 0.5, y: 1)
+        topFade.locations = [0, NSNumber(value: Double(band / h))]
+        if layer.mask !== topFade { layer.mask = topFade }
+        CATransaction.commit()
+    }
+
     override func viewDidLayout() {
         super.viewDidLayout()
+        updateTopFade()
         let top = view.safeAreaInsets.top + M.listTopInset
         if scrollView.contentInsets.top != top || scrollView.contentInsets.bottom != bottomInset {
             // The scroller track already follows contentInsets; scrollerInsets would inset it twice.

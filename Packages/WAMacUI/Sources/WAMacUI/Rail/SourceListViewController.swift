@@ -5,9 +5,9 @@ import WAKit
 
 enum SourceListMetrics {
     /// Collapsed: an icon rail just wide enough for the traffic lights.
-    /// With the compact toolbar the traffic lights span 12–71.5pt; 83pt (plus the 1pt divider)
-    /// leaves the same 12pt on both sides.
-    static let railWidth: CGFloat = 83
+    /// With the unified toolbar the traffic lights span 19–79pt; 97pt (plus the 1pt divider)
+    /// leaves the same 19pt on both sides.
+    static let railWidth: CGFloat = 97
     /// Expanded widths. Anything between the rail and `minWidth` snaps to one of them.
     static let minWidth: CGFloat = 180
     static let idealWidth: CGFloat = 220

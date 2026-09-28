@@ -24,9 +24,7 @@ public final class ChatContainerViewController: NSViewController {
     /// soft-edged top accessory of the split view item: messages scroll under it and fade out.
     let header = ChatHeaderModel()
     private(set) lazy var headerAccessory: SoftEdgeAccessory = {
-        let view = NSHostingView(rootView: ChatHeaderView(model: header))
-        view.sizingOptions = [.intrinsicContentSize]
-        let accessory = SoftEdgeAccessory(content: view, insets: NSEdgeInsets(top: 0, left: 16, bottom: 6, right: 16))
+        let accessory = SoftEdgeAccessory(content: ChatHeaderView(model: header), horizontalInset: 16)
         accessory.isHidden = true
         return accessory
     }()
