@@ -80,6 +80,8 @@ enum MainMenu {
             railItem.tag = position + 1
             menu.addItem(railItem)
         }
+        menu.addItem(item("Previous Sidebar Item", #selector(MainWindowController.previousRailItem(_:)), key(NSUpArrowFunctionKey), [.command, .option]))
+        menu.addItem(item("Next Sidebar Item", #selector(MainWindowController.nextRailItem(_:)), key(NSDownArrowFunctionKey), [.command, .option]))
         menu.addItem(.separator())
         menu.addItem(item("Toggle Sidebar", #selector(NSSplitViewController.toggleSidebar(_:)), "s", [.command, .control]))
         menu.addItem(item("Enter Full Screen", #selector(NSWindow.toggleFullScreen(_:)), "f", [.command, .control]))

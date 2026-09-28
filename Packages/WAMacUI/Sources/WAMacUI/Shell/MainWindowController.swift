@@ -78,7 +78,6 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, N
         split.addSplitViewItem(sidebarItem)
         split.addSplitViewItem(listItem)
         split.addSplitViewItem(contentItem)
-        split.splitView.autosaveName = "MainSplit"
         window.contentViewController = split
         // Assigning the content view controller shrinks the window to the split view's fitting size.
         window.setContentSize(Self.defaultContentSize)
@@ -119,14 +118,8 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, N
         super.showWindow(sender)
         if !didPlaceDivider {
             didPlaceDivider = true
-            // Autosaved positions win; otherwise open at the ideal column widths.
-            let views = split.splitView.subviews
-            if views.count == 3, views[0].frame.width < SourceListMetrics.railWidth || views[1].frame.width < ChatListMetrics.minWidth {
-                split.splitView.setPosition(SourceListMetrics.idealWidth, ofDividerAt: 0)
-                split.splitView.setPosition(SourceListMetrics.idealWidth + ChatListMetrics.idealWidth, ofDividerAt: 1)
-            }
+            split.restoreWidths()
         }
-        split.normalizeRailWidth()
         window?.makeKeyAndOrderFront(sender)
     }
 
@@ -189,6 +182,14 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, N
     @objc public func openPinnedChat(_ sender: Any?) {
         guard let tag = (sender as? NSMenuItem)?.tag, let jid = chatList.pinnedChatJid(at: tag - 1) else { return }
         chatList.select(jid)
+    }
+
+    /// ⌥⌘↓ / ⌥⌘↑: the next or previous sidebar item.
+    @objc public func nextRailItem(_ sender: Any?) { selectAdjacentRailItem(offset: 1) }
+    @objc public func previousRailItem(_ sender: Any?) { selectAdjacentRailItem(offset: -1) }
+
+    private func selectAdjacentRailItem(offset: Int) {
+        if let item = railModel.item(adjacentTo: railModel.selection, offset: offset) { selectRail(item) }
     }
 
     @objc public func nextChat(_ sender: Any?) { chatList.selectAdjacent(offset: 1) }
@@ -368,6 +369,10 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, N
             return chatList.pinnedChatJid(at: menuItem.tag - 1) != nil
         case #selector(selectRailItem(_:)):
             return railModel.item(at: menuItem.tag) != nil
+        case #selector(nextRailItem(_:)):
+            return railModel.item(adjacentTo: railModel.selection, offset: 1) != nil
+        case #selector(previousRailItem(_:)):
+            return railModel.item(adjacentTo: railModel.selection, offset: -1) != nil
         case #selector(nextChat(_:)), #selector(previousChat(_:)):
             return !chatList.items.isEmpty
         case #selector(nextUnreadChat(_:)), #selector(previousUnreadChat(_:)):

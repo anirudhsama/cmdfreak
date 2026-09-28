@@ -18,6 +18,7 @@ enum ShortcutSelfTest {
         try? await Task.sleep(for: .milliseconds(600))
         self.main = main
         log("key window: \(NSApp.keyWindow?.identifier?.rawValue ?? "nil"), active: \(NSApp.isActive)")
+        log("split widths: \(main.debugSplitWidths)")
         // A locked or inactive session has no key window, so nil-targeted actions reach nothing.
         // Point window-level menu items at the controller and let validation assume key status.
         MainWindowController.debugAssumeKeyWindow = true
@@ -149,6 +150,19 @@ enum ShortcutSelfTest {
         check("⌥⌘4 archived filter", main.debugRailIsArchived)
         await menu("1", 18, [.command, .option])
         check("⌥⌘1 chats filter", !main.debugRailIsArchived)
+        await menu(key(NSDownArrowFunctionKey), 125, [.command, .option, .numericPad, .function])
+        check("⌥⌘↓ next sidebar item", main.debugRailTitle == "Unread")
+        await menu(key(NSUpArrowFunctionKey), 126, [.command, .option, .numericPad, .function])
+        check("⌥⌘↑ previous sidebar item", main.debugRailTitle == "Chats")
+        check("⌥⌘↑ disabled on the first sidebar item", !isEnabled(key(NSUpArrowFunctionKey), [.command, .option]))
+        let widthsBefore = main.debugSplitWidths
+        main.debugToggleSidebar()
+        try? await Task.sleep(for: .milliseconds(400))
+        let widthsToggled = main.debugSplitWidths
+        main.debugToggleSidebar()
+        try? await Task.sleep(for: .milliseconds(400))
+        check("toggling the sidebar keeps the chat list's width (\(widthsBefore) → \(widthsToggled) → \(main.debugSplitWidths))",
+              widthsToggled[0] != widthsBefore[0] && abs(widthsToggled[1] - widthsBefore[1]) < 1 && main.debugSplitWidths == widthsBefore)
 
         // Focus lives in the open chat: switching chats lands in its composer, the list never
         // takes focus, and Esc never leaves the chat.

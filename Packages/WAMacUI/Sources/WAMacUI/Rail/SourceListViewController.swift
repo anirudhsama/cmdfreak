@@ -33,6 +33,13 @@ final class RailModel {
         return ordered[position - 1]
     }
 
+    /// The item `offset` places after `item` in display order; nil past either end.
+    func item(adjacentTo item: RailItem, offset: Int) -> RailItem? {
+        let ordered = filterItems + tagItems
+        guard let index = ordered.firstIndex(of: item), ordered.indices.contains(index + offset) else { return nil }
+        return ordered[index + offset]
+    }
+
     func badge(for item: RailItem) -> Int {
         switch item {
         case .chats, .unread: counts.chats

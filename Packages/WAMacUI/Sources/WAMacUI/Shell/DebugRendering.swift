@@ -74,6 +74,10 @@ extension MainWindowController {
     public var debugSearchIsEditing: Bool { chatListColumn.searchBar.isEditing }
 
     public var debugRailIsArchived: Bool { railModel.selection == .archived }
+    public var debugRailTitle: String { railModel.selection.title }
+    /// Sidebar and chat-list widths.
+    public var debugSplitWidths: [CGFloat] { [split.sidebarWidth, split.listWidth] }
+    public func debugToggleSidebar() { split.toggleSidebar(nil) }
 
     public func debugChat(_ jid: String) -> ChatRecord? {
         chatList.items.first { $0.id == jid }?.chat
