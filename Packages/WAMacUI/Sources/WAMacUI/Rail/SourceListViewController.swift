@@ -109,7 +109,12 @@ private struct SourceListView: View {
     }
 
     private func row(_ item: RailItem) -> some View {
-        Label(item.title, systemImage: item.symbol)
+        // Green icons like the rail, instead of the sidebar's default accent-colored ones.
+        Label {
+            Text(item.title)
+        } icon: {
+            Image(systemName: item.symbol).foregroundStyle(Color.waGreen)
+        }
             .badge(model.badge(for: item))
             .tag(item)
     }
