@@ -185,7 +185,7 @@ struct CommandBarRow: View {
         .frame(height: CommandBarMetrics.rowHeight)
         .background {
             if isSelected {
-                RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Color.accentColor)
+                RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Color.waGreen)
             }
         }
     }

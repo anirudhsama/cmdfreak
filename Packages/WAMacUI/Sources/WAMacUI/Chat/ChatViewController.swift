@@ -397,7 +397,7 @@ extension ChatViewController: MessageListActions {
         else { name = list.chatName ?? item.senderName ?? peerDisplayName() }
         let snippet = item.message.text.flatMap { $0.isEmpty ? nil : $0 } ?? kindLabel(item.message.kind)
         compose.setBar(.reply(name: name, snippet: snippet.replacingOccurrences(of: "\n", with: " "),
-                              color: item.message.fromMe ? .controlAccentColor : MessageTextConfiguration.senderColor(for: item.message.senderJid)))
+                              color: item.message.fromMe ? Palette.green : MessageTextConfiguration.senderColor(for: item.message.senderJid)))
         compose.focus()
     }
 

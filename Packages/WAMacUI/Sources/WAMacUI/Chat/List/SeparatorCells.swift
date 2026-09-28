@@ -40,11 +40,11 @@ final class UnreadSeparatorCell: NSTableCellView {
 
     override func draw(_ dirtyRect: NSRect) {
         let attr = NSAttributedString(string: "Unread messages", attributes: [
-            .font: MessageTextConfiguration.daySeparator, .foregroundColor: NSColor.controlAccentColor,
+            .font: MessageTextConfiguration.daySeparator, .foregroundColor: Palette.green,
         ])
         let size = attr.size()
         let y = bounds.midY
-        NSColor.controlAccentColor.withAlphaComponent(0.35).setFill()
+        Palette.green.withAlphaComponent(0.35).setFill()
         let inset = MessageTextConfiguration.Metrics.horizontalInset
         NSRect(x: inset, y: y, width: (bounds.width - size.width) / 2 - inset - 10, height: 1).fill()
         NSRect(x: (bounds.width + size.width) / 2 + 10, y: y, width: (bounds.width - size.width) / 2 - inset - 10, height: 1).fill()

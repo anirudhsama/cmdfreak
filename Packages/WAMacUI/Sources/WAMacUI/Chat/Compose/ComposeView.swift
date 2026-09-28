@@ -133,7 +133,7 @@ final class ComposeView: NSView, NSTextViewDelegate {
         sendButton.isBordered = false
         sendButton.image = NSImage(systemSymbolName: "arrow.up.circle.fill", accessibilityDescription: "Send")?
             .withSymbolConfiguration(.init(pointSize: 22, weight: .regular))
-        sendButton.contentTintColor = .controlAccentColor
+        sendButton.contentTintColor = Palette.green
         sendButton.target = self
         sendButton.action = #selector(sendTapped)
         sendButton.isEnabled = false
@@ -233,9 +233,9 @@ final class ComposeView: NSView, NSTextViewDelegate {
             barAccent.layer?.backgroundColor = color.cgColor
         case .edit:
             barTitle.stringValue = "Edit message"
-            barTitle.textColor = .controlAccentColor
+            barTitle.textColor = Palette.green
             barSnippet.stringValue = "Enter to save · Esc to cancel"
-            barAccent.layer?.backgroundColor = NSColor.controlAccentColor.cgColor
+            barAccent.layer?.backgroundColor = Palette.green.cgColor
         case nil:
             break
         }

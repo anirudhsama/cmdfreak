@@ -156,21 +156,22 @@ private struct RailIcon: View {
             Image(systemName: item.symbol)
                 .font(.system(size: 18, weight: .medium))
                 .symbolVariant(selected ? .fill : .none)
-                .foregroundStyle(selected ? Color.accentColor : .secondary)
+                .symbolRenderingMode(.hierarchical)
+                .foregroundStyle(selected ? Color.waGreen : .secondary)
                 .frame(width: 44, height: 40)
                 .background {
                     RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .fill(selected ? Color.accentColor.opacity(0.16) : (hovering ? Color.primary.opacity(0.06) : .clear))
+                        .fill(selected ? Color.waGreen.opacity(0.16) : (hovering ? Color.primary.opacity(0.06) : .clear))
                 }
                 .overlay(alignment: .topTrailing) {
                     if badge > 0 {
                         Text(badge > 99 ? "99+" : "\(badge)")
                             .font(.system(size: 10, weight: .semibold))
                             .monospacedDigit()
-                            .foregroundStyle(.white)
+                            .foregroundStyle(Color.waOnBadge)
                             .padding(.horizontal, 4)
                             .frame(minWidth: 16, minHeight: 16)
-                            .background(Capsule().fill(Color.accentColor))
+                            .background(Capsule().fill(Color.waBadge))
                             .offset(x: 4, y: -3)
                     }
                 }

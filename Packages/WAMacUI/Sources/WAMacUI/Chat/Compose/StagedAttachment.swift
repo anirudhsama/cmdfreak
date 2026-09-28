@@ -69,8 +69,8 @@ final class AttachmentDropView: NSView {
             highlight.frame = bounds.insetBy(dx: 8, dy: 8)
             highlight.cornerRadius = 14
             highlight.borderWidth = 2
-            highlight.borderColor = NSColor.controlAccentColor.cgColor
-            highlight.backgroundColor = NSColor.controlAccentColor.withAlphaComponent(0.08).cgColor
+            highlight.borderColor = Palette.green.cgColor
+            highlight.backgroundColor = Palette.green.withAlphaComponent(0.08).cgColor
             highlight.zPosition = 1000
             if highlight.superlayer == nil { layer.addSublayer(highlight) }
         } else {

@@ -82,9 +82,6 @@ final class MessageCell: NSTableCellView {
                 textView = v
                 return v
             }()
-            tv.linkTextAttributes = plan.outgoing
-                ? [.foregroundColor: C.OnBlue.primary, .underlineStyle: NSUnderlineStyle.single.rawValue, .cursor: NSCursor.pointingHand]
-                : [.foregroundColor: NSColor.linkColor, .cursor: NSCursor.pointingHand]
             tv.setContent(text.text, size: text.frame.size)
             tv.isHidden = false
         } else {
@@ -368,7 +365,7 @@ final class MessageCell: NSTableCellView {
     override func draw(_ dirtyRect: NSRect) {
         guard let plan, let item else { return }
         if isRowSelected {
-            NSColor.selectedContentBackgroundColor.withAlphaComponent(0.10).setFill()
+            Palette.green.withAlphaComponent(0.10).setFill()
             bounds.fill()
         }
         switch plan.shape {
@@ -413,9 +410,8 @@ final class MessageCell: NSTableCellView {
         tail.fill()
     }
 
-    /// Outgoing bubbles are solid blue; everything drawn inside them uses white ink.
-    private var onBlue: Bool { plan?.outgoing == true && plan?.shape == .bubble }
-    private var well: NSColor { onBlue ? C.OnBlue.well : C.quoteBackground }
+    /// Quote, document, card and poll wells.
+    private var well: NSColor { C.quoteBackground }
 
     private func drawQuote(_ q: LayoutPlan.Quote) {
         let path = NSBezierPath(roundedRect: q.frame, xRadius: M.quoteRadius, yRadius: M.quoteRadius)
@@ -532,11 +528,7 @@ final class MessageCell: NSTableCellView {
             let h = max(3, CGFloat(v) * 24)
             let x = waveX + CGFloat(i) * step
             let played = Double(i) / Double(max(1, count)) < progress
-            if onBlue {
-                (played ? C.OnBlue.primary : C.OnBlue.tertiary).setFill()
-            } else {
-                (played ? NSColor.controlAccentColor : NSColor.tertiaryLabelColor).setFill()
-            }
+            (played ? Palette.green : NSColor.tertiaryLabelColor).setFill()
             NSBezierPath(roundedRect: NSRect(x: x, y: midY - h / 2, width: barW, height: h), xRadius: 1, yRadius: 1).fill()
         }
         let elapsedText: String
@@ -545,7 +537,7 @@ final class MessageCell: NSTableCellView {
         } else {
             elapsedText = a.durationText
         }
-        let ta: [NSAttributedString.Key: Any] = [.font: C.cardSecondary, .foregroundColor: onBlue ? C.OnBlue.secondary : NSColor.secondaryLabelColor]
+        let ta: [NSAttributedString.Key: Any] = [.font: C.cardSecondary, .foregroundColor: NSColor.secondaryLabelColor]
         NSAttributedString(string: elapsedText, attributes: ta).draw(at: NSPoint(x: waveX, y: f.minY + 32))
         if a.isVoice {
             let mic = NSImage(systemSymbolName: "mic.fill", accessibilityDescription: nil)?
@@ -555,7 +547,7 @@ final class MessageCell: NSTableCellView {
         if let state {
             let rect = NSRect(x: f.maxX - rateW + 2, y: f.midY - 11, width: rateW - 4, height: 22)
             NSBezierPath(roundedRect: rect, xRadius: 11, yRadius: 11).fill(with: well)
-            let label = NSAttributedString(string: Self.rateLabel(state.rate), attributes: [.font: NSFont.systemFont(ofSize: 10.5, weight: .semibold), .foregroundColor: onBlue ? C.OnBlue.primary : NSColor.labelColor])
+            let label = NSAttributedString(string: Self.rateLabel(state.rate), attributes: [.font: NSFont.systemFont(ofSize: 10.5, weight: .semibold), .foregroundColor: NSColor.labelColor])
             let w = label.size().width
             label.draw(at: NSPoint(x: rect.midX - w / 2, y: rect.minY + 4))
         }
@@ -582,7 +574,7 @@ final class MessageCell: NSTableCellView {
                 let fill = NSRect(x: bar.minX, y: bar.minY, width: bar.width * o.fraction, height: bar.height)
                 NSGraphicsContext.saveGraphicsState()
                 NSBezierPath(roundedRect: bar, xRadius: 6, yRadius: 6).addClip()
-                (onBlue ? NSColor.white : NSColor.controlAccentColor).withAlphaComponent(o.mine ? 0.35 : 0.18).setFill()
+                Palette.green.withAlphaComponent(o.mine ? 0.35 : 0.18).setFill()
                 fill.fill()
                 NSGraphicsContext.restoreGraphicsState()
             }
@@ -596,7 +588,6 @@ final class MessageCell: NSTableCellView {
     private func drawMeta(_ meta: LayoutPlan.Meta, plan: LayoutPlan) {
         var textAttrs = C.metaAttributes
         var tickColor = NSColor.secondaryLabelColor
-        var readColor = C.readTick
         if meta.overlay {
             let pill = meta.frame.insetBy(dx: -6, dy: -2)
             NSBezierPath(roundedRect: pill, xRadius: pill.height / 2, yRadius: pill.height / 2).fill(with: NSColor.black.withAlphaComponent(0.45))
@@ -605,16 +596,11 @@ final class MessageCell: NSTableCellView {
         } else if plan.shape == .bare {
             let pill = meta.frame.insetBy(dx: -5, dy: -1)
             NSBezierPath(roundedRect: pill, xRadius: pill.height / 2, yRadius: pill.height / 2).fill(with: C.systemPill)
-        } else if onBlue {
-            // Blue ticks would vanish on the blue bubble: read is solid white, the rest are faded.
-            textAttrs[.foregroundColor] = C.OnBlue.secondary
-            tickColor = C.OnBlue.tertiary
-            readColor = C.OnBlue.primary
         }
         NSAttributedString(string: meta.text, attributes: textAttrs).draw(at: NSPoint(x: meta.frame.minX, y: meta.frame.minY))
         if let status = meta.status {
             let tick = NSRect(x: meta.frame.maxX - M.tickWidth, y: meta.frame.minY + 1, width: M.tickWidth, height: 11)
-            ReceiptDrawing.draw(status, in: tick, color: tickColor, readColor: readColor)
+            ReceiptDrawing.draw(status, in: tick, color: tickColor)
         }
     }
 
@@ -622,7 +608,7 @@ final class MessageCell: NSTableCellView {
         let path = NSBezierPath(roundedRect: chip.frame, xRadius: chip.frame.height / 2, yRadius: chip.frame.height / 2)
         NSColor.windowBackgroundColor.setFill()
         path.fill()
-        (chip.mine ? NSColor.controlAccentColor : NSColor.separatorColor).setStroke()
+        (chip.mine ? Palette.green : NSColor.separatorColor).setStroke()
         path.lineWidth = chip.mine ? 1.5 : 1
         path.stroke()
         var x = chip.frame.minX + 7
@@ -653,8 +639,7 @@ final class MessageCell: NSTableCellView {
 
     private func drawGlyphCircle(center: NSPoint, symbol: String, diameter: CGFloat, tinted: Bool = false) {
         let rect = NSRect(x: center.x - diameter / 2, y: center.y - diameter / 2, width: diameter, height: diameter)
-        let tint = onBlue ? C.OnBlue.well : NSColor.controlAccentColor
-        NSBezierPath(ovalIn: rect).fill(with: tinted ? tint : NSColor.black.withAlphaComponent(0.5))
+        NSBezierPath(ovalIn: rect).fill(with: tinted ? Palette.green : NSColor.black.withAlphaComponent(0.5))
         let cfg = NSImage.SymbolConfiguration(pointSize: diameter * 0.4, weight: .semibold)
         guard let img = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?.withSymbolConfiguration(cfg) else { return }
         let tinted = img.tinted(.white)
@@ -780,7 +765,7 @@ final class MessageCell: NSTableCellView {
 
 /// Clock / one tick / two ticks / blue ticks, drawn as paths (SF Symbols has no double checkmark).
 enum ReceiptDrawing {
-    static func draw(_ status: MessageStatus, in rect: NSRect, color: NSColor, readColor: NSColor = MessageTextConfiguration.readTick) {
+    static func draw(_ status: MessageStatus, in rect: NSRect, color: NSColor) {
         switch status {
         case .pending:
             let cfg = NSImage.SymbolConfiguration(pointSize: 9, weight: .regular)
@@ -796,8 +781,8 @@ enum ReceiptDrawing {
             tick(at: rect.maxX - 13, y: rect.minY, color: color)
             tick(at: rect.maxX - 9, y: rect.minY, color: color)
         case .read, .played:
-            tick(at: rect.maxX - 13, y: rect.minY, color: readColor)
-            tick(at: rect.maxX - 9, y: rect.minY, color: readColor)
+            tick(at: rect.maxX - 13, y: rect.minY, color: MessageTextConfiguration.readTick)
+            tick(at: rect.maxX - 9, y: rect.minY, color: MessageTextConfiguration.readTick)
         }
     }
 

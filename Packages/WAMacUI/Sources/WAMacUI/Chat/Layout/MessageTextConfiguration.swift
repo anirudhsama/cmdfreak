@@ -38,44 +38,10 @@ enum MessageTextConfiguration {
 
     // MARK: Colors
 
-    /// iMessage-style bubbles: solid blue with white ink for outgoing, opaque gray for incoming.
-    /// Both are opaque so the tail can be filled as a separate shape without a visible seam.
-    static let outgoingBubble = NSColor(name: "outgoingBubble") { appearance in
-        appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
-            ? NSColor(srgbRed: 0.04, green: 0.52, blue: 1.0, alpha: 1)
-            : NSColor(srgbRed: 0.11, green: 0.55, blue: 1.0, alpha: 1)
-    }
-    static let incomingBubble = NSColor(name: "incomingBubble") { appearance in
-        appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
-            ? NSColor(srgbRed: 0.23, green: 0.23, blue: 0.24, alpha: 1)
-            : NSColor(srgbRed: 0.91, green: 0.91, blue: 0.92, alpha: 1)
-    }
-
-    /// Ink inside an outgoing (blue) bubble.
-    enum OnBlue {
-        static let primary = NSColor.white
-        static let secondary = NSColor.white.withAlphaComponent(0.78)
-        static let tertiary = NSColor.white.withAlphaComponent(0.6)
-        /// Quote, document, card and poll wells.
-        static let well = NSColor.white.withAlphaComponent(0.2)
-    }
-
-    /// Re-inks an attributed string for an outgoing bubble: every color becomes white (secondary
-    /// tones keep a lighter white), and links are underlined since they can no longer be blue.
-    static func onBlue(_ s: NSAttributedString) -> NSAttributedString {
-        let m = NSMutableAttributedString(attributedString: s)
-        let all = NSRange(location: 0, length: m.length)
-        m.addAttribute(.foregroundColor, value: OnBlue.primary, range: all)
-        s.enumerateAttribute(.foregroundColor, in: all) { value, range, _ in
-            guard let c = value as? NSColor else { return }
-            if c == .secondaryLabelColor { m.addAttribute(.foregroundColor, value: OnBlue.secondary, range: range) }
-            if c == .tertiaryLabelColor { m.addAttribute(.foregroundColor, value: OnBlue.tertiary, range: range) }
-        }
-        s.enumerateAttribute(.link, in: all) { value, range, _ in
-            if value != nil { m.addAttribute(.underlineStyle, value: NSUnderlineStyle.single.rawValue, range: range) }
-        }
-        return m
-    }
+    /// iMessage-shaped bubbles in WhatsApp's colors. Both are opaque so the tail can be filled as a
+    /// separate shape without a visible seam.
+    static let outgoingBubble = Palette.outgoingBubble
+    static let incomingBubble = Palette.incomingBubble
     static let quoteBackground = NSColor(name: "quoteBackground") { appearance in
         appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
             ? NSColor(white: 0, alpha: 0.22)
@@ -86,7 +52,7 @@ enum MessageTextConfiguration {
             ? NSColor(white: 1, alpha: 0.08)
             : NSColor(white: 0, alpha: 0.05)
     }
-    static let readTick = NSColor.systemBlue
+    static let readTick = Palette.readTick
 
     /// A stable per-sender hue for group sender names.
     static func senderColor(for jid: String) -> NSColor {

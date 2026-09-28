@@ -133,7 +133,7 @@ struct OnboardingView: View {
         VStack(spacing: 6) {
             Image(systemName: "bubble.left.and.bubble.right.fill")
                 .font(.system(size: 30))
-                .foregroundStyle(Color(nsColor: .systemGreen))
+                .foregroundStyle(Color.waGreen)
                 .padding(.bottom, 4)
             Text(title).font(.title2.weight(.semibold))
             Text(subtitle)

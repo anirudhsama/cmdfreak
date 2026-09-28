@@ -438,7 +438,7 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, N
             item.image = NSImage(systemSymbolName: "plus", accessibilityDescription: "New Chat")
             item.isBordered = true
             item.style = .prominent
-            item.backgroundTintColor = .systemGreen
+            item.backgroundTintColor = Palette.green
             item.action = #selector(newChat(_:))
             item.target = nil
             return item
