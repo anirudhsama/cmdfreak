@@ -23,15 +23,15 @@ targets:
     type: application
     platform: macOS
     sources:
-      - App/Sources
-      - path: App/Resources
+      - CmdFreak/Sources
+      - path: CmdFreak/Resources
         optional: true
     dependencies:
       - package: WAMacUI
       - package: WAKit
       - package: Sparkle
     info:
-      path: App/Info.plist
+      path: CmdFreak/Info.plist
       properties:
         CFBundleDisplayName: CmdFreak
         # CI overrides both per release; see .github/workflows/release.yml.
@@ -44,7 +44,7 @@ targets:
         SUPublicEDKey: "$(SPARKLE_PUBLIC_KEY)"
         SUEnableAutomaticChecks: true
     entitlements:
-      path: App/CmdFreak.entitlements
+      path: CmdFreak/CmdFreak.entitlements
       properties:
         # Self-signed builds carry no Team ID, so hardened runtime would refuse to load the
         # embedded Sparkle.framework. Drop this once releases are signed with a paid Developer ID.
