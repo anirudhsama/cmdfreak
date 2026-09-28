@@ -57,12 +57,12 @@ Both repos are cloned in `/tmp/wa-research/`. If they are missing, re-clone them
 
 The user's real account is already linked (2026-09-26) through `rust/wa-link`, a capture tool that never sends anything. Use this session and the captured data for all development and testing.
 
-**Session:** `~/Library/Application Support/BetterWA/wa-session.sqlite`. It's a whatsapp-rust `SqliteStore` at the pinned commit.
+**Session:** `~/Library/Application Support/CmdFreak/wa-session.sqlite`. It's a whatsapp-rust `SqliteStore` at the pinned commit.
 - `wa-bridge` opens this same file and connects without pairing again.
 - **Never re-pair, and never call `logout()`**, during development. Pairing again needs the user's phone, and the initial history sync is only sent once per link.
 - Back up the file before any experiment that could corrupt it.
 
-**Captured data:** `~/Library/Application Support/BetterWA/capture/`.
+**Captured data:** `~/Library/Application Support/CmdFreak/capture/`.
 - **`events.jsonl`:** 1,224 serde-serialized `Event`s, one per line, captured from pairing until the sync completed. Mostly app-state: 641 `ContactUpdate`, 238 `ArchiveUpdate`, 130 `CallLogSync`, 48 `StarUpdate`, 46 `MuteUpdate`, 26 `PinUpdate`, 12 `MarkChatAsReadUpdate`, 10 `LockChatUpdate`, and 4 `LabelEditUpdate`. There are only 16 live `Messages` batches. Lines of the form `{"HistorySyncFile": "<name>"}` point to the files below.
 - **`history/*.zlib`:** 13 raw `HistorySync` payloads (zlib-compressed protobuf, 12 MB compressed), named `<eventSeq>-type<syncType>-chunk<n>.zlib`:
   - type 5 (non-blocking data) × 1;
@@ -86,7 +86,7 @@ The user's real account is already linked (2026-09-26) through `rust/wa-link`, a
 ```
 better-wa/
   PLAN.md
-  project.yml                 # XcodeGen: BetterWA.app target, links packages + WACoreFFI.xcframework
+  project.yml                 # XcodeGen: CmdFreak.app target, links packages + WACoreFFI.xcframework
   App/                        # thin app target: @main, AppDelegate, Info.plist, entitlements, assets
   rust/
     Cargo.toml                # workspace
@@ -107,7 +107,7 @@ Build only arm64. Universal binaries are not needed.
 
 ### Rust bridge (`rust/wa-bridge`)
 
-- **Runtime and store:** owns a multi-threaded tokio runtime and one `whatsapp-rust` client. The sqlite-storage backend points at `~/Library/Application Support/BetterWA/wa-session.sqlite`.
+- **Runtime and store:** owns a multi-threaded tokio runtime and one `whatsapp-rust` client. The sqlite-storage backend points at `~/Library/Application Support/CmdFreak/wa-session.sqlite`.
 - **Connection lifecycle:** the library already auto-reconnects with backoff (`src/client/lifecycle.rs:619`, `:913`), and `Bot::spawn` supervises the client (`src/bot.rs:567-600`). Bridge `connect()` calls `bot.spawn()` exactly once. Do **not** add a second backoff loop anywhere. On system wake, Swift calls `nudgeReconnect()`, which disconnects and relies on the library's own loop.
 - **Event delivery:** build with `with_event_delivery(EventDelivery::Ordered { capacity: 8192 })`. The default `Concurrent` mode does not preserve ordering (`src/bot.rs:277-292`). `Ordered` drops events when its mailbox is full, so:
   - `handle_event` must only push onto an unbounded channel and return. A separate coalescer task drains that channel.
@@ -168,7 +168,7 @@ The XcodeGen project runs it as a pre-build script only when the Rust sources ar
 
 ### Data layer (`WAKit`)
 
-- **Database:** GRDB `DatabasePool` at `~/Library/Application Support/BetterWA/app.sqlite`. Append-only migrations in one file.
+- **Database:** GRDB `DatabasePool` at `~/Library/Application Support/CmdFreak/app.sqlite`. Append-only migrations in one file.
 - **Tables:**
   - `chat`: jid PK, kind (dm, group, broadcast), name, `lastMessageId`, `lastActivityAt`, `unreadCount`, `markedUnread`, `pinnedAt`, `mutedUntil`, `archived`, `avatarPath`.
   - `contact`: jid PK, `pushName`, `fullName`, `phone`.
@@ -194,7 +194,7 @@ The XcodeGen project runs it as a pre-build script only when the Rust sources ar
   - After committing, publishes a `MessageChange` (add, update, delete, reload, with ids) on a per-chat change feed. Copy Inline's `MessagesPublisher` approach: the open chat view applies index-set changes and does **not** run a `ValueObservation` over its message window.
 - **Chat list:** a GRDB `ValueObservation` over the chat query, scheduled `.immediate`, with no extra main-queue hop.
 - **`ChatWindowLoader`:** pages messages by `sortKey`. It supplies the initial page, `older(before:)`, `newer(after:)`, and `around(messageId)`.
-- **`MediaStore`:** content-addressed files under `~/Library/Caches/BetterWA/media/` (keyed by `fileSha256`), with de-duplicated in-flight downloads and progress reporting.
+- **`MediaStore`:** content-addressed files under `~/Library/Caches/CmdFreak/media/` (keyed by `fileSha256`), with de-duplicated in-flight downloads and progress reporting.
   - **Auto-download:** images, stickers, GIFs, and voice notes up to 16 MB.
   - **On demand:** videos and documents; show a thumbnail and size, and download on click.
   - Decode thumbnails off the main thread into a memory cache (`NSCache`) of `CGImage`s sized to the display size.
@@ -286,7 +286,7 @@ Each milestone ends with its acceptance checks passing. Commit per milestone; st
 
 **M0 — Scaffold.**
 - Tasks: create `project.yml`, the three packages, the Rust workspace, and `build-bridge.sh`. Add a UniFFI "hello" function called from the app.
-- Acceptance: `xcodegen && xcodebuild -scheme BetterWA build` succeeds, the app launches, and it logs the Rust hello string.
+- Acceptance: `xcodegen && xcodebuild -scheme CmdFreak build` succeeds, the app launches, and it logs the Rust hello string.
 
 **M1 — Bridge.**
 - Tasks: pairing (QR and code), `connect` through `bot.spawn`, ordered event delivery with batching, LID→PN canonicalisation, mapping edits and revokes (including decrypting encrypted edits), poll-vote decryption, `sendText`, `downloadMedia`, `markRead`, `remuxOggToCaf`.

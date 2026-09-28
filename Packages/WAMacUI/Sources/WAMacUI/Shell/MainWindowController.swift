@@ -50,7 +50,7 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, N
             backing: .buffered,
             defer: false
         )
-        window.title = "BetterWA"
+        window.title = "CmdFreak"
         // The filter name is drawn centered over the chat list instead (`listTitleView`).
         window.titleVisibility = .hidden
         window.titlebarSeparatorStyle = .none

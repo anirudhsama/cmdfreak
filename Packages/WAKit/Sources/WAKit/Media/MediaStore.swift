@@ -21,7 +21,7 @@ public final class MediaProgressCenter {
     }
 }
 
-/// Content-addressed media cache under `~/Library/Caches/BetterWA/media/`, keyed by `fileSha256`.
+/// Content-addressed media cache under `~/Library/Caches/CmdFreak/media/`, keyed by `fileSha256`.
 /// Concurrent requests for the same file share one download.
 public actor MediaStore {
     public static let autoDownloadLimit: Int64 = 16 * 1024 * 1024
@@ -34,7 +34,7 @@ public actor MediaStore {
     private var inFlight: [String: Task<URL, any Error>] = [:]
 
     public static var defaultRoot: URL {
-        URL.cachesDirectory.appending(path: "BetterWA/media", directoryHint: .isDirectory)
+        URL.cachesDirectory.appending(path: "CmdFreak/media", directoryHint: .isDirectory)
     }
 
     @MainActor

@@ -5,20 +5,20 @@ import WAKit
 import WAMacUI
 
 /// Debug-only launch controls, all via environment variables:
-/// - `BETTERWA_SEED=N`: use a throwaway database under Caches and fill it with N synthetic chats.
-/// - `BETTERWA_SEED_LIVE=1`: with a seed, keep ingesting new messages and typing events.
-/// - `BETTERWA_SELFTEST=1`: with a seed, drive every menu shortcut and the command bar with
+/// - `CMDFREAK_SEED=N`: use a throwaway database under Caches and fill it with N synthetic chats.
+/// - `CMDFREAK_SEED_LIVE=1`: with a seed, keep ingesting new messages and typing events.
+/// - `CMDFREAK_SELFTEST=1`: with a seed, drive every menu shortcut and the command bar with
 ///   synthetic key events and print PASS/FAIL lines (`ShortcutSelfTest`).
-/// - `BETTERWA_ONBOARDING=qr|phone|code|syncing|loggedout`: force an onboarding state with no bridge calls.
+/// - `CMDFREAK_ONBOARDING=qr|phone|code|syncing|loggedout`: force an onboarding state with no bridge calls.
 enum DevSupport {
     static let env = ProcessInfo.processInfo.environment
 
-    static var seedCount: Int? { env["BETTERWA_SEED"].flatMap(Int.init).map { max($0, 1) } }
-    static var seedLive: Bool { env["BETTERWA_SEED_LIVE"] == "1" }
-    static var forcedOnboarding: String? { env["BETTERWA_ONBOARDING"] }
-    /// `BETTERWA_SNAPSHOT=<dir>`: render every window to PNG a few seconds after launch (no Screen
+    static var seedCount: Int? { env["CMDFREAK_SEED"].flatMap(Int.init).map { max($0, 1) } }
+    static var seedLive: Bool { env["CMDFREAK_SEED_LIVE"] == "1" }
+    static var forcedOnboarding: String? { env["CMDFREAK_ONBOARDING"] }
+    /// `CMDFREAK_SNAPSHOT=<dir>`: render every window to PNG a few seconds after launch (no Screen
     /// Recording permission needed; glass materials do not composite in this path).
-    static var snapshotDirectory: String? { env["BETTERWA_SNAPSHOT"] }
+    static var snapshotDirectory: String? { env["CMDFREAK_SNAPSHOT"] }
 
     @MainActor
     static func runSnapshots(main: MainWindowController?) async {
@@ -57,7 +57,7 @@ enum DevSupport {
 
     /// A fresh, isolated data directory; never the real Application Support one.
     static func seedDirectory() throws -> URL {
-        let dir = URL.cachesDirectory.appending(path: "BetterWA/dev-seed", directoryHint: .isDirectory)
+        let dir = URL.cachesDirectory.appending(path: "CmdFreak/dev-seed", directoryHint: .isDirectory)
         try? FileManager.default.removeItem(at: dir)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir

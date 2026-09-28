@@ -3,7 +3,7 @@
 //!   cargo run --release                 # QR in terminal
 //!   cargo run --release -- -p 4915...   # phone-number pair code (digits, with country code)
 //!
-//! Output: ~/Library/Application Support/BetterWA/
+//! Output: ~/Library/Application Support/CmdFreak/
 //!   wa-session.sqlite            library session/keys (reused by the app's bridge)
 //!   capture/events.jsonl         one JSON event per line
 //!   capture/history/*.zlib       raw HistorySync payloads (zlib-compressed protobuf)
@@ -30,7 +30,7 @@ async fn main() -> anyhow::Result<()> {
         .position(|a| a == "-p" || a == "--phone")
         .and_then(|i| args.get(i + 1).cloned());
 
-    let base = PathBuf::from(std::env::var("HOME")?).join("Library/Application Support/BetterWA");
+    let base = PathBuf::from(std::env::var("HOME")?).join("Library/Application Support/CmdFreak");
     let history_dir = base.join("capture/history");
     fs::create_dir_all(&history_dir)?;
     let session = base.join("wa-session.sqlite");

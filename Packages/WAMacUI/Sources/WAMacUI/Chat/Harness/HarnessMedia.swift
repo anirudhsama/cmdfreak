@@ -72,7 +72,7 @@ enum HarnessMedia {
             let ns = NSGraphicsContext(cgContext: ctx, flipped: false)
             NSGraphicsContext.saveGraphicsState()
             NSGraphicsContext.current = ns
-            NSAttributedString(string: "BetterWA harness document — page \(p) of \(pages)", attributes: [.font: NSFont.systemFont(ofSize: 20)])
+            NSAttributedString(string: "CmdFreak harness document — page \(p) of \(pages)", attributes: [.font: NSFont.systemFont(ofSize: 20)])
                 .draw(at: NSPoint(x: 60, y: 700))
             NSGraphicsContext.restoreGraphicsState()
             ctx.endPDFPage()

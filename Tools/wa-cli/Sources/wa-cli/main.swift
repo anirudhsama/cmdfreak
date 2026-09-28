@@ -17,11 +17,11 @@ import WAKit
 //                                      (default: the app's real app.sqlite)
 //   wa-cli remux SRC.ogg DST.caf
 //
-// Env: WA_DATA_DIR (default ~/Library/Application Support/BetterWA), WA_LOG=debug|info|warn.
+// Env: WA_DATA_DIR (default ~/Library/Application Support/CmdFreak), WA_LOG=debug|info|warn.
 // Stats (incl. events_dropped) are printed to stderr on exit.
 
 let home = FileManager.default.homeDirectoryForCurrentUser.path
-let dataDir = ProcessInfo.processInfo.environment["WA_DATA_DIR"] ?? "\(home)/Library/Application Support/BetterWA"
+let dataDir = ProcessInfo.processInfo.environment["WA_DATA_DIR"] ?? "\(home)/Library/Application Support/CmdFreak"
 let captureDir = "\(dataDir)/capture"
 
 func err(_ s: String) {

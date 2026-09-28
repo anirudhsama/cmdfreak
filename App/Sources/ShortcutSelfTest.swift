@@ -3,10 +3,10 @@ import AppKit
 import WAKit
 import WAMacUI
 
-/// `BETTERWA_SELFTEST=1` (with `BETTERWA_SEED`): drives every shortcut through main-menu key
+/// `CMDFREAK_SELFTEST=1` (with `CMDFREAK_SEED`): drives every shortcut through main-menu key
 /// equivalent matching (`NSMenu.performKeyEquivalent`, so matching and validation are real), the
 /// command bar's key handler, and the main window's first responder, then logs PASS/FAIL per
-/// check to stdout. Command-bar snapshots land in `BETTERWA_SNAPSHOT` if set.
+/// check to stdout. Command-bar snapshots land in `CMDFREAK_SNAPSHOT` if set.
 @MainActor
 enum ShortcutSelfTest {
     private static var failures = 0

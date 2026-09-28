@@ -66,11 +66,11 @@ public actor GroupService {
     }
 }
 
-/// Lazily downloads profile pictures into `~/Library/Caches/BetterWA/avatars/` and records the
+/// Lazily downloads profile pictures into `~/Library/Caches/CmdFreak/avatars/` and records the
 /// path on the chat. Checks each JID at most once per `recheckInterval`.
 public actor AvatarService {
     public static var defaultRoot: URL {
-        URL.cachesDirectory.appending(path: "BetterWA/avatars", directoryHint: .isDirectory)
+        URL.cachesDirectory.appending(path: "CmdFreak/avatars", directoryHint: .isDirectory)
     }
 
     public let root: URL

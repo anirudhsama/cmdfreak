@@ -14,7 +14,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var onboardingModel: OnboardingModel?
     private var sessionToken: ObservationToken?
     private var liveSeedTask: Task<Void, Never>?
-    /// Debug: onboarding forced by `BETTERWA_ONBOARDING`, so no bridge calls are made.
+    /// Debug: onboarding forced by `CMDFREAK_ONBOARDING`, so no bridge calls are made.
     private var inertOnboarding: OnboardingModel.Method?
 
     static func main() {
@@ -27,12 +27,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         WAKit.log.info("\(WAKit.bridgeVersion(), privacy: .public)")
         #if DEBUG
-        if ChatHarness.launchIfRequested() { return }  // BETTERWA_CHAT_HARNESS=1: stand-alone chat view
+        if ChatHarness.launchIfRequested() { return }  // CMDFREAK_CHAT_HARNESS=1: stand-alone chat view
         #endif
         do {
             client = try makeClient()
         } catch {
-            presentFatal("BetterWA could not open its database.", error)
+            presentFatal("CmdFreak could not open its database.", error)
             return
         }
         NSApp.mainMenu = MainMenu.build()
@@ -181,7 +181,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             liveSeedTask = Task { await Seed.runLiveTraffic(client, window: window, count: count) }
         }
         await DevSupport.runSnapshots(main: mainWindow)
-        if DevSupport.env["BETTERWA_SELFTEST"] == "1", let window = mainWindow {
+        if DevSupport.env["CMDFREAK_SELFTEST"] == "1", let window = mainWindow {
             await ShortcutSelfTest.run(window, client: client, snapshotDir: DevSupport.snapshotDirectory)
         }
     }

@@ -559,7 +559,7 @@ fn poll_vote_without_a_known_parent_secret_is_parked_and_round_trips() {
 #[ignore]
 fn real_capture_summary() {
     let dir = std::env::var("WA_CAPTURE_DIR").unwrap_or_else(|_| {
-        format!("{}/Library/Application Support/BetterWA/capture", std::env::var("HOME").unwrap())
+        format!("{}/Library/Application Support/CmdFreak/capture", std::env::var("HOME").unwrap())
     });
     let mut files: Vec<_> = std::fs::read_dir(format!("{dir}/history"))
         .unwrap()
@@ -660,7 +660,7 @@ fn find_quoted(v: &serde_json::Value, out: &mut Vec<(String, serde_json::Value)>
 #[ignore]
 fn real_capture_quotes() {
     let dir = std::env::var("WA_CAPTURE_DIR").unwrap_or_else(|_| {
-        format!("{}/Library/Application Support/BetterWA/capture", std::env::var("HOME").unwrap())
+        format!("{}/Library/Application Support/CmdFreak/capture", std::env::var("HOME").unwrap())
     });
     let mut files: Vec<_> = std::fs::read_dir(format!("{dir}/history"))
         .unwrap()

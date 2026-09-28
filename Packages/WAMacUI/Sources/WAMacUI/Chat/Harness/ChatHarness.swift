@@ -4,8 +4,8 @@ import Synchronization
 import UniformTypeIdentifiers
 import WAKit
 
-/// Debug-only stand-alone chat window. `BETTERWA_CHAT_HARNESS=1` (DM first) or `=group` seeds a
-/// throwaway database under `Application Support/BetterWA/harness/` and mounts `ChatViewController`
+/// Debug-only stand-alone chat window. `CMDFREAK_CHAT_HARNESS=1` (DM first) or `=group` seeds a
+/// throwaway database under `Application Support/CmdFreak/harness/` and mounts `ChatViewController`
 /// without the shell. ⌘1 / ⌘2 switch between the seeded DM and group; typing "ping" gets a reply.
 @MainActor
 public enum ChatHarness {
@@ -22,7 +22,7 @@ public enum ChatHarness {
 
     /// Returns true when the harness took over launch; the caller should skip its normal window.
     public static func launchIfRequested() -> Bool {
-        guard let mode = ProcessInfo.processInfo.environment["BETTERWA_CHAT_HARNESS"], !mode.isEmpty, mode != "0" else { return false }
+        guard let mode = ProcessInfo.processInfo.environment["CMDFREAK_CHAT_HARNESS"], !mode.isEmpty, mode != "0" else { return false }
         do {
             try launch(startWithGroup: mode == "group")
         } catch {
@@ -32,7 +32,7 @@ public enum ChatHarness {
     }
 
     private static func launch(startWithGroup: Bool) throws {
-        let root = URL.applicationSupportDirectory.appending(path: "BetterWA/harness", directoryHint: .isDirectory)
+        let root = URL.applicationSupportDirectory.appending(path: "CmdFreak/harness", directoryHint: .isDirectory)
         try? FileManager.default.removeItem(at: root)
         try FileManager.default.createDirectory(at: root.appending(path: "remote"), withIntermediateDirectories: true)
         let database = try AppDatabase(url: root.appending(path: "app.sqlite"))

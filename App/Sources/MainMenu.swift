@@ -145,7 +145,7 @@ enum MainMenu {
 
     private static func help() -> NSMenu {
         let menu = NSMenu(title: "Help")
-        menu.addItem(item("BetterWA Help", #selector(NSApplication.showHelp(_:)), "?"))
+        menu.addItem(item("CmdFreak Help", #selector(NSApplication.showHelp(_:)), "?"))
         return menu
     }
 
