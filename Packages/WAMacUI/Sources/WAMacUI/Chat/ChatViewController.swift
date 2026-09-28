@@ -91,12 +91,6 @@ public final class ChatViewController: NSViewController {
         setChatVisible(false)
     }
 
-    /// Room above the first message for views floating over the list (the shell's chat header).
-    var topAccessoryInset: CGFloat {
-        get { list.topAccessoryInset }
-        set { list.topAccessoryInset = newValue }
-    }
-
     public override func viewDidAppear() {
         super.viewDidAppear()
         observeWindowKey()

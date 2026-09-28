@@ -20,9 +20,16 @@ public final class ChatContainerViewController: NSViewController {
     public var composeTextSink: ((String) -> Void)?
 
     private let emptyState = NSHostingView(rootView: EmptyChatView())
-    /// The open chat's avatar and name, floating at the top center of the thread (iMessage style).
+    /// The open chat's avatar and name at the top center of the thread (iMessage style), as a
+    /// soft-edged top accessory of the split view item: messages scroll under it and fade out.
     let header = ChatHeaderModel()
-    private lazy var headerView = NSHostingView(rootView: ChatHeaderView(model: header))
+    private(set) lazy var headerAccessory: SoftEdgeAccessory = {
+        let view = NSHostingView(rootView: ChatHeaderView(model: header))
+        view.sizingOptions = [.intrinsicContentSize]
+        let accessory = SoftEdgeAccessory(content: view, insets: NSEdgeInsets(top: 0, left: 16, bottom: 6, right: 16))
+        accessory.isHidden = true
+        return accessory
+    }()
 
     public init(client: WAClient) {
         self.client = client
@@ -49,20 +56,6 @@ public final class ChatContainerViewController: NSViewController {
             ])
         }
         chatView.view.isHidden = true
-
-        headerView.translatesAutoresizingMaskIntoConstraints = false
-        headerView.sizingOptions = [.intrinsicContentSize]
-        // It deliberately reaches up into the titlebar band; don't let SwiftUI pad it back down.
-        headerView.safeAreaRegions = []
-        root.addSubview(headerView)
-        NSLayoutConstraint.activate([
-            headerView.centerXAnchor.constraint(equalTo: root.centerXAnchor),
-            headerView.leadingAnchor.constraint(greaterThanOrEqualTo: root.leadingAnchor, constant: 16),
-            // The avatar sits in the titlebar band; the name capsule hangs just below it.
-            headerView.topAnchor.constraint(equalTo: root.safeAreaLayoutGuide.topAnchor, constant: -ChatHeaderView.avatarOverhang),
-        ])
-        chatView.topAccessoryInset = ChatHeaderView.height - ChatHeaderView.avatarOverhang
-        headerView.isHidden = true
         view = root
     }
 
@@ -71,7 +64,7 @@ public final class ChatContainerViewController: NSViewController {
         self.chatJid = chatJid
         chatView.show(chatJid: chatJid)
         chatView.view.isHidden = chatJid == nil
-        headerView.isHidden = chatJid == nil
+        headerAccessory.isHidden = chatJid == nil
         emptyState.isHidden = chatJid != nil
     }
 

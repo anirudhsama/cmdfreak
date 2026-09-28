@@ -71,9 +71,11 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, N
         listItem.maximumThickness = ChatListMetrics.maxWidth
         listItem.automaticallyAdjustsSafeAreaInsets = true
         let contentItem = NSSplitViewItem(viewController: chatContainer)
-        // No hard line under the toolbar: messages scroll under the floating header and fade out.
+        // No hard line under the toolbar; the soft-edged accessories fade content out instead.
         contentItem.titlebarSeparatorStyle = .none
         listItem.titlebarSeparatorStyle = .none
+        listItem.addTopAlignedAccessoryViewController(chatListColumn.searchAccessory)
+        contentItem.addTopAlignedAccessoryViewController(chatContainer.headerAccessory)
         contentItem.minimumThickness = 400
         split.addSplitViewItem(sidebarItem)
         split.addSplitViewItem(listItem)
@@ -159,7 +161,7 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, N
     }
 
     /// The window title names the current filter (shown centered over the chat list); the chat's
-    /// avatar and name float at the top of the conversation (`ChatContainerViewController`).
+    /// avatar and name sit at the top of the conversation (`ChatContainerViewController`).
     private func updateTitle() {
         guard let window else { return }
         window.title = railModel.selection.title

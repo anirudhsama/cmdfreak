@@ -3,8 +3,7 @@ import Observation
 import SwiftUI
 
 /// The open chat's identity, iMessage style: the avatar centered at the top of the thread with the
-/// name in a glass capsule under it. It floats over the message list, which scrolls beneath it.
-/// The subtitle (phone or participant count) is the capsule's tooltip.
+/// name in a glass capsule under it. The subtitle (phone or participant count) is the tooltip.
 @MainActor @Observable
 final class ChatHeaderModel {
     var state: ChatRowState?
@@ -16,9 +15,6 @@ struct ChatHeaderView: View {
     static let capsuleHeight: CGFloat = 24
     /// Capsule tucks this far under the avatar.
     static let overlap: CGFloat = 5
-    static let height: CGFloat = avatarSize + capsuleHeight - overlap
-    /// How far the avatar reaches up into the titlebar band above the safe area.
-    static let avatarOverhang: CGFloat = avatarSize - 4
 
     let model: ChatHeaderModel
 

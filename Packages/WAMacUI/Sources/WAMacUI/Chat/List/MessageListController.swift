@@ -53,10 +53,6 @@ final class MessageListController: NSViewController {
     private var recomputeTask: Task<Void, Never>?
     private var progressTask: Task<Void, Never>?
     private var bottomInset: CGFloat = 0
-    /// Extra room under the toolbar for views floating over the top of the list (the chat header).
-    var topAccessoryInset: CGFloat = 0 {
-        didSet { if topAccessoryInset != oldValue { view.needsLayout = true } }
-    }
     private var needsInitialScroll = false
     private var bottomGapBeforeLayout: CGFloat = 0
     private var wasAtBottom = true
@@ -130,7 +126,7 @@ final class MessageListController: NSViewController {
 
     override func viewDidLayout() {
         super.viewDidLayout()
-        let top = view.safeAreaInsets.top + M.listTopInset + topAccessoryInset
+        let top = view.safeAreaInsets.top + M.listTopInset
         if scrollView.contentInsets.top != top || scrollView.contentInsets.bottom != bottomInset {
             // The scroller track already follows contentInsets; scrollerInsets would inset it twice.
             scrollView.contentInsets = NSEdgeInsets(top: top, left: 0, bottom: bottomInset, right: 0)
