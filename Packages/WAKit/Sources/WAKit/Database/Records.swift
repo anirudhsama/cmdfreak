@@ -15,7 +15,8 @@ public struct ChatRecord: Codable, Hashable, Sendable, FetchableRecord, Persista
     public var archived: Bool
     public var readOnly: Bool
     public var participantCount: Int?
-    public var avatarPath: String?
+    /// A profile picture is cached at `AvatarService.fileURL(for: jid)`.
+    public var hasAvatar: Bool
     public var avatarCheckedAt: Int64?
     public var lastMessageId: String?
     public var lastMessageKind: MessageKind?
@@ -34,9 +35,11 @@ public struct ChatRecord: Codable, Hashable, Sendable, FetchableRecord, Persista
         markedUnread = false
         archived = false
         readOnly = false
+        hasAvatar = false
     }
 
     public var isPinned: Bool { pinnedAt != nil }
+    public var avatarURL: URL? { hasAvatar ? AvatarService.fileURL(for: jid) : nil }
 
     public func isMuted(now: Int64 = Int64(Date().timeIntervalSince1970)) -> Bool {
         guard let mutedUntil else { return false }
@@ -198,7 +201,9 @@ public struct MediaRecord: Codable, Hashable, Sendable, FetchableRecord, Persist
     public var waveform: Data?
     public var pageCount: Int?
     public var isAnimated: Bool?
-    public var localPath: String?
+    /// The user's original file for an outgoing attachment that has no `fileSha256` yet. Every
+    /// other file is located by `MediaStore` from the hash.
+    public var sourcePath: String?
     public var downloadState: MediaDownloadState
 
     /// The download parameters in bridge form.

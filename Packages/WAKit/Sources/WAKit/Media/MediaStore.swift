@@ -59,10 +59,16 @@ public actor MediaStore {
 
     /// Where the decrypted file lives (or will live). Pending outgoing media points at its source file.
     public nonisolated func fileURL(for media: MediaRecord) -> URL {
-        if media.fileSha256.isEmpty, let p = media.localPath { return URL(filePath: p) }
+        if media.fileSha256.isEmpty, let p = media.sourcePath { return URL(filePath: p) }
         let hex = media.fileSha256.hexString
         return root.appending(path: String(hex.prefix(2)), directoryHint: .isDirectory)
             .appending(path: "\(hex).\(Self.fileExtension(for: media))")
+    }
+
+    /// Where a row marked downloaded keeps its file, without touching the disk (safe in cell code).
+    /// The file can still be missing, e.g. purged from Caches; `autoDownloadIfNeeded` repairs that.
+    public nonisolated func downloadedURL(for media: MediaRecord) -> URL? {
+        media.downloadState == .downloaded ? fileURL(for: media) : nil
     }
 
     /// The local file if already downloaded. Does a file-system check; keep it out of cell code.
@@ -97,32 +103,37 @@ public actor MediaStore {
         }
     }
 
-    /// Call from the visible-row warm-up; no-op when not eligible or already present.
+    /// Call from the visible-row warm-up. Records a file that is already cached, and fetches or
+    /// un-marks one that is recorded but gone.
     public func autoDownloadIfNeeded(_ item: MessageItem) {
         guard let media = item.media, !item.message.revoked else { return }
-        if media.downloadState != .downloaded, let url = localURL(for: media) {
-            // The file is already cached (re-sync, fresh database): record it so cells can show it.
-            Task { await self.recordExisting(url, for: media) }
+        if localURL(for: media) != nil {
+            // Cached but not recorded (re-sync, fresh database): record it so cells can show it.
+            if media.downloadState != .downloaded { Task { await self.setState(.downloaded, for: media) } }
             return
         }
-        guard Self.shouldAutoDownload(kind: item.message.kind, media: media),
-              !media.directPath.isEmpty, localURL(for: media) == nil else { return }
-        Task {
-            do { _ = try await self.download(media) } catch {
-                WAKit.log.error("auto-download \(media.messageId, privacy: .public) failed: \(error, privacy: .public)")
+        guard !media.fileSha256.isEmpty else { return }
+        if Self.shouldAutoDownload(kind: item.message.kind, media: media), !media.directPath.isEmpty {
+            Task {
+                do { _ = try await self.download(media) } catch {
+                    WAKit.log.error("auto-download \(media.messageId, privacy: .public) failed: \(error, privacy: .public)")
+                }
             }
+        } else if media.downloadState == .downloaded {
+            // Purged from Caches: offer the download again.
+            Task { await self.setState(.none, for: media) }
         }
     }
 
-    private func recordExisting(_ url: URL, for media: MediaRecord) async {
-        try? await ingest?.setMediaState(chatJid: media.chatJid, messageId: media.messageId, state: .downloaded, localPath: url.path)
+    private func setState(_ state: MediaDownloadState, for media: MediaRecord) async {
+        try? await ingest?.setMediaState(chatJid: media.chatJid, messageId: media.messageId, state: state)
     }
 
     // MARK: Download
 
     public func download(_ media: MediaRecord) async throws -> URL {
         if let url = localURL(for: media) {
-            if media.downloadState != .downloaded { await recordExisting(url, for: media) }
+            if media.downloadState != .downloaded { await setState(.downloaded, for: media) }
             return url
         }
         let key = Self.key(for: media)
@@ -135,18 +146,18 @@ public actor MediaStore {
         let task = Task<URL, any Error> {
             try FileManager.default.createDirectory(at: dest.deletingLastPathComponent(), withIntermediateDirectories: true)
             let part = dest.appendingPathExtension("part")
-            try? await ingest?.setMediaState(chatJid: media.chatJid, messageId: media.messageId, state: .downloading, localPath: nil)
+            try? await ingest?.setMediaState(chatJid: media.chatJid, messageId: media.messageId, state: .downloading)
             do {
                 try await bridge.downloadMedia(media: media.bridgeMedia, destPath: part.path, progress: ProgressRelay(key: key, center: center))
                 if FileManager.default.fileExists(atPath: dest.path) { try? FileManager.default.removeItem(at: part) }
                 else { try FileManager.default.moveItem(at: part, to: dest) }
                 center.post(key, nil)
-                try? await ingest?.setMediaState(chatJid: media.chatJid, messageId: media.messageId, state: .downloaded, localPath: dest.path)
+                try? await ingest?.setMediaState(chatJid: media.chatJid, messageId: media.messageId, state: .downloaded)
                 return dest
             } catch {
                 try? FileManager.default.removeItem(at: part)
                 center.post(key, nil)
-                try? await ingest?.setMediaState(chatJid: media.chatJid, messageId: media.messageId, state: .failed, localPath: nil)
+                try? await ingest?.setMediaState(chatJid: media.chatJid, messageId: media.messageId, state: .failed)
                 throw error
             }
         }

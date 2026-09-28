@@ -4,7 +4,8 @@ import WAKit
 
 /// Fills `ChatRowState.avatar` for rows as they are displayed. Cached decodes are synchronous;
 /// misses decode off the main thread through `ThumbnailCache`; chats with no cached file ask
-/// `AvatarService` once per session, and the resulting `avatarPath` arrives through the list observation.
+/// `AvatarService` once per session, and the resulting `hasAvatar` arrives through the list
+/// observation. A recorded file that fails to load (purged from Caches) is fetched again.
 @MainActor
 final class AvatarLoader {
     static let pixelSize = Int(ChatRowMetrics.avatarSize) * 2
@@ -20,17 +21,21 @@ final class AvatarLoader {
 
     func load(_ state: ChatRowState) {
         guard state.avatar == nil else { return }
-        guard let path = state.avatarPath else {
+        guard let url = state.avatarURL else {
             request(state.jid)
             return
         }
-        if let hit = ThumbnailCache.shared.cached(key: path, maxPixelSize: Self.pixelSize) {
+        if let hit = ThumbnailCache.shared.cached(key: url.path, maxPixelSize: Self.pixelSize) {
             state.avatar = hit
             return
         }
+        let avatars = self.avatars
         Task { [weak state] in
-            let image = await ThumbnailCache.shared.image(key: path, source: .file(URL(filePath: path)), maxPixelSize: Self.pixelSize)
-            guard let state, state.avatarPath == path else { return }
+            var image = await ThumbnailCache.shared.image(key: url.path, source: .file(url), maxPixelSize: Self.pixelSize)
+            if image == nil, let jid = state?.jid, await avatars.avatar(for: jid) != nil {
+                image = await ThumbnailCache.shared.image(key: url.path, source: .file(url), maxPixelSize: Self.pixelSize)
+            }
+            guard let state, state.avatarURL == url else { return }
             state.avatar = image
         }
     }

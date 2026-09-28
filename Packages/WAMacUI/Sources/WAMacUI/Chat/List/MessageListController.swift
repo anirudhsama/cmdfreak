@@ -860,17 +860,16 @@ final class MessageListController: NSViewController {
 
     // MARK: - Media opening & Quick Look
 
+    /// Previews a downloaded file; otherwise downloads it (again, if it was purged from Caches) and
+    /// previews videos and documents.
     func open(_ item: MessageItem) {
         guard let media = item.media, !item.message.revoked else { return }
-        if media.downloadState == .downloaded, let path = media.localPath {
-            quickLook(URL(filePath: path), item: item)
-            return
-        }
+        let wasDownloaded = media.downloadState == .downloaded
         let store = client.media
         Task {
             do {
                 let url = try await store.download(media)
-                if item.message.kind == .video || item.message.kind == .document {
+                if wasDownloaded || item.message.kind == .video || item.message.kind == .document {
                     self.quickLook(url, item: item)
                 }
             } catch {
@@ -885,11 +884,7 @@ final class MessageListController: NSViewController {
 
     func quickLookSelection() {
         guard let item = selectedItem else { return }
-        if let media = item.media, media.downloadState == .downloaded, let path = media.localPath {
-            quickLook(URL(filePath: path), item: item)
-        } else {
-            open(item)
-        }
+        open(item)
     }
 
     private func quickLook(_ url: URL, item: MessageItem) {
@@ -899,8 +894,8 @@ final class MessageListController: NSViewController {
             guard let media = m.media, m.message.kind != .audio, m.message.kind != .voice else { return nil }
             let title = media.fileName ?? LayoutPlanner.timeText(m.message.timestamp)
             if m.id == item.id { return PreviewItem(url: url, title: title, messageId: m.id) }
-            guard media.downloadState == .downloaded, let p = media.localPath else { return nil }
-            return PreviewItem(url: URL(filePath: p), title: title, messageId: m.id)
+            guard let url = client.media.downloadedURL(for: media) else { return nil }
+            return PreviewItem(url: url, title: title, messageId: m.id)
         }
         if let i = previewItems.firstIndex(where: { $0.messageId == item.id }) {
             previewIndex = i
@@ -973,12 +968,12 @@ final class MessageListController: NSViewController {
         if let t = m.text, !t.isEmpty, !m.revoked {
             menu.addItem(withTitle: "Copy", action: #selector(menuCopy(_:)), keyEquivalent: "").representedObject = item
         }
-        if let media = item.media, media.downloadState == .downloaded, let path = media.localPath, !m.revoked {
+        if let media = item.media, let url = client.media.downloadedURL(for: media), !m.revoked {
             menu.addItem(.separator())
             menu.addItem(withTitle: "Quick Look", action: #selector(menuQuickLook(_:)), keyEquivalent: "").representedObject = item
             menu.addItem(withTitle: "Show in Finder", action: #selector(menuReveal(_:)), keyEquivalent: "").representedObject = item
             let openWith = NSMenuItem(title: "Open With", action: nil, keyEquivalent: "")
-            openWith.submenu = openWithMenu(for: URL(filePath: path))
+            openWith.submenu = openWithMenu(for: url)
             menu.addItem(openWith)
             menu.addItem(withTitle: "Save As…", action: #selector(menuSaveAs(_:)), keyEquivalent: "").representedObject = item
         } else if item.media != nil, !m.revoked, m.kind != .sticker {
@@ -1029,21 +1024,23 @@ final class MessageListController: NSViewController {
     }
     @objc private func menuQuickLook(_ sender: NSMenuItem) { if let item = sender.representedObject as? MessageItem { open(item) } }
     @objc private func menuReveal(_ sender: NSMenuItem) {
-        guard let item = sender.representedObject as? MessageItem, let p = item.media?.localPath else { return }
-        NSWorkspace.shared.activateFileViewerSelecting([URL(filePath: p)])
+        guard let item = sender.representedObject as? MessageItem, let media = item.media,
+              let url = client.media.downloadedURL(for: media) else { return }
+        NSWorkspace.shared.activateFileViewerSelecting([url])
     }
     @objc private func menuOpenWith(_ sender: NSMenuItem) {
         guard let (url, app) = sender.representedObject as? (URL, URL) else { return }
         NSWorkspace.shared.open([url], withApplicationAt: app, configuration: NSWorkspace.OpenConfiguration())
     }
     @objc private func menuSaveAs(_ sender: NSMenuItem) {
-        guard let item = sender.representedObject as? MessageItem, let p = item.media?.localPath, let window = view.window else { return }
+        guard let item = sender.representedObject as? MessageItem, let media = item.media,
+              let url = client.media.downloadedURL(for: media), let window = view.window else { return }
         let panel = NSSavePanel()
-        panel.nameFieldStringValue = item.media?.fileName ?? URL(filePath: p).lastPathComponent
+        panel.nameFieldStringValue = media.fileName ?? url.lastPathComponent
         panel.beginSheetModal(for: window) { response in
             guard response == .OK, let dest = panel.url else { return }
             try? FileManager.default.removeItem(at: dest)
-            try? FileManager.default.copyItem(at: URL(filePath: p), to: dest)
+            try? FileManager.default.copyItem(at: url, to: dest)
         }
     }
     @objc private func menuDownload(_ sender: NSMenuItem) {

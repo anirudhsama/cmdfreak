@@ -25,7 +25,7 @@ final class ChatRowState: Identifiable {
     private(set) var previewSymbol: String?
     private(set) var previewText = ""
     private(set) var previewIsPlaceholder = false
-    private(set) var avatarPath: String?
+    private(set) var avatarURL: URL?
     var avatar: CGImage?
     var isTyping = false
     var isSelected = false
@@ -50,8 +50,8 @@ final class ChatRowState: Identifiable {
         unreadCount = chat.unreadCount
         markedUnread = chat.markedUnread
         time = chat.lastActivityAt.map { ChatTimeFormatter.string(fromUnixSeconds: $0) } ?? ""
-        if avatarPath != chat.avatarPath {
-            avatarPath = chat.avatarPath
+        if avatarURL != chat.avatarURL {
+            avatarURL = chat.avatarURL
             avatar = nil
         }
         applyPreview(item.preview)

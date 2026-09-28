@@ -12,7 +12,7 @@ import Testing
     @Test func liveIncomingNotifiesLatestPerChat() async throws {
         let ingest = try IngestActor(database: F.tempDB())
         try await ingest.apply([F.live(F.message("0", chat: F.bob, ts: now - 600))])
-        try await ingest.setAvatar(jid: F.bob, path: "/tmp/bob.jpg", checkedAt: now)
+        try await ingest.setAvatar(jid: F.bob, present: true, checkedAt: now)
         let result = try await ingest.applyBatch([
             .contacts(contacts: [BridgeContact(jid: F.alicePN, fullName: "Alice", firstName: nil, pushName: nil, phone: nil)]),
             F.live(F.message("1", chat: F.bob, ts: now - 1, text: "first"), F.message("2", chat: F.bob, ts: now, text: "second"),
@@ -23,7 +23,7 @@ import Testing
         #expect(notices.count == 2)
         let dm = try #require(notices.first { $0.chatJid == F.bob })
         #expect(dm.messageId == "2" && dm.text == "second" && dm.senderName == nil)
-        #expect(dm.avatarPath == "/tmp/bob.jpg")
+        #expect(dm.avatarURL == AvatarService.fileURL(for: F.bob))
         let group = try #require(notices.first { $0.chatJid == F.group })
         #expect(group.senderName == "Alice" && group.kind == .image)
     }

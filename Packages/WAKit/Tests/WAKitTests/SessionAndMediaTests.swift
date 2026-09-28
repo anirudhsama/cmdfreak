@@ -73,7 +73,33 @@ import AppKit
         #expect(bridge.calls.withLock { $0.downloads } == 1)
 
         let row = try #require(try await ChatWindowLoader(database: db, chatJid: F.bob).initial().items.first?.media)
-        #expect(row.downloadState == .downloaded && row.localPath == urls[0].path)
+        #expect(row.downloadState == .downloaded && store.downloadedURL(for: row) == urls[0])
+    }
+
+    @Test func purgedFilesAreFetchedAgainOrUnmarked() async throws {
+        let db = try F.tempDB()
+        let ingest = try IngestActor(database: db)
+        try await ingest.apply([F.live(
+            F.message("img", chat: F.bob, ts: 1, kind: .image, media: F.media(sha: 4)),
+            F.message("vid", chat: F.bob, ts: 2, kind: .video, media: F.media(sha: 5, type: .video, mimetype: "video/mp4")))])
+        let bridge = FakeBridge()
+        let store = await store(bridge, ingest: ingest)
+        let loader = ChatWindowLoader(database: db, chatJid: F.bob)
+        for item in try await loader.initial().items {
+            try FileManager.default.removeItem(at: try await store.download(try #require(item.media)))
+        }
+        #expect(bridge.calls.withLock { $0.downloads } == 2)
+
+        for item in try await loader.initial().items { await store.autoDownloadIfNeeded(item) }
+        var videoState: MediaDownloadState?
+        for _ in 0..<200 {
+            videoState = try await loader.initial().items.first { $0.id == "vid" }?.media?.downloadState
+            if videoState == MediaDownloadState.none, bridge.calls.withLock({ $0.downloads }) == 3 { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        // The image downloads again; the video (never auto-downloaded) offers the download again.
+        #expect(bridge.calls.withLock { $0.downloads } == 3)
+        #expect(videoState == MediaDownloadState.none)
     }
 
     @Test func voiceNotesRemuxedNextToOriginal() async throws {
@@ -116,8 +142,13 @@ import AppKit
         let root = FileManager.default.temporaryDirectory.appending(path: "wakit-avatars-\(UUID().uuidString)")
         let avatars = AvatarService(bridge: FakeBridge(), ingest: ingest, root: root)
         let url = try #require(await avatars.avatar(for: F.bob))
-        #expect(try db.chat(F.bob)?.avatarPath == url.path)
+        #expect(url == root.appending(path: AvatarService.fileName(for: F.bob)))
+        #expect(try db.chat(F.bob)?.hasAvatar == true)
+        // Purged from Caches: fetched again despite the recent check.
+        try FileManager.default.removeItem(at: url)
+        #expect(await avatars.avatar(for: F.bob) == url)
+        #expect(FileManager.default.fileExists(atPath: url.path))
         try await ingest.apply([.pictureChanged(jid: F.bob)])
-        #expect(try db.chat(F.bob)?.avatarPath == nil)
+        #expect(try db.chat(F.bob)?.hasAvatar == false)
     }
 }

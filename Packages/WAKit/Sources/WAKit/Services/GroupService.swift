@@ -66,11 +66,16 @@ public actor GroupService {
     }
 }
 
-/// Lazily downloads profile pictures into `~/Library/Caches/CmdFreak/avatars/` and records the
-/// path on the chat. Checks each JID at most once per `recheckInterval`.
+/// Lazily downloads profile pictures into `~/Library/Caches/CmdFreak/avatars/` and records on the
+/// chat that one exists. Checks each JID at most once per `recheckInterval`.
 public actor AvatarService {
     public static var defaultRoot: URL {
         WAKit.cacheDirectory.appending(path: "avatars", directoryHint: .isDirectory)
+    }
+
+    /// Where the app's avatar for `jid` lives. `root` is only overridden by tests.
+    public nonisolated static func fileURL(for jid: String) -> URL {
+        defaultRoot.appending(path: fileName(for: jid))
     }
 
     public let root: URL
@@ -90,19 +95,19 @@ public actor AvatarService {
     public func avatar(for jid: String) async -> URL? {
         if let task = inFlight[jid] { return await task.value }
         let chat = try? await ingest.database.reader.read { db in try ChatRecord.fetchOne(db, key: jid) }
-        let path = chat?.avatarPath
-        let checkedAt = chat?.avatarCheckedAt
-        if let path, FileManager.default.fileExists(atPath: path) { return URL(filePath: path) }
-        let now = Int64(Date().timeIntervalSince1970)
-        if let checkedAt, now - checkedAt < recheckInterval { return nil }
-
         let dest = root.appending(path: Self.fileName(for: jid))
+        let hasAvatar = chat?.hasAvatar ?? false
+        if hasAvatar, FileManager.default.fileExists(atPath: dest.path) { return dest }
+        // A recorded avatar whose file is gone (Caches purged) is fetched again right away.
+        let now = Int64(Date().timeIntervalSince1970)
+        if !hasAvatar, let checkedAt = chat?.avatarCheckedAt, now - checkedAt < recheckInterval { return nil }
+
         let bridge = self.bridge, ingest = self.ingest, root = self.root
         let task = Task<URL?, Never> {
             do {
                 try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
                 let has = try await bridge.profilePicture(jid: jid, preview: true, destPath: dest.path)
-                try await ingest.setAvatar(jid: jid, path: has ? dest.path : nil, checkedAt: now)
+                try await ingest.setAvatar(jid: jid, present: has, checkedAt: now)
                 return has ? dest : nil
             } catch {
                 WAKit.log.debug("avatar \(jid, privacy: .private) failed: \(error)")
@@ -114,7 +119,7 @@ public actor AvatarService {
         return await task.value
     }
 
-    static func fileName(for jid: String) -> String {
+    nonisolated static func fileName(for jid: String) -> String {
         jid.replacingOccurrences(of: "/", with: "_") + ".jpg"
     }
 }

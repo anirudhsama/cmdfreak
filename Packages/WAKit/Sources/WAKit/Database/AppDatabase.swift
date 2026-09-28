@@ -50,7 +50,7 @@ extension AppDatabase {
                 t.column("archived", .boolean).notNull().defaults(to: false)
                 t.column("readOnly", .boolean).notNull().defaults(to: false)
                 t.column("participantCount", .integer)
-                t.column("avatarPath", .text)
+                t.column("hasAvatar", .boolean).notNull().defaults(to: false)
                 t.column("avatarCheckedAt", .integer)
                 // Denormalised last-message preview, kept in sync by IngestActor so the chat list
                 // observation never has to track the message table.
@@ -130,7 +130,7 @@ extension AppDatabase {
                 t.column("waveform", .blob)
                 t.column("pageCount", .integer)
                 t.column("isAnimated", .boolean)
-                t.column("localPath", .text)
+                t.column("sourcePath", .text)
                 t.column("downloadState", .integer).notNull().defaults(to: 0)
             }
             try db.create(index: "media_on_sha", on: "media", columns: ["fileSha256"])

@@ -161,7 +161,7 @@ final class MessageCell: NSTableCellView {
         layer.contentsScale = window?.backingScaleFactor ?? 2
 
         let media = item.media
-        let localURL = media?.downloadState == .downloaded ? media?.localPath.map { URL(filePath: $0) } : nil
+        let localURL = media.flatMap { delegate?.mediaStore.downloadedURL(for: $0) }
         let cache = ThumbnailCache.shared
 
         // Full-resolution file (present locally) wins; the tiny thumbnail is the blurred placeholder.
@@ -313,8 +313,9 @@ final class MessageCell: NSTableCellView {
             queuePlayer?.play()
             if let motion = pendingMotion {
                 scheduleMotion(url: motion.url, isGif: motion.isGif)
-            } else if case .sticker(_, _, _, true) = plan?.content, !animating, let p = item?.media?.localPath, item?.media?.downloadState == .downloaded {
-                scheduleMotion(url: URL(filePath: p), isGif: false)
+            } else if case .sticker(_, _, _, true) = plan?.content, !animating,
+                      let media = item?.media, let url = delegate?.mediaStore.downloadedURL(for: media) {
+                scheduleMotion(url: url, isGif: false)
             }
         }
     }
@@ -463,7 +464,7 @@ final class MessageCell: NSTableCellView {
 
     private func drawMediaOverlay(_ m: LayoutPlan.Media, item: MessageItem) {
         let f = m.frame
-        let downloaded = item.media?.downloadState == .downloaded && item.media?.localPath != nil
+        let downloaded = item.media?.downloadState == .downloaded
         if let fraction = transferFraction(item) {
             drawProgressRing(center: NSPoint(x: f.midX, y: f.midY), fraction: fraction)
             return
@@ -498,7 +499,7 @@ final class MessageCell: NSTableCellView {
         NSBezierPath(roundedRect: f, xRadius: 8, yRadius: 8).fill(with: well)
         let icon = Self.icon(forFileName: d.fileName, mimetype: item.media?.mimetype)
         icon.draw(in: NSRect(x: f.minX + 8, y: f.minY + 10, width: 36, height: 36), from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
-        let downloaded = item.media?.downloadState == .downloaded && item.media?.localPath != nil
+        let downloaded = item.media?.downloadState == .downloaded
         let transfer = transferFraction(item)
         let trailing: CGFloat = downloaded && transfer == nil ? 12 : 40
         d.name.draw(with: NSRect(x: f.minX + 52, y: f.minY + 11, width: f.width - 52 - trailing, height: 17), options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine])
@@ -718,8 +719,7 @@ final class MessageCell: NSTableCellView {
             return
         case .document(let d) where d.frame.contains(p):
             // Drag-out starts on drag; a click opens.
-            if let path = item.media?.localPath, item.media?.downloadState == .downloaded {
-                let url = URL(filePath: path)
+            if let media = item.media, let url = delegate.mediaStore.downloadedURL(for: media) {
                 if let next = window?.nextEvent(matching: [.leftMouseUp, .leftMouseDragged], until: Date(timeIntervalSinceNow: 0.3), inMode: .eventTracking, dequeue: true),
                    next.type == .leftMouseDragged {
                     delegate.cell(self, beginDragOf: url, with: next)

@@ -264,13 +264,13 @@ private struct CommandBarAvatar: View {
                 }
             }
         }
-        .task(id: candidate.avatarPath) {
-            guard let path = candidate.avatarPath else { image = nil; return }
-            if let hit = ThumbnailCache.shared.cached(key: path, maxPixelSize: Self.pixelSize) {
+        .task(id: candidate.avatarURL) {
+            guard let url = candidate.avatarURL else { image = nil; return }
+            if let hit = ThumbnailCache.shared.cached(key: url.path, maxPixelSize: Self.pixelSize) {
                 image = hit
                 return
             }
-            image = await ThumbnailCache.shared.image(key: path, source: .file(URL(filePath: path)), maxPixelSize: Self.pixelSize)
+            image = await ThumbnailCache.shared.image(key: url.path, source: .file(url), maxPixelSize: Self.pixelSize)
         }
     }
 }

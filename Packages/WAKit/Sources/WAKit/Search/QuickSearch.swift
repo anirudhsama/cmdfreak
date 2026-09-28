@@ -23,12 +23,13 @@ public struct QuickSearchCandidate: Sendable, Hashable, Identifiable {
     public var hasChat: Bool
     public var archived: Bool
     public var lastActivityAt: Int64?
-    public var avatarPath: String?
+    public var hasAvatar: Bool
 
     public var id: String { jid }
+    public var avatarURL: URL? { hasAvatar ? AvatarService.fileURL(for: jid) : nil }
 
     public init(jid: String, kind: ChatKind, title: String, alternateNames: [String] = [], phone: String? = nil,
-                hasChat: Bool = true, archived: Bool = false, lastActivityAt: Int64? = nil, avatarPath: String? = nil) {
+                hasChat: Bool = true, archived: Bool = false, lastActivityAt: Int64? = nil, hasAvatar: Bool = false) {
         self.jid = jid
         self.kind = kind
         self.title = title
@@ -37,7 +38,7 @@ public struct QuickSearchCandidate: Sendable, Hashable, Identifiable {
         self.hasChat = hasChat
         self.archived = archived
         self.lastActivityAt = lastActivityAt
-        self.avatarPath = avatarPath
+        self.hasAvatar = hasAvatar
     }
 }
 
@@ -65,7 +66,7 @@ public enum QuickSearchQuery {
             chatWhere.append("(\(namesExpr) LIKE :pattern ESCAPE '\\' OR (:digits != '' AND \(phoneExpr) LIKE :digits))")
         }
         let chatSQL = """
-            SELECT c.jid, c.kind, c.name, c.lastActivityAt, c.archived, c.avatarPath,
+            SELECT c.jid, c.kind, c.name, c.lastActivityAt, c.archived, c.hasAvatar,
                    ct.fullName, ct.firstName, ct.pushName, \(phoneExpr) AS phone
             FROM chat c LEFT JOIN contact ct ON ct.jid = c.jid
             WHERE \(chatWhere.joined(separator: " AND "))
@@ -85,7 +86,7 @@ public enum QuickSearchQuery {
                 jid: chat.jid, kind: chat.kind, title: title,
                 alternateNames: chat.kind == .dm ? alternates(contact, excluding: title) : [],
                 phone: chat.kind == .dm ? contact.phone : nil, hasChat: true, archived: row["archived"],
-                lastActivityAt: row["lastActivityAt"], avatarPath: row["avatarPath"])
+                lastActivityAt: row["lastActivityAt"], hasAvatar: row["hasAvatar"])
         }
 
         // Contacts without a chat: saved contacts for `.all`, anyone reachable for `.contacts`.

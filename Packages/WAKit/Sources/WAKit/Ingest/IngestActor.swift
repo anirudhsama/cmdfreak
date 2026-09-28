@@ -238,7 +238,7 @@ public actor IngestActor {
                     mediaType: media.kind.mediaType, mimetype: media.mimetype, fileName: media.fileName,
                     width: media.width.map(Int.init), height: media.height.map(Int.init), durationSecs: media.durationSecs.map(Int.init),
                     jpegThumbnail: media.jpegThumbnail, waveform: nil, pageCount: media.pageCount.map(Int.init),
-                    isAnimated: media.kind == .gif ? true : nil, localPath: media.filePath, downloadState: .downloaded
+                    isAnimated: media.kind == .gif ? true : nil, sourcePath: media.filePath, downloadState: .downloaded
                 ).insert(db)
             }
             try db.execute(sql: "UPDATE chat SET lastActivityAt = MAX(COALESCE(lastActivityAt, 0), ?) WHERE jid = ?", arguments: [now, jid])
@@ -247,9 +247,9 @@ public actor IngestActor {
         }
     }
 
-    /// Swaps the optimistic row for the server's id and marks it sent.
-    /// `storedPath` is where the sent file now lives (the media store's copy); defaults to the source.
-    public func completeSend(localId: String, chatJid: String, result: BridgeSendResult, storedPath: String? = nil) throws {
+    /// Swaps the optimistic row for the server's id and marks it sent. `stored`: the sent file was
+    /// copied into the media store; otherwise it is downloaded like any other media.
+    public func completeSend(localId: String, chatJid: String, result: BridgeSendResult, stored: Bool = false) throws {
         let jid = canon(chatJid)
         try perform { db, cs in
             let newId = result.messageId
@@ -260,8 +260,6 @@ public actor IngestActor {
                 try self.applyMutation(db, jid, newId, .status(rank: MessageStatus.sent.rank), &cs)
                 return
             }
-            let localPath = try storedPath
-                ?? String.fetchOne(db, sql: "SELECT localPath FROM media WHERE chatJid = ? AND messageId = ?", arguments: [jid, localId])
             try db.execute(sql: """
                 UPDATE message SET id = ?, timestamp = ?, status = MAX(status, ?),
                     participant = COALESCE(?, participant), participantInferred = CASE WHEN ? IS NULL THEN participantInferred ELSE 0 END
@@ -269,8 +267,7 @@ public actor IngestActor {
                 """, arguments: [newId, result.timestamp, MessageStatus.sent.rank, result.message.participant, result.message.participant, jid, localId])
             if let media = result.message.media {
                 var rec = Self.mediaRecord(media, chatJid: jid, messageId: newId)
-                rec.localPath = localPath
-                rec.downloadState = localPath == nil ? .none : .downloaded
+                rec.downloadState = stored ? .downloaded : .none
                 try rec.upsert(db)
             }
             cs.replaced[jid, default: []].append((localId, newId))
@@ -307,18 +304,18 @@ public actor IngestActor {
         try perform { db, _ in for g in groups { try self.handleGroup(g, db) } }
     }
 
-    public func setAvatar(jid: String, path: String?, checkedAt: Int64) throws {
+    public func setAvatar(jid: String, present: Bool, checkedAt: Int64) throws {
         let jid = canon(jid)
         try perform { db, _ in
-            try db.execute(sql: "UPDATE chat SET avatarPath = ?, avatarCheckedAt = ? WHERE jid = ?", arguments: [path, checkedAt, jid])
+            try db.execute(sql: "UPDATE chat SET hasAvatar = ?, avatarCheckedAt = ? WHERE jid = ?", arguments: [present, checkedAt, jid])
         }
     }
 
-    public func setMediaState(chatJid: String, messageId: String, state: MediaDownloadState, localPath: String?) throws {
+    public func setMediaState(chatJid: String, messageId: String, state: MediaDownloadState) throws {
         let jid = canon(chatJid)
         try perform { db, cs in
-            try db.execute(sql: "UPDATE media SET downloadState = ?, localPath = COALESCE(?, localPath) WHERE chatJid = ? AND messageId = ?",
-                           arguments: [state, localPath, jid, messageId])
+            try db.execute(sql: "UPDATE media SET downloadState = ? WHERE chatJid = ? AND messageId = ?",
+                           arguments: [state, jid, messageId])
             if db.changesCount > 0 { cs.update(jid, messageId) }
         }
     }
@@ -451,7 +448,7 @@ public actor IngestActor {
         case .group(let group):
             try handleGroup(group, db)
         case .pictureChanged(let jid):
-            try db.execute(sql: "UPDATE chat SET avatarPath = NULL, avatarCheckedAt = NULL WHERE jid = ?", arguments: [canon(jid)])
+            try db.execute(sql: "UPDATE chat SET hasAvatar = 0, avatarCheckedAt = NULL WHERE jid = ?", arguments: [canon(jid)])
         case .historyChunk(let chunk):
             for a in chunk.aliases { try mergeAlias(lid: a.lid, pn: a.pn, db, &cs) }
             for c in chunk.contacts { try upsertContact(c, db) }
@@ -1017,7 +1014,7 @@ public actor IngestActor {
             incoming.append(IncomingNotice(
                 chatJid: jid, messageId: id, chatTitle: ChatListQuery.title(chat, contact, ownJid: own),
                 senderName: sender, kind: m.kind, text: m.text, timestamp: m.timestamp,
-                avatarPath: chat.avatarPath))
+                avatarURL: chat.avatarURL))
         }
         cs.notices += incoming.sorted { $0.timestamp < $1.timestamp }.map(NoticeEvent.incoming)
     }
@@ -1092,11 +1089,11 @@ public actor IngestActor {
                         pinnedAt = COALESCE(pinnedAt, ?),
                         mutedUntil = COALESCE(mutedUntil, ?),
                         archived = ?,
-                        avatarPath = COALESCE(avatarPath, ?),
+                        avatarCheckedAt = CASE WHEN hasAvatar THEN avatarCheckedAt ELSE NULL END,
                         lastActivityAt = MAX(COALESCE(lastActivityAt, 0), COALESCE(?, 0))
                     WHERE jid = ?
                     """, arguments: [lidChat.name, lidStateAt, lidStateAt, max(0, lidChat.unreadCount - overlap), lidChat.markedUnread, lidChat.pinnedAt,
-                                     lidChat.mutedUntil, pnChat.archived && lidChat.archived, lidChat.avatarPath,
+                                     lidChat.mutedUntil, pnChat.archived && lidChat.archived,
                                      lidChat.lastActivityAt, pn])
                 // Duplicates (same id under both JIDs), now reconciled into the PN copy, stay behind
                 // and are deleted with the LID chat.
@@ -1106,6 +1103,8 @@ public actor IngestActor {
             } else {
                 // ON UPDATE CASCADE carries messages, media, reactions, votes and tags along.
                 try db.execute(sql: "UPDATE chat SET jid = ? WHERE jid = ?", arguments: [pn, lid])
+                // The cached picture is named after the old JID; fetch it again under the new one.
+                try db.execute(sql: "UPDATE chat SET hasAvatar = 0, avatarCheckedAt = NULL WHERE jid = ?", arguments: [pn])
             }
             cs.reload.formUnion([lid, pn])
             cs.dirty.insert(pn)
@@ -1194,7 +1193,7 @@ public actor IngestActor {
             mediaType: m.mediaType, mimetype: m.mimetype, fileName: m.fileName,
             width: m.width.map(Int.init), height: m.height.map(Int.init), durationSecs: m.durationSecs.map(Int.init),
             jpegThumbnail: m.jpegThumbnail, waveform: m.waveform, pageCount: m.pageCount.map(Int.init),
-            isAnimated: m.isAnimated, localPath: nil, downloadState: .none
+            isAnimated: m.isAnimated, sourcePath: nil, downloadState: .none
         )
     }
 }

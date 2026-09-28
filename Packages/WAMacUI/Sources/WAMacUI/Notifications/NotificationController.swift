@@ -74,7 +74,7 @@ public final class NotificationController: NSObject, UNUserNotificationCenterDel
         content.threadIdentifier = notice.chatJid
         content.categoryIdentifier = Self.category
         content.userInfo = [Self.chatKey: notice.chatJid]
-        if let avatar = notice.avatarPath.flatMap(Self.avatarAttachment) { content.attachments = [avatar] }
+        if let avatar = notice.avatarURL.flatMap(Self.avatarAttachment) { content.attachments = [avatar] }
         let request = UNNotificationRequest(identifier: Self.identifier(notice.chatJid, notice.messageId), content: content, trigger: nil)
         do {
             try await center.add(request)
@@ -88,10 +88,10 @@ public final class NotificationController: NSObject, UNUserNotificationCenterDel
 
     /// The system takes ownership of (moves) an attachment's file, so it gets a temporary copy of the
     /// cached avatar. Shown as a thumbnail beside the text; the app icon stays.
-    private static func avatarAttachment(_ path: String) -> UNNotificationAttachment? {
+    private static func avatarAttachment(_ url: URL) -> UNNotificationAttachment? {
         let copy = FileManager.default.temporaryDirectory.appending(path: "notification-avatar-\(UUID().uuidString).jpg")
         do {
-            try FileManager.default.copyItem(at: URL(filePath: path), to: copy)
+            try FileManager.default.copyItem(at: url, to: copy)
             return try UNNotificationAttachment(identifier: "avatar", url: copy)
         } catch {
             try? FileManager.default.removeItem(at: copy)

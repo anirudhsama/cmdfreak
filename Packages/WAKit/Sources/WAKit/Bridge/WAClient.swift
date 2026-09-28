@@ -382,12 +382,12 @@ public final class WAClient: Sendable {
         await performSend(localId: localId, chatJid: chatJid) { [bridge, media] in
             defer { media.clearUploadProgress(chatJid: jid, localId: localId) }
             let result = try await bridge.sendMedia(chat: chatJid, media: outgoing, replyTo: replyKey, progress: relay)
-            guard let m = result.message.media else { return (result, nil) }
+            guard let m = result.message.media else { return (result, false) }
             let stored = await media.adoptSentFile(source, for: IngestActor.mediaRecord(m, chatJid: jid, messageId: result.messageId))
             if stored != nil, source.path.hasPrefix(OutgoingMediaPreparer.stagingDirectory.path) {
                 try? FileManager.default.removeItem(at: source)
             }
-            return (result, stored?.path)
+            return (result, stored != nil)
         }
     }
 
@@ -397,7 +397,7 @@ public final class WAClient: Sendable {
               item.message.status == .failed else { return }
         try await ingest.markPending(localId: localId, chatJid: chatJid)
         let text = item.message.text
-        if let m = item.media, let path = m.localPath {
+        if let m = item.media, let path = m.sourcePath {
             let outgoing = BridgeOutgoingMedia(
                 kind: item.message.kind.sendKind, filePath: path, mimetype: m.mimetype ?? "application/octet-stream",
                 fileName: m.fileName, caption: text, width: m.width.map(UInt32.init), height: m.height.map(UInt32.init),
@@ -412,13 +412,13 @@ public final class WAClient: Sendable {
     }
 
     private func performSend(localId: String, chatJid: String, _ send: @Sendable () async throws -> BridgeSendResult) async {
-        await performSend(localId: localId, chatJid: chatJid) { (try await send(), nil) }
+        await performSend(localId: localId, chatJid: chatJid) { (try await send(), false) }
     }
 
-    private func performSend(localId: String, chatJid: String, _ send: @Sendable () async throws -> (BridgeSendResult, String?)) async {
+    private func performSend(localId: String, chatJid: String, _ send: @Sendable () async throws -> (BridgeSendResult, Bool)) async {
         do {
-            let (result, storedPath) = try await send()
-            try await ingest.completeSend(localId: localId, chatJid: chatJid, result: result, storedPath: storedPath)
+            let (result, stored) = try await send()
+            try await ingest.completeSend(localId: localId, chatJid: chatJid, result: result, stored: stored)
         } catch {
             WAKit.log.error("send failed: \(error)")
             try? await ingest.failSend(localId: localId, chatJid: chatJid)

@@ -11,7 +11,7 @@ public struct IncomingNotice: Sendable, Hashable {
     public var text: String?
     public var timestamp: Int64
     /// The chat's cached avatar file, when it has been fetched.
-    public var avatarPath: String?
+    public var avatarURL: URL?
 }
 
 /// What the notification layer reacts to, published by `IngestActor` after each commit.
