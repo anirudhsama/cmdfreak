@@ -15,7 +15,9 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, N
     let chatList: ChatListViewController
     let chatListColumn: ChatListColumnViewController
     private var countsObservation: AnyDatabaseCancellable?
-    private let chatTitleView = ChatTitleView()
+    /// "Chats" (the rail filter) centered over the chat list, as WhatsApp for Mac does.
+    private let listTitleView = ChatTitleView(centered: true)
+    private var chatHeader: ChatHeaderModel { chatContainer.header }
     let split = RailSplitViewController()
     private var presenceTask: Task<Void, Never>?
     private var didPlaceDivider = false
@@ -49,6 +51,9 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, N
             defer: false
         )
         window.title = "BetterWA"
+        // The filter name is drawn centered over the chat list instead (`listTitleView`).
+        window.titleVisibility = .hidden
+        window.titlebarSeparatorStyle = .none
         // Compact: shorter titlebar, and the traffic lights sit 12pt from the corner, which keeps the
         // collapsed rail narrow with even padding around them.
         window.toolbarStyle = .unifiedCompact
@@ -66,6 +71,9 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, N
         listItem.maximumThickness = ChatListMetrics.maxWidth
         listItem.automaticallyAdjustsSafeAreaInsets = true
         let contentItem = NSSplitViewItem(viewController: chatContainer)
+        // No hard line under the toolbar: messages scroll under the floating header and fade out.
+        contentItem.titlebarSeparatorStyle = .none
+        listItem.titlebarSeparatorStyle = .none
         contentItem.minimumThickness = 400
         split.addSplitViewItem(sidebarItem)
         split.addSplitViewItem(listItem)
@@ -150,16 +158,18 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, N
         }
     }
 
-    /// The window title names the current filter (Mail-style, over the chat list); the chat's own
-    /// title sits over the conversation in `chatTitleView`.
+    /// The window title names the current filter (shown centered over the chat list); the chat's
+    /// avatar and name float at the top of the conversation (`ChatContainerViewController`).
     private func updateTitle() {
         guard let window else { return }
         window.title = railModel.selection.title
         let unread = railModel.badge(for: railModel.selection)
         window.subtitle = unread > 0 ? "\(unread) unread" : ""
+        listTitleView.set(title: window.title, subtitle: window.subtitle)
 
         guard let item = chatList.selectedItem ?? selectedChatJid.flatMap({ jid in chatList.items.first { $0.id == jid } }) else {
-            chatTitleView.set(title: "", subtitle: "")
+            chatHeader.state = nil
+            chatHeader.subtitle = ""
             return
         }
         var subtitle = ""
@@ -172,7 +182,8 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, N
         default:
             break
         }
-        chatTitleView.set(title: item.title, subtitle: subtitle)
+        chatHeader.state = chatList.rowState(for: item.id)
+        chatHeader.subtitle = subtitle
     }
 
     // MARK: Menu actions (responder chain targets)
@@ -393,15 +404,15 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, N
     // MARK: NSToolbarDelegate
 
     private static let newChatItem = NSToolbarItem.Identifier("newChat")
+    private static let listTitleItem = NSToolbarItem.Identifier("chatListTitle")
 
     private static let listTrackingSeparator = NSToolbarItem.Identifier("chatListTrackingSeparator")
-    private static let chatTitleItem = NSToolbarItem.Identifier("chatTitle")
 
     public func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
         // No sidebar toggle in the toolbar: in rail mode it would crowd the traffic lights. The
         // sidebar carries its own toggle at the bottom.
-        [.sidebarTrackingSeparator, .flexibleSpace, Self.newChatItem,
-         Self.listTrackingSeparator, Self.chatTitleItem, .flexibleSpace]
+        [.sidebarTrackingSeparator, .flexibleSpace, Self.listTitleItem, .flexibleSpace, Self.newChatItem,
+         Self.listTrackingSeparator, .flexibleSpace]
     }
 
     public func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
@@ -413,18 +424,20 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, N
         switch identifier {
         case Self.listTrackingSeparator:
             return NSTrackingSeparatorToolbarItem(identifier: identifier, splitView: split.splitView, dividerIndex: 1)
-        case Self.chatTitleItem:
+        case Self.listTitleItem:
             let item = NSToolbarItem(itemIdentifier: identifier)
-            item.view = chatTitleView
+            item.view = listTitleView
             item.isBordered = false
-            item.visibilityPriority = .high
+            item.visibilityPriority = .low
             return item
         case Self.newChatItem:
             let item = NSToolbarItem(itemIdentifier: identifier)
             item.label = "New Chat"
             item.toolTip = "New Chat (⌘N)"
-            item.image = NSImage(systemSymbolName: "square.and.pencil", accessibilityDescription: "New Chat")
+            item.image = NSImage(systemSymbolName: "plus", accessibilityDescription: "New Chat")
             item.isBordered = true
+            item.style = .prominent
+            item.backgroundTintColor = .systemGreen
             item.action = #selector(newChat(_:))
             item.target = nil
             return item

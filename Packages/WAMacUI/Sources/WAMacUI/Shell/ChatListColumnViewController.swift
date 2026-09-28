@@ -8,12 +8,15 @@ enum ChatListMetrics {
     static let maxWidth: CGFloat = 480
 }
 
-/// Middle column: the chat list, with a status footer that appears while history sync runs or
-/// the connection is down.
+/// Middle column: the chat list with a glass search field floating over its top (rows scroll under
+/// it, as in WhatsApp for Mac), and a status footer that appears while history sync runs or the
+/// connection is down.
 @MainActor
 final class ChatListColumnViewController: NSViewController {
     let chatList: ChatListViewController
     private let footer: NSHostingView<SidebarFooter>
+    let searchBar = ChatSearchBar()
+    private static let searchInsets = NSEdgeInsets(top: 4, left: 14, bottom: 8, right: 14)
     private let session: SessionService
     private var footerHeight: NSLayoutConstraint!
     private var token: ObservationToken?
@@ -32,9 +35,17 @@ final class ChatListColumnViewController: NSViewController {
     override func loadView() {
         let root = ShellRootView()
         let listView = chatList.view
-        for v in [listView, footer] {
+        for v in [listView, footer, searchBar] {
             v.translatesAutoresizingMaskIntoConstraints = false
             root.addSubview(v)
+        }
+        searchBar.onChange = { [weak self] text in self?.chatList.searchText = text }
+        searchBar.onCommit = { [weak self] in
+            guard let self else { return }
+            if chatList.selectedJid == nil || chatList.indexPath(for: chatList.selectedJid!) == nil {
+                chatList.selectAdjacent(offset: 1)
+            }
+            chatList.focus()
         }
         footer.sizingOptions = []
         footerHeight = footer.heightAnchor.constraint(equalToConstant: 0)
@@ -44,6 +55,11 @@ final class ChatListColumnViewController: NSViewController {
             // Under the toolbar: the scroll view insets its content and draws the scroll-edge glass.
             listView.topAnchor.constraint(equalTo: root.topAnchor),
             listView.bottomAnchor.constraint(equalTo: footer.topAnchor),
+
+            searchBar.topAnchor.constraint(equalTo: root.safeAreaLayoutGuide.topAnchor, constant: Self.searchInsets.top),
+            // The safe area excludes the part of the column the floating sidebar overlaps.
+            searchBar.leadingAnchor.constraint(equalTo: root.safeAreaLayoutGuide.leadingAnchor, constant: Self.searchInsets.left),
+            searchBar.trailingAnchor.constraint(equalTo: root.safeAreaLayoutGuide.trailingAnchor, constant: -Self.searchInsets.right),
 
             footer.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             footer.trailingAnchor.constraint(equalTo: root.trailingAnchor),
@@ -57,6 +73,12 @@ final class ChatListColumnViewController: NSViewController {
             let visible = SidebarFooter.status(for: session) != nil
             footerHeight.constant = visible ? 28 : 0
         }
+    }
+
+    override func viewDidLayout() {
+        super.viewDidLayout()
+        let insets = Self.searchInsets
+        chatList.topInset = view.safeAreaInsets.top + insets.top + ChatSearchBar.height + insets.bottom
     }
 }
 

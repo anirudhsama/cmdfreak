@@ -260,6 +260,14 @@ enum LayoutPlanner {
             }
         }
 
+        if outgoing {
+            text = text.map(inkOnBlue)
+            forwarded = forwarded.map(inkOnBlue)
+            quote = quote.map { .init(frame: $0.frame, name: C.onBlue($0.name), snippet: C.onBlue($0.snippet),
+                                      color: C.OnBlue.primary, targetId: $0.targetId) }
+            content = inkOnBlue(content)
+        }
+
         // Everything so far is bubble-relative; convert to row coordinates.
         var rowH = bubble.maxY
         let chipPlans = chips(item, ctx, bubble: bubble, outgoing: outgoing, bottom: &rowH)
@@ -430,6 +438,28 @@ enum LayoutPlanner {
         }
         bottom = y + M.reactionHeight + 2
         return chips
+    }
+
+    // MARK: - Outgoing ink
+
+    private static func inkOnBlue(_ l: LayoutPlan.Label) -> LayoutPlan.Label {
+        .init(text: C.onBlue(l.text), frame: l.frame)
+    }
+
+    private static func inkOnBlue(_ c: LayoutPlan.Content) -> LayoutPlan.Content {
+        switch c {
+        case .document(let d):
+            return .document(.init(frame: d.frame, name: C.onBlue(d.name), detail: C.onBlue(d.detail), fileName: d.fileName))
+        case .card(let k):
+            return .card(.init(kind: k.kind, frame: k.frame, title: C.onBlue(k.title), subtitle: C.onBlue(k.subtitle), symbol: k.symbol))
+        case .poll(let p):
+            return .poll(.init(
+                frame: p.frame, question: inkOnBlue(p.question),
+                options: p.options.map { .init(label: C.onBlue($0.label), count: C.onBlue($0.count), fraction: $0.fraction, mine: $0.mine, frame: $0.frame) },
+                footer: inkOnBlue(p.footer)))
+        default:
+            return c
+        }
     }
 
     // MARK: - Shifting helpers

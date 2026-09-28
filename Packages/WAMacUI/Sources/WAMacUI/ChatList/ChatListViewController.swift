@@ -20,7 +20,27 @@ final class ChatListViewController: NSViewController, NSCollectionViewDelegate {
         didSet { if filter != oldValue { startObserving() } }
     }
 
+    /// The rows on screen: the observed chats narrowed by `searchText`.
     private(set) var items: [ChatListItem] = []
+    private var observedItems: [ChatListItem] = []
+
+    /// Filters the list by chat name or phone number; empty shows everything.
+    var searchText = "" {
+        didSet { if searchText != oldValue { apply(observedItems) } }
+    }
+
+    /// Space above the first row: the toolbar plus whatever floats over the list (the search field).
+    var topInset: CGFloat = 0 {
+        didSet {
+            guard topInset != oldValue else { return }
+            let atTop = scrollView.contentView.bounds.minY <= -oldValue + 1
+            scrollView.contentInsets.top = topInset
+            if atTop {
+                scrollView.contentView.scroll(to: NSPoint(x: 0, y: -topInset))
+                scrollView.reflectScrolledClipView(scrollView.contentView)
+            }
+        }
+    }
     private(set) var selectedJid: String?
 
     private let collectionView = ChatListCollectionView()
@@ -61,7 +81,8 @@ final class ChatListViewController: NSViewController, NSCollectionViewDelegate {
         scrollView.hasVerticalScroller = true
         scrollView.autohidesScrollers = true
         scrollView.scrollerStyle = .overlay
-        scrollView.automaticallyAdjustsContentInsets = true
+        // Set by the column from its safe area plus the floating search field (`topInset`).
+        scrollView.automaticallyAdjustsContentInsets = false
         view = scrollView
 
         dataSource = NSCollectionViewDiffableDataSource<Int, String>(collectionView: collectionView) { [weak self] collectionView, indexPath, jid in
@@ -80,7 +101,7 @@ final class ChatListViewController: NSViewController, NSCollectionViewDelegate {
         let item = NSCollectionLayoutItem(layoutSize: size)
         let group = NSCollectionLayoutGroup.vertical(layoutSize: size, subitems: [item])
         let section = NSCollectionLayoutSection(group: group)
-        section.contentInsets = NSDirectionalEdgeInsets(top: 4, leading: 0, bottom: 12, trailing: 0)
+        section.contentInsets = NSDirectionalEdgeInsets(top: 0, leading: 0, bottom: 12, trailing: 0)
         return NSCollectionViewCompositionalLayout(section: section)
     }
 
@@ -99,6 +120,7 @@ final class ChatListViewController: NSViewController, NSCollectionViewDelegate {
     }
 
     private func apply(_ newItems: [ChatListItem]) {
+        observedItems = newItems
         var live: [String: ChatRowState] = [:]
         live.reserveCapacity(newItems.count)
         for item in newItems {
@@ -110,17 +132,17 @@ final class ChatListViewController: NSViewController, NSCollectionViewDelegate {
             }
         }
         states = live
-        items = newItems
+        items = Self.matching(newItems, searchText)
 
         let selectedWasVisible = isSelectedRowVisible
         var snapshot = NSDiffableDataSourceSnapshot<Int, String>()
         snapshot.appendSections([0])
-        snapshot.appendItems(newItems.map(\.id))
+        snapshot.appendItems(items.map(\.id))
         let animate = hasAppliedSnapshot && view.window != nil
         dataSource.apply(snapshot, animatingDifferences: animate)
         hasAppliedSnapshot = true
 
-        if let selectedJid, states[selectedJid] == nil {
+        if let selectedJid, indexPath(for: selectedJid) == nil {
             // Selected chat left this filter (archived, or the rail switched); keep the content side as is.
             collectionView.deselectAll(nil)
         } else {
@@ -130,6 +152,17 @@ final class ChatListViewController: NSViewController, NSCollectionViewDelegate {
                 collectionView.layoutSubtreeIfNeeded()
                 if !isSelectedRowVisible { revealSelectedRow() }
             }
+        }
+    }
+
+    private static func matching(_ items: [ChatListItem], _ query: String) -> [ChatListItem] {
+        let query = query.trimmingCharacters(in: .whitespaces)
+        guard !query.isEmpty else { return items }
+        let digits = query.filter(\.isNumber)
+        let isPhoneQuery = !digits.isEmpty && query.allSatisfy { $0.isNumber || " +-()".contains($0) }
+        return items.filter { item in
+            item.title.localizedStandardContains(query)
+                || (isPhoneQuery && (item.contact?.phone ?? item.chat.jid).contains(digits))
         }
     }
 

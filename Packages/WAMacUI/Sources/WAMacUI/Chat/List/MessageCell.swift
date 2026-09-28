@@ -82,6 +82,9 @@ final class MessageCell: NSTableCellView {
                 textView = v
                 return v
             }()
+            tv.linkTextAttributes = plan.outgoing
+                ? [.foregroundColor: C.OnBlue.primary, .underlineStyle: NSUnderlineStyle.single.rawValue, .cursor: NSCursor.pointingHand]
+                : [.foregroundColor: NSColor.linkColor, .cursor: NSCursor.pointingHand]
             tv.setContent(text.text, size: text.frame.size)
             tv.isHidden = false
         } else {
@@ -391,37 +394,32 @@ final class MessageCell: NSTableCellView {
 
     private func drawBubble(_ plan: LayoutPlan) {
         let r = plan.bubble
-        let path = NSBezierPath(roundedRect: r, xRadius: M.bubbleRadius, yRadius: M.bubbleRadius)
-        if plan.hasTail {
-            // A short tail on the last message of a run, tucked under the bottom corner.
-            let tail = NSBezierPath()
-            // Square off the bottom corner and flare it out; unioned with the rounded rect.
-            let R = M.bubbleRadius
-            if plan.outgoing {
-                tail.move(to: NSPoint(x: r.maxX - R, y: r.maxY - R))
-                tail.line(to: NSPoint(x: r.maxX - R, y: r.maxY))
-                tail.line(to: NSPoint(x: r.maxX + 6, y: r.maxY))
-                tail.curve(to: NSPoint(x: r.maxX, y: r.maxY - R),
-                           controlPoint1: NSPoint(x: r.maxX + 1, y: r.maxY - 1), controlPoint2: NSPoint(x: r.maxX, y: r.maxY - 5))
-            } else {
-                tail.move(to: NSPoint(x: r.minX + R, y: r.maxY - R))
-                tail.line(to: NSPoint(x: r.minX + R, y: r.maxY))
-                tail.line(to: NSPoint(x: r.minX - 6, y: r.maxY))
-                tail.curve(to: NSPoint(x: r.minX, y: r.maxY - R),
-                           controlPoint1: NSPoint(x: r.minX - 1, y: r.maxY - 1), controlPoint2: NSPoint(x: r.minX, y: r.maxY - 5))
-            }
-            tail.close()
-            // The outgoing tail is mirrored, so it winds opposite to the rounded rect; under the
-            // non-zero rule the overlap would cancel and punch a hole. Match the winding.
-            path.append(plan.outgoing ? tail.reversed : tail)
-        }
         (plan.outgoing ? C.outgoingBubble : C.incomingBubble).setFill()
-        path.fill()
+        NSBezierPath(roundedRect: r, xRadius: M.bubbleRadius, yRadius: M.bubbleRadius).fill()
+        guard plan.hasTail else { return }
+        // iMessage tail on the last message of a run: the bottom edge sweeps out past the corner
+        // into a point and curls back up into the side. Filled separately (the colors are opaque).
+        let dir: CGFloat = plan.outgoing ? 1 : -1
+        let edge = plan.outgoing ? r.maxX : r.minX
+        let b = r.maxY
+        let tail = NSBezierPath()
+        tail.move(to: NSPoint(x: edge - dir * 14, y: b - 12))
+        tail.line(to: NSPoint(x: edge, y: b - 16))
+        tail.curve(to: NSPoint(x: edge + dir * 6, y: b),
+                   controlPoint1: NSPoint(x: edge, y: b - 6), controlPoint2: NSPoint(x: edge + dir * 2, y: b - 1))
+        tail.curve(to: NSPoint(x: edge - dir * 10, y: b - 3),
+                   controlPoint1: NSPoint(x: edge + dir * 1, y: b + 0.5), controlPoint2: NSPoint(x: edge - dir * 5, y: b))
+        tail.close()
+        tail.fill()
     }
+
+    /// Outgoing bubbles are solid blue; everything drawn inside them uses white ink.
+    private var onBlue: Bool { plan?.outgoing == true && plan?.shape == .bubble }
+    private var well: NSColor { onBlue ? C.OnBlue.well : C.quoteBackground }
 
     private func drawQuote(_ q: LayoutPlan.Quote) {
         let path = NSBezierPath(roundedRect: q.frame, xRadius: M.quoteRadius, yRadius: M.quoteRadius)
-        C.quoteBackground.setFill()
+        well.setFill()
         path.fill()
         NSGraphicsContext.saveGraphicsState()
         path.addClip()
@@ -494,7 +492,7 @@ final class MessageCell: NSTableCellView {
 
     private func drawDocument(_ d: LayoutPlan.Document, item: MessageItem) {
         let f = d.frame
-        NSBezierPath(roundedRect: f, xRadius: 8, yRadius: 8).fill(with: C.quoteBackground)
+        NSBezierPath(roundedRect: f, xRadius: 8, yRadius: 8).fill(with: well)
         let icon = Self.icon(forFileName: d.fileName, mimetype: item.media?.mimetype)
         icon.draw(in: NSRect(x: f.minX + 8, y: f.minY + 10, width: 36, height: 36), from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
         let downloaded = item.media?.downloadState == .downloaded && item.media?.localPath != nil
@@ -534,7 +532,11 @@ final class MessageCell: NSTableCellView {
             let h = max(3, CGFloat(v) * 24)
             let x = waveX + CGFloat(i) * step
             let played = Double(i) / Double(max(1, count)) < progress
-            (played ? NSColor.controlAccentColor : NSColor.tertiaryLabelColor).setFill()
+            if onBlue {
+                (played ? C.OnBlue.primary : C.OnBlue.tertiary).setFill()
+            } else {
+                (played ? NSColor.controlAccentColor : NSColor.tertiaryLabelColor).setFill()
+            }
             NSBezierPath(roundedRect: NSRect(x: x, y: midY - h / 2, width: barW, height: h), xRadius: 1, yRadius: 1).fill()
         }
         let elapsedText: String
@@ -543,7 +545,7 @@ final class MessageCell: NSTableCellView {
         } else {
             elapsedText = a.durationText
         }
-        let ta: [NSAttributedString.Key: Any] = [.font: C.cardSecondary, .foregroundColor: NSColor.secondaryLabelColor]
+        let ta: [NSAttributedString.Key: Any] = [.font: C.cardSecondary, .foregroundColor: onBlue ? C.OnBlue.secondary : NSColor.secondaryLabelColor]
         NSAttributedString(string: elapsedText, attributes: ta).draw(at: NSPoint(x: waveX, y: f.minY + 32))
         if a.isVoice {
             let mic = NSImage(systemSymbolName: "mic.fill", accessibilityDescription: nil)?
@@ -552,8 +554,8 @@ final class MessageCell: NSTableCellView {
         }
         if let state {
             let rect = NSRect(x: f.maxX - rateW + 2, y: f.midY - 11, width: rateW - 4, height: 22)
-            NSBezierPath(roundedRect: rect, xRadius: 11, yRadius: 11).fill(with: C.quoteBackground)
-            let label = NSAttributedString(string: Self.rateLabel(state.rate), attributes: [.font: NSFont.systemFont(ofSize: 10.5, weight: .semibold), .foregroundColor: NSColor.labelColor])
+            NSBezierPath(roundedRect: rect, xRadius: 11, yRadius: 11).fill(with: well)
+            let label = NSAttributedString(string: Self.rateLabel(state.rate), attributes: [.font: NSFont.systemFont(ofSize: 10.5, weight: .semibold), .foregroundColor: onBlue ? C.OnBlue.primary : NSColor.labelColor])
             let w = label.size().width
             label.draw(at: NSPoint(x: rect.midX - w / 2, y: rect.minY + 4))
         }
@@ -565,7 +567,7 @@ final class MessageCell: NSTableCellView {
 
     private func drawCard(_ c: LayoutPlan.Card) {
         let f = c.frame
-        NSBezierPath(roundedRect: f, xRadius: 8, yRadius: 8).fill(with: C.quoteBackground)
+        NSBezierPath(roundedRect: f, xRadius: 8, yRadius: 8).fill(with: well)
         drawGlyphCircle(center: NSPoint(x: f.minX + 26, y: f.midY), symbol: c.symbol, diameter: 34, tinted: true)
         c.title.draw(with: NSRect(x: f.minX + 52, y: f.minY + 11, width: f.width - 62, height: 17), options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine])
         c.subtitle.draw(with: NSRect(x: f.minX + 52, y: f.minY + 31, width: f.width - 62, height: 15), options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine])
@@ -575,12 +577,12 @@ final class MessageCell: NSTableCellView {
         p.question.text.draw(in: p.question.frame)
         for o in p.options {
             let bar = o.frame
-            NSBezierPath(roundedRect: bar, xRadius: 6, yRadius: 6).fill(with: C.quoteBackground)
+            NSBezierPath(roundedRect: bar, xRadius: 6, yRadius: 6).fill(with: well)
             if o.fraction > 0 {
                 let fill = NSRect(x: bar.minX, y: bar.minY, width: bar.width * o.fraction, height: bar.height)
                 NSGraphicsContext.saveGraphicsState()
                 NSBezierPath(roundedRect: bar, xRadius: 6, yRadius: 6).addClip()
-                NSColor.controlAccentColor.withAlphaComponent(o.mine ? 0.35 : 0.18).setFill()
+                (onBlue ? NSColor.white : NSColor.controlAccentColor).withAlphaComponent(o.mine ? 0.35 : 0.18).setFill()
                 fill.fill()
                 NSGraphicsContext.restoreGraphicsState()
             }
@@ -594,6 +596,7 @@ final class MessageCell: NSTableCellView {
     private func drawMeta(_ meta: LayoutPlan.Meta, plan: LayoutPlan) {
         var textAttrs = C.metaAttributes
         var tickColor = NSColor.secondaryLabelColor
+        var readColor = C.readTick
         if meta.overlay {
             let pill = meta.frame.insetBy(dx: -6, dy: -2)
             NSBezierPath(roundedRect: pill, xRadius: pill.height / 2, yRadius: pill.height / 2).fill(with: NSColor.black.withAlphaComponent(0.45))
@@ -602,11 +605,16 @@ final class MessageCell: NSTableCellView {
         } else if plan.shape == .bare {
             let pill = meta.frame.insetBy(dx: -5, dy: -1)
             NSBezierPath(roundedRect: pill, xRadius: pill.height / 2, yRadius: pill.height / 2).fill(with: C.systemPill)
+        } else if onBlue {
+            // Blue ticks would vanish on the blue bubble: read is solid white, the rest are faded.
+            textAttrs[.foregroundColor] = C.OnBlue.secondary
+            tickColor = C.OnBlue.tertiary
+            readColor = C.OnBlue.primary
         }
         NSAttributedString(string: meta.text, attributes: textAttrs).draw(at: NSPoint(x: meta.frame.minX, y: meta.frame.minY))
         if let status = meta.status {
             let tick = NSRect(x: meta.frame.maxX - M.tickWidth, y: meta.frame.minY + 1, width: M.tickWidth, height: 11)
-            ReceiptDrawing.draw(status, in: tick, color: tickColor)
+            ReceiptDrawing.draw(status, in: tick, color: tickColor, readColor: readColor)
         }
     }
 
@@ -645,7 +653,8 @@ final class MessageCell: NSTableCellView {
 
     private func drawGlyphCircle(center: NSPoint, symbol: String, diameter: CGFloat, tinted: Bool = false) {
         let rect = NSRect(x: center.x - diameter / 2, y: center.y - diameter / 2, width: diameter, height: diameter)
-        NSBezierPath(ovalIn: rect).fill(with: tinted ? NSColor.controlAccentColor : NSColor.black.withAlphaComponent(0.5))
+        let tint = onBlue ? C.OnBlue.well : NSColor.controlAccentColor
+        NSBezierPath(ovalIn: rect).fill(with: tinted ? tint : NSColor.black.withAlphaComponent(0.5))
         let cfg = NSImage.SymbolConfiguration(pointSize: diameter * 0.4, weight: .semibold)
         guard let img = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?.withSymbolConfiguration(cfg) else { return }
         let tinted = img.tinted(.white)
@@ -771,7 +780,7 @@ final class MessageCell: NSTableCellView {
 
 /// Clock / one tick / two ticks / blue ticks, drawn as paths (SF Symbols has no double checkmark).
 enum ReceiptDrawing {
-    static func draw(_ status: MessageStatus, in rect: NSRect, color: NSColor) {
+    static func draw(_ status: MessageStatus, in rect: NSRect, color: NSColor, readColor: NSColor = MessageTextConfiguration.readTick) {
         switch status {
         case .pending:
             let cfg = NSImage.SymbolConfiguration(pointSize: 9, weight: .regular)
@@ -787,8 +796,8 @@ enum ReceiptDrawing {
             tick(at: rect.maxX - 13, y: rect.minY, color: color)
             tick(at: rect.maxX - 9, y: rect.minY, color: color)
         case .read, .played:
-            tick(at: rect.maxX - 13, y: rect.minY, color: MessageTextConfiguration.readTick)
-            tick(at: rect.maxX - 9, y: rect.minY, color: MessageTextConfiguration.readTick)
+            tick(at: rect.maxX - 13, y: rect.minY, color: readColor)
+            tick(at: rect.maxX - 9, y: rect.minY, color: readColor)
         }
     }
 

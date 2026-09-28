@@ -5,11 +5,11 @@ import AppKit
 enum MessageTextConfiguration {
     // MARK: Fonts
 
-    nonisolated(unsafe) static let body = NSFont.systemFont(ofSize: 13)
-    nonisolated(unsafe) static let bodyBold = NSFont.boldSystemFont(ofSize: 13)
+    nonisolated(unsafe) static let body = NSFont.systemFont(ofSize: 14)
+    nonisolated(unsafe) static let bodyBold = NSFont.boldSystemFont(ofSize: 14)
     nonisolated(unsafe) static let bodyItalic: NSFont = NSFontManager.shared.convert(body, toHaveTrait: .italicFontMask)
     nonisolated(unsafe) static let bodyBoldItalic: NSFont = NSFontManager.shared.convert(bodyBold, toHaveTrait: .italicFontMask)
-    nonisolated(unsafe) static let mono = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+    nonisolated(unsafe) static let mono = NSFont.monospacedSystemFont(ofSize: 13, weight: .regular)
     nonisolated(unsafe) static let bigEmoji = NSFont.systemFont(ofSize: 36)
     nonisolated(unsafe) static let sender = NSFont.systemFont(ofSize: 12, weight: .semibold)
     nonisolated(unsafe) static let meta = NSFont.systemFont(ofSize: 10.5)
@@ -38,16 +38,43 @@ enum MessageTextConfiguration {
 
     // MARK: Colors
 
-    /// Subtle outgoing tint that adapts to the appearance; the only non-semantic color in the chat view.
+    /// iMessage-style bubbles: solid blue with white ink for outgoing, opaque gray for incoming.
+    /// Both are opaque so the tail can be filled as a separate shape without a visible seam.
     static let outgoingBubble = NSColor(name: "outgoingBubble") { appearance in
         appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
-            ? NSColor(srgbRed: 0.10, green: 0.36, blue: 0.30, alpha: 1)
-            : NSColor(srgbRed: 0.85, green: 0.98, blue: 0.83, alpha: 1)
+            ? NSColor(srgbRed: 0.04, green: 0.52, blue: 1.0, alpha: 1)
+            : NSColor(srgbRed: 0.11, green: 0.55, blue: 1.0, alpha: 1)
     }
     static let incomingBubble = NSColor(name: "incomingBubble") { appearance in
         appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
-            ? NSColor(white: 1, alpha: 0.10)
-            : NSColor(white: 0, alpha: 0.06)
+            ? NSColor(srgbRed: 0.23, green: 0.23, blue: 0.24, alpha: 1)
+            : NSColor(srgbRed: 0.91, green: 0.91, blue: 0.92, alpha: 1)
+    }
+
+    /// Ink inside an outgoing (blue) bubble.
+    enum OnBlue {
+        static let primary = NSColor.white
+        static let secondary = NSColor.white.withAlphaComponent(0.78)
+        static let tertiary = NSColor.white.withAlphaComponent(0.6)
+        /// Quote, document, card and poll wells.
+        static let well = NSColor.white.withAlphaComponent(0.2)
+    }
+
+    /// Re-inks an attributed string for an outgoing bubble: every color becomes white (secondary
+    /// tones keep a lighter white), and links are underlined since they can no longer be blue.
+    static func onBlue(_ s: NSAttributedString) -> NSAttributedString {
+        let m = NSMutableAttributedString(attributedString: s)
+        let all = NSRange(location: 0, length: m.length)
+        m.addAttribute(.foregroundColor, value: OnBlue.primary, range: all)
+        s.enumerateAttribute(.foregroundColor, in: all) { value, range, _ in
+            guard let c = value as? NSColor else { return }
+            if c == .secondaryLabelColor { m.addAttribute(.foregroundColor, value: OnBlue.secondary, range: range) }
+            if c == .tertiaryLabelColor { m.addAttribute(.foregroundColor, value: OnBlue.tertiary, range: range) }
+        }
+        s.enumerateAttribute(.link, in: all) { value, range, _ in
+            if value != nil { m.addAttribute(.underlineStyle, value: NSUnderlineStyle.single.rawValue, range: range) }
+        }
+        return m
     }
     static let quoteBackground = NSColor(name: "quoteBackground") { appearance in
         appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
@@ -79,9 +106,9 @@ enum MessageTextConfiguration {
         static let bubbleMaxWidthFraction: CGFloat = 0.72
         static let bubbleMaxWidth: CGFloat = 520
         static let bubbleMinWidth: CGFloat = 60
-        static let bubblePaddingH: CGFloat = 9
-        static let bubblePaddingV: CGFloat = 6
-        static let bubbleRadius: CGFloat = 12
+        static let bubblePaddingH: CGFloat = 12
+        static let bubblePaddingV: CGFloat = 7
+        static let bubbleRadius: CGFloat = 17
         static let groupGap: CGFloat = 2
         static let messageGap: CGFloat = 10
         static let senderHeight: CGFloat = 16

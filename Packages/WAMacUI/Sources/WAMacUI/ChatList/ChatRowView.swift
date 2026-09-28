@@ -1,54 +1,54 @@
 import SwiftUI
 
 enum ChatRowMetrics {
-    static let height: CGFloat = 64
-    static let avatarSize: CGFloat = 40
+    static let height: CGFloat = 72
+    static let avatarSize: CGFloat = 48
+    static let avatarSpacing: CGFloat = 12
     static let horizontalInset: CGFloat = 8
-    static let selectionCornerRadius: CGFloat = 8
+    static let contentPadding: CGFloat = 10
+    static let selectionCornerRadius: CGFloat = 10
+    /// Where the title column starts; separators are inset to line up with it.
+    static let textLeading: CGFloat = horizontalInset + contentPadding + avatarSize + avatarSpacing
 }
 
-/// One chat row. Reads only precomputed fields from `ChatRowState`.
+/// One chat row, laid out like WhatsApp for Mac: large avatar, name and time on the first line,
+/// a one-line preview with pin, mute and unread accessories on the second, and a hairline
+/// separator that starts at the text column. Reads only precomputed fields from `ChatRowState`.
 struct ChatRowView: View {
     let state: ChatRowState
     let appearance: ChatListAppearance
 
     private var emphasized: Bool { state.isSelected && appearance.isEmphasized }
+    private var accessoryColor: Color { emphasized ? Color.white.opacity(0.8) : Color(nsColor: .tertiaryLabelColor) }
 
     var body: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: ChatRowMetrics.avatarSpacing) {
             AvatarView(state: state)
                 .frame(width: ChatRowMetrics.avatarSize, height: ChatRowMetrics.avatarSize)
 
-            // Top-aligned at a fixed offset so one- and two-line previews keep titles level.
-            VStack(alignment: .leading, spacing: 2) {
-                HStack(alignment: .firstTextBaseline, spacing: 4) {
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
                     Text(state.title)
-                        .font(.system(size: 13, weight: .semibold))
+                        .font(.system(size: 14, weight: .semibold))
                         .lineLimit(1)
                         .truncationMode(.tail)
-                    if state.isMuted {
-                        Image(systemName: "bell.slash.fill")
-                            .font(.system(size: 9))
-                            .foregroundStyle(emphasized ? Color.white.opacity(0.8) : Color(nsColor: .tertiaryLabelColor))
-                    }
                     Spacer(minLength: 6)
                     Text(state.time)
-                        .font(.system(size: 11))
-                        .foregroundStyle(emphasized ? .white.opacity(0.85) : (state.showsUnread ? .primary : .secondary))
+                        .font(.system(size: 12))
+                        .foregroundStyle(timeColor)
                         .monospacedDigit()
                 }
-                HStack(alignment: .top, spacing: 6) {
+                HStack(alignment: .center, spacing: 6) {
                     preview
-                        .font(.system(size: 12))
-                        .lineLimit(2)
+                        .font(.system(size: 13))
+                        .lineLimit(1)
+                        .truncationMode(.tail)
                         .frame(maxWidth: .infinity, alignment: .leading)
                     trailingAccessories
                 }
             }
-            .frame(maxHeight: .infinity, alignment: .top)
-            .padding(.top, 11)
         }
-        .padding(.horizontal, 10)
+        .padding(.horizontal, ChatRowMetrics.contentPadding)
         .frame(height: ChatRowMetrics.height)
         .foregroundStyle(emphasized ? .white : .primary)
         .background {
@@ -57,15 +57,28 @@ struct ChatRowView: View {
                     .fill(appearance.isEmphasized ? Color.accentColor : Color(nsColor: .unemphasizedSelectedContentBackgroundColor))
             }
         }
+        .overlay(alignment: .bottom) {
+            if !state.isSelected {
+                Rectangle()
+                    .fill(Color(nsColor: .separatorColor))
+                    .frame(height: 1 / (NSScreen.main?.backingScaleFactor ?? 2))
+                    .padding(.leading, ChatRowMetrics.textLeading - ChatRowMetrics.horizontalInset)
+                    .padding(.trailing, ChatRowMetrics.contentPadding)
+            }
+        }
         .padding(.horizontal, ChatRowMetrics.horizontalInset)
         .contentShape(Rectangle())
+    }
+
+    private var timeColor: Color {
+        if emphasized { return .white.opacity(0.85) }
+        return state.unreadCount > 0 && !state.isMuted ? Color(nsColor: .systemGreen) : .secondary
     }
 
     @ViewBuilder
     private var preview: some View {
         if state.isTyping {
             Text("typing…")
-                .italic()
                 .foregroundStyle(emphasized ? .white : Color(nsColor: .systemGreen))
         } else {
             previewText
@@ -81,11 +94,17 @@ struct ChatRowView: View {
 
     @ViewBuilder
     private var trailingAccessories: some View {
-        HStack(spacing: 4) {
+        HStack(spacing: 6) {
+            if state.isMuted {
+                Image(systemName: "bell.slash.fill")
+                    .font(.system(size: 12))
+                    .foregroundStyle(accessoryColor)
+            }
             if state.isPinned {
                 Image(systemName: "pin.fill")
-                    .font(.system(size: 9))
-                    .foregroundStyle(emphasized ? Color.white.opacity(0.8) : Color(nsColor: .tertiaryLabelColor))
+                    .font(.system(size: 12))
+                    .rotationEffect(.degrees(45))
+                    .foregroundStyle(accessoryColor)
             }
             if state.unreadCount > 0 {
                 Text(state.unreadCount > 999 ? "999+" : String(state.unreadCount))
@@ -93,22 +112,28 @@ struct ChatRowView: View {
                     .monospacedDigit()
                     .foregroundStyle(emphasized ? Color.accentColor : .white)
                     .padding(.horizontal, 6)
-                    .frame(minWidth: 18, minHeight: 18)
-                    .background(Capsule().fill(emphasized ? Color.white : Color(nsColor: .systemGreen)))
+                    .frame(minWidth: 20, minHeight: 20)
+                    .background(Capsule().fill(badgeColor))
             } else if state.markedUnread {
                 Circle()
-                    .fill(emphasized ? Color.white : Color(nsColor: .systemGreen))
-                    .frame(width: 9, height: 9)
-                    .padding(.vertical, 4)
+                    .fill(badgeColor)
+                    .frame(width: 12, height: 12)
+                    .padding(4)
             }
         }
-        .padding(.top, 1)
+    }
+
+    private var badgeColor: Color {
+        if emphasized { return .white }
+        return state.isMuted ? Color(nsColor: .tertiaryLabelColor) : Color(nsColor: .systemGreen)
     }
 }
 
 /// Cached avatar image, or initials on a stable per-chat tint.
 struct AvatarView: View {
     let state: ChatRowState
+    /// Diameter the caller frames it at; glyphs and initials scale with it.
+    var size: CGFloat = ChatRowMetrics.avatarSize
 
     var body: some View {
         if let avatar = state.avatar {
@@ -121,7 +146,7 @@ struct AvatarView: View {
                 .fill(.quaternary)
                 .overlay {
                     Image(systemName: "person.2.fill")
-                        .font(.system(size: 15))
+                        .font(.system(size: size * 0.375))
                         .foregroundStyle(.secondary)
                 }
         } else {
@@ -130,11 +155,11 @@ struct AvatarView: View {
                 .overlay {
                     if state.initials.isEmpty {
                         Image(systemName: "person.fill")
-                            .font(.system(size: 18))
+                            .font(.system(size: size * 0.46))
                             .foregroundStyle(.white)
                     } else {
                         Text(state.initials)
-                            .font(.system(size: 15, weight: .medium))
+                            .font(.system(size: size * 0.375, weight: .medium))
                             .foregroundStyle(.white)
                     }
                 }
