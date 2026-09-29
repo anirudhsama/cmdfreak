@@ -27,7 +27,10 @@ final class ChatRowState: Identifiable {
     private(set) var previewIsPlaceholder = false
     private(set) var avatarURL: URL?
     var avatar: CGImage?
-    var isTyping = false
+    /// Who is typing or recording here; shown in the row, the header and the message area.
+    var typing: ChatTyping?
+    /// "typing…", "Alice is typing…", "recording audio…"; replaces the preview and the header subtitle.
+    var activity: String? { typing?.text }
     var isSelected = false
 
     var showsUnread: Bool { unreadCount > 0 || markedUnread }
@@ -92,6 +95,34 @@ final class ChatRowState: Identifiable {
         previewSymbol = symbol
         previewText = text.isEmpty ? label : text
         previewIsPlaceholder = text.isEmpty && preview.kind != .text
+    }
+}
+
+/// Who is typing or recording in a chat. `senders` is empty in a one-to-one chat, where the chat
+/// itself names the person.
+struct ChatTyping: Equatable {
+    struct Sender: Equatable {
+        var jid: String
+        var name: String
+    }
+
+    var senders: [Sender]
+    var recording: Bool
+
+    /// "Priya", "Dev and Priya", "3 people"; nil in a one-to-one chat.
+    var who: String? {
+        switch senders.count {
+        case 0: nil
+        case 1: senders[0].name
+        case 2: "\(senders[0].name) and \(senders[1].name)"
+        default: "\(senders.count) people"
+        }
+    }
+
+    var text: String {
+        let verb = recording ? "recording audio…" : "typing…"
+        guard let who else { return verb }
+        return "\(who) \(senders.count == 1 ? "is" : "are") \(verb)"
     }
 }
 

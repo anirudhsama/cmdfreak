@@ -402,21 +402,28 @@ final class MessageCell: NSTableCellView {
         (plan.outgoing ? C.outgoingBubble : C.incomingBubble).setFill()
         NSBezierPath(roundedRect: r, xRadius: M.bubbleRadius, yRadius: M.bubbleRadius).fill()
         guard plan.hasTail else { return }
-        // iMessage tail on the last message of a run: the bottom edge sweeps out past the corner
-        // into a point and curls back up into the side. Filled separately (the colors are opaque).
-        let dir: CGFloat = plan.outgoing ? 1 : -1
-        let edge = plan.outgoing ? r.maxX : r.minX
+        Self.tailPath(for: r, outgoing: plan.outgoing).fill()
+    }
+
+    /// iMessage tail on the last message of a run: the bottom edge sweeps out past the corner into a
+    /// point and curls back up into the side. Filled separately (the colors are opaque). Flipped
+    /// coordinates; reaches `tailOverhang` past the bubble's side.
+    static func tailPath(for r: CGRect, outgoing: Bool) -> NSBezierPath {
+        let dir: CGFloat = outgoing ? 1 : -1
+        let edge = outgoing ? r.maxX : r.minX
         let b = r.maxY
         let tail = NSBezierPath()
         tail.move(to: NSPoint(x: edge - dir * 14, y: b - 12))
         tail.line(to: NSPoint(x: edge, y: b - 16))
-        tail.curve(to: NSPoint(x: edge + dir * 6, y: b),
+        tail.curve(to: NSPoint(x: edge + dir * tailOverhang, y: b),
                    controlPoint1: NSPoint(x: edge, y: b - 6), controlPoint2: NSPoint(x: edge + dir * 2, y: b - 1))
         tail.curve(to: NSPoint(x: edge - dir * 10, y: b - 3),
                    controlPoint1: NSPoint(x: edge + dir * 1, y: b + 0.5), controlPoint2: NSPoint(x: edge - dir * 5, y: b))
         tail.close()
-        tail.fill()
+        return tail
     }
+
+    static let tailOverhang: CGFloat = 6
 
     /// Quote, document, card and poll wells.
     private var well: NSColor { C.quoteBackground }

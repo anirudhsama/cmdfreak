@@ -15,6 +15,7 @@ public final class ChatContainerViewController: NSViewController {
     /// aligned with the message bubbles' leading edge.
     let header = ChatHeaderModel()
     private lazy var headerView = ChatHeaderView(model: header)
+    private var typingObservation: ObservationToken?
 
     public init(client: WAClient) {
         self.client = client
@@ -56,6 +57,12 @@ public final class ChatContainerViewController: NSViewController {
         ])
         headerView.isHidden = true
         view = root
+
+        // The header follows the open chat's row state; the typing bubble follows the same state.
+        typingObservation = WAMacUI.observe { [weak self] in
+            guard let self else { return }
+            chatView.setTyping(header.state?.typing)
+        }
     }
 
     /// Shows `chatJid`, or the empty state for `nil`.

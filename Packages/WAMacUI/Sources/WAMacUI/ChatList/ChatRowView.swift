@@ -79,8 +79,8 @@ struct ChatRowView: View {
 
     @ViewBuilder
     private var preview: some View {
-        if state.isTyping {
-            Text("typing…")
+        if let activity = state.activity {
+            Text(activity)
                 .foregroundStyle(emphasized ? .white : Color.waGreen)
         } else {
             previewText

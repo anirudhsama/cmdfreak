@@ -48,7 +48,8 @@ final class ChatListViewController: NSViewController, NSCollectionViewDelegate {
     private let avatarLoader: AvatarLoader
     private var observation: AnyDatabaseCancellable?
     private var hasAppliedSnapshot = false
-    private var typingTimers: [String: Task<Void, Never>] = [:]
+    /// Chat → sender → who is typing or recording there.
+    private var typists: [String: [String: Typist]] = [:]
 
     init(client: WAClient, filter: ChatFilter) {
         self.client = client
@@ -124,7 +125,9 @@ final class ChatListViewController: NSViewController, NSCollectionViewDelegate {
                 state.apply(item)
                 live[item.id] = state
             } else {
-                live[item.id] = ChatRowState(item: item)
+                let state = ChatRowState(item: item)
+                state.typing = typing(in: item.id, isGroup: state.isGroup)
+                live[item.id] = state
             }
         }
         states = live
@@ -267,18 +270,32 @@ final class ChatListViewController: NSViewController, NSCollectionViewDelegate {
 
     // MARK: Typing
 
-    func setTyping(chatJid: String, _ typing: Bool) {
-        typingTimers[chatJid]?.cancel()
-        typingTimers[chatJid] = nil
-        states[chatJid]?.isTyping = typing
-        guard typing else { return }
-        // WhatsApp does not always send `paused`; expire on our own.
-        typingTimers[chatJid] = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(8))
-            guard !Task.isCancelled else { return }
-            self?.states[chatJid]?.isTyping = false
-            self?.typingTimers[chatJid] = nil
+    func setChatState(chatJid: String, senderJid: String, senderName: String?, _ chatState: ChatState) {
+        typists[chatJid]?[senderJid]?.expiry.cancel()
+        if chatState == .paused {
+            typists[chatJid]?[senderJid] = nil
+            if typists[chatJid]?.isEmpty == true { typists[chatJid] = nil }
+        } else {
+            // WhatsApp does not always send `paused`; expire on our own.
+            let expiry = Task { [weak self] in
+                try? await Task.sleep(for: .seconds(8))
+                guard !Task.isCancelled else { return }
+                self?.setChatState(chatJid: chatJid, senderJid: senderJid, senderName: nil, .paused)
+            }
+            let name = senderName ?? JID.phoneDisplay(senderJid) ?? "Someone"
+            typists[chatJid, default: [:]][senderJid] = Typist(name: name, recording: chatState == .recording, expiry: expiry)
         }
+        if let state = states[chatJid] {
+            state.typing = typing(in: chatJid, isGroup: state.isGroup)
+        }
+    }
+
+    private func typing(in chatJid: String, isGroup: Bool) -> ChatTyping? {
+        guard let typists = typists[chatJid], !typists.isEmpty else { return nil }
+        let senders = isGroup
+            ? typists.map { ChatTyping.Sender(jid: $0.key, name: $0.value.name) }.sorted { $0.name < $1.name }
+            : []
+        return ChatTyping(senders: senders, recording: typists.values.allSatisfy(\.recording))
     }
 
     // MARK: NSCollectionViewDelegate
@@ -338,3 +355,9 @@ extension ChatListViewController {
     private var window: NSWindow? { view.window }
 }
 #endif
+
+private struct Typist {
+    var name: String
+    var recording: Bool
+    var expiry: Task<Void, Never>
+}
