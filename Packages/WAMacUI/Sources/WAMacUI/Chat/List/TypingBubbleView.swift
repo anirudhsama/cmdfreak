@@ -4,6 +4,8 @@ import AppKit
 /// under the newest message.
 final class TypingCell: NSView {
     let bubble = TypingBubbleView()
+    /// Group chats leave room for sender avatars, as incoming messages do.
+    var isGroupChat = false { didSet { if oldValue != isGroupChat { needsLayout = true } } }
 
     override var isFlipped: Bool { true }
 
@@ -19,8 +21,10 @@ final class TypingCell: NSView {
         super.layout()
         guard let typing = bubble.typing else { return }
         let size = TypingBubbleView.size(for: typing)
-        bubble.frame = CGRect(x: MessageTextConfiguration.Metrics.horizontalInset - MessageCell.tailOverhang,
-                              y: MessageTextConfiguration.Metrics.messageGap, width: size.width, height: size.height)
+        let M = MessageTextConfiguration.Metrics.self
+        let leading = M.horizontalInset + (isGroupChat ? M.groupAvatarIndent : 0)
+        bubble.frame = CGRect(x: leading - MessageCell.tailOverhang,
+                              y: M.messageGap, width: size.width, height: size.height)
     }
 }
 

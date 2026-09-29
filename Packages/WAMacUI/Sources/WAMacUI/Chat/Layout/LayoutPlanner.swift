@@ -41,7 +41,7 @@ enum LayoutPlanner {
         let label = LayoutPlan.Label(text: attr, frame: pill.insetBy(dx: M.systemPaddingH, dy: M.systemPaddingV))
         return LayoutPlan(
             id: item.id, width: ctx.width, rowHeight: pill.maxY + 2, outgoing: false, shape: .system, bubble: pill,
-            sender: nil, forwarded: nil, quote: nil, content: .none, text: label, meta: nil, reactions: [],
+            sender: nil, avatar: nil, forwarded: nil, quote: nil, content: .none, text: label, meta: nil, reactions: [],
             isFailed: false, hasTail: false)
     }
 
@@ -50,7 +50,9 @@ enum LayoutPlanner {
     private static func bubblePlan(_ item: MessageItem, _ ctx: RowContext) -> LayoutPlan {
         let m = item.message
         let outgoing = m.fromMe
-        let maxBubble = min(floor(ctx.width * M.bubbleMaxWidthFraction), M.bubbleMaxWidth)
+        let indent = ctx.isGroupChat && !outgoing ? M.groupAvatarIndent : 0
+        let leading = M.horizontalInset + indent
+        let maxBubble = min(floor((ctx.width - indent) * M.bubbleMaxWidthFraction), M.bubbleMaxWidth)
         let innerMax = maxBubble - 2 * M.bubblePaddingH
         let isSticker = m.kind == .sticker && !m.revoked
 
@@ -187,12 +189,13 @@ enum LayoutPlanner {
         if isSticker {
             let f = CGRect(x: 0, y: y + M.stickerSize + 2, width: metaW, height: M.metaHeight)
             meta = .init(frame: f, text: metaText, status: status, overlay: false)
-            let bubble = CGRect(x: outgoing ? ctx.width - M.horizontalInset - M.stickerSize : M.horizontalInset, y: y,
+            let bubble = CGRect(x: outgoing ? ctx.width - M.horizontalInset - M.stickerSize : leading, y: y,
                                 width: M.stickerSize, height: M.stickerSize)
             var rowH = f.maxY + 2
             let chips = chips(item, ctx, bubble: bubble, outgoing: outgoing, bottom: &rowH)
             return LayoutPlan(id: item.id, width: ctx.width, rowHeight: rowH, outgoing: outgoing, shape: .bare, bubble: bubble,
-                              sender: nil, forwarded: nil, quote: nil, content: content, text: nil,
+                              sender: nil, avatar: avatarPlan(item, ctx, bubble: bubble), forwarded: nil, quote: nil,
+                              content: shift(content, dx: bubble.minX, dy: 0), text: nil,
                               meta: shift(meta!, dx: bubble.minX + (outgoing ? M.stickerSize - metaW : 0), dy: 0),
                               reactions: chips, isFailed: m.status == .failed, hasTail: false)
         }
@@ -234,7 +237,7 @@ enum LayoutPlanner {
         bubbleW = min(bubbleW, maxBubble)
         var bubbleH = contentY + (hasMediaOnly ? M.mediaInset : M.bubblePaddingV)
         if case .media = content, mediaFrame != nil, hasMediaOnly { bubbleH = mediaFrame!.maxY + M.mediaInset }
-        let bubbleX = outgoing ? ctx.width - M.horizontalInset - bubbleW : M.horizontalInset
+        let bubbleX = outgoing ? ctx.width - M.horizontalInset - bubbleW : leading
         let bubble = CGRect(x: bubbleX, y: bubbleTop, width: bubbleW, height: bubbleH).integral
 
         // Right-align meta within the bubble (or the media overlay).
@@ -267,6 +270,7 @@ enum LayoutPlanner {
         return LayoutPlan(
             id: item.id, width: ctx.width, rowHeight: ceil(rowH), outgoing: outgoing, shape: .bubble, bubble: bubble,
             sender: sender.map { shift($0, dx: bubble.minX, dy: bubble.minY) },
+            avatar: avatarPlan(item, ctx, bubble: bubble),
             forwarded: forwarded.map { shift($0, dx: bubble.minX, dy: bubble.minY) },
             quote: quote.map { shift($0, dx: bubble.minX, dy: bubble.minY) },
             content: shift(content, dx: bubble.minX, dy: bubble.minY),
@@ -277,6 +281,14 @@ enum LayoutPlanner {
     }
 
     // MARK: - Parts
+
+    private static func avatarPlan(_ item: MessageItem, _ ctx: RowContext, bubble: CGRect) -> LayoutPlan.Avatar? {
+        let m = item.message
+        guard ctx.isGroupChat, ctx.isLastInGroup, !m.fromMe else { return nil }
+        let size = M.groupAvatarSize
+        return .init(frame: CGRect(x: M.horizontalInset, y: bubble.maxY - size, width: size, height: size),
+                     jid: m.senderJid, initials: Initials.from(item.senderName ?? ""))
+    }
 
     private static func placeholder(_ s: String, symbolic: Bool) -> NSAttributedString {
         NSAttributedString(string: s, attributes: [

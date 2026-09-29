@@ -13,6 +13,8 @@ protocol MessageCellDelegate: AnyObject {
     func cell(_ cell: MessageCell, didClickRetry item: MessageItem)
     func cell(_ cell: MessageCell, menuFor item: MessageItem) -> NSMenu?
     func cell(_ cell: MessageCell, beginDragOf fileURL: URL, with event: NSEvent)
+    /// Group sender avatar; nil until loaded (the cell draws initials meanwhile).
+    func cell(_ cell: MessageCell, avatarFor jid: String) -> CGImage?
 }
 
 /// One message row. Everything is positioned from the `LayoutPlan`; nothing is measured here.
@@ -346,6 +348,13 @@ final class MessageCell: NSTableCellView {
     fileprivate func drawOverlays() {
         guard let plan, let item, case .media(let m) = plan.content else { return }
         drawMediaOverlay(m, item: item)
+        if let meta = plan.meta, meta.overlay { drawMeta(meta, plan: plan) }
+    }
+
+    /// Redraws the avatar once `delegate` has the image.
+    func avatarDidLoad(jid: String) {
+        guard let a = plan?.avatar, a.jid == jid else { return }
+        setNeedsDisplay(a.frame)
     }
 
     // MARK: - Layout
@@ -388,11 +397,13 @@ final class MessageCell: NSTableCellView {
         case .bare:
             break
         }
+        if let a = plan.avatar { drawAvatar(a) }
         if let s = plan.sender { s.text.draw(in: s.frame) }
         if let f = plan.forwarded { f.text.draw(in: f.frame) }
         if let q = plan.quote { drawQuote(q) }
         drawContent(plan, item: item)
-        if let meta = plan.meta { drawMeta(meta, plan: plan) }
+        // Media overlay meta is drawn by `overlay`, above the media layer.
+        if let meta = plan.meta, !meta.overlay { drawMeta(meta, plan: plan) }
         for chip in plan.reactions { drawChip(chip) }
         if plan.isFailed { drawFailedBadge(plan) }
     }
@@ -424,6 +435,34 @@ final class MessageCell: NSTableCellView {
     }
 
     static let tailOverhang: CGFloat = 6
+
+    private func drawAvatar(_ a: LayoutPlan.Avatar) {
+        let circle = NSBezierPath(ovalIn: a.frame)
+        if let image = delegate?.cell(self, avatarFor: a.jid) {
+            NSGraphicsContext.saveGraphicsState()
+            circle.addClip()
+            NSImage(cgImage: image, size: a.frame.size)
+                .draw(in: a.frame, from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
+            NSGraphicsContext.restoreGraphicsState()
+            return
+        }
+        C.senderColor(for: a.jid).setFill()
+        circle.fill()
+        if a.initials.isEmpty {
+            let cfg = NSImage.SymbolConfiguration(pointSize: a.frame.height * 0.46, weight: .regular)
+            guard let img = NSImage(systemSymbolName: "person.fill", accessibilityDescription: nil)?.withSymbolConfiguration(cfg)?
+                .tinted(.white) else { return }
+            let s = img.size
+            img.draw(in: NSRect(x: a.frame.midX - s.width / 2, y: a.frame.midY - s.height / 2, width: s.width, height: s.height),
+                     from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
+        } else {
+            let text = NSAttributedString(string: a.initials, attributes: [
+                .font: NSFont.systemFont(ofSize: a.frame.height * 0.4, weight: .medium), .foregroundColor: NSColor.white,
+            ])
+            let size = text.size()
+            text.draw(at: NSPoint(x: a.frame.midX - size.width / 2, y: a.frame.midY - size.height / 2))
+        }
+    }
 
     /// Quote, document, card and poll wells.
     private var well: NSColor { C.quoteBackground }

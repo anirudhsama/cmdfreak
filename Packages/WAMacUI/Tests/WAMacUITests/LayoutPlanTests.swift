@@ -41,6 +41,30 @@ import WAKit
         #expect(p.meta?.status == .delivered)
     }
 
+    @Test func groupIncomingLeavesRoomForAvatarOnLastOfRun() {
+        var group = ctx
+        group.isGroupChat = true
+        let item = Fx.item("a", ts: 1_700_000_000, text: "hi")
+        let last = LayoutPlanner.plan(item, group)
+        let avatar = last.avatar!
+        #expect(avatar.frame.maxY == last.bubble.maxY)
+        #expect(avatar.frame.maxX + MessageCell.tailOverhang < last.bubble.minX)
+        group.isLastInGroup = false
+        #expect(LayoutPlanner.plan(item, group).avatar == nil)
+        #expect(LayoutPlanner.plan(item, ctx).avatar == nil)
+        #expect(LayoutPlanner.plan(Fx.item("b", ts: 1_700_000_000, fromMe: true, text: "yo"), group).avatar == nil)
+    }
+
+    @Test func stickerSitsInItsBubble() {
+        var group = ctx
+        group.isGroupChat = true
+        for (c, fromMe) in [(ctx, false), (group, false), (ctx, true)] {
+            let p = LayoutPlanner.plan(Fx.item("a", ts: 1_700_000_000, fromMe: fromMe, kind: .sticker, text: nil), c)
+            guard case .sticker(let f, _, _, _) = p.content else { Issue.record("not a sticker"); continue }
+            #expect(f == p.bubble)
+        }
+    }
+
     @Test func cacheKeyChangesWithContentAndWidth() {
         let a = Fx.item("a", ts: 1_700_000_000, text: "x")
         var b = a
