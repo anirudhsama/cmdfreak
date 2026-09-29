@@ -28,7 +28,7 @@ public struct ParkedEnvelope: Sendable, Hashable {
 
 /// What one applied batch leaves for the caller to do after commit.
 struct IngestResult {
-    /// Incoming messages read in the focused chat (per chat) to mark read.
+    /// Incoming messages read in the focused chat (per chat), queued in `read_outbox`.
     var reads: [String: [BridgeMessageKey]] = [:]
     /// Encrypted add-ons whose target arrived in this batch.
     var parked: [ParkedEnvelope] = []
@@ -47,8 +47,8 @@ struct ChangeSet {
     var dirty: Set<String> = []
     var pushNames: [String: String] = [:]
     var verifiedNames: [String: String] = [:]
-    /// Incoming live messages that landed in the focused chat: not counted unread, so the caller
-    /// sends read receipts for them after commit.
+    /// Incoming live messages that landed in the focused chat: not counted unread, and their read
+    /// receipts queued in `read_outbox` for the caller to flush after commit.
     var readWhileFocused: [String: [BridgeMessageKey]] = [:]
     var parked: [ParkedEnvelope] = []
     /// Group chats where a reported own participant arrived for an existing row.
@@ -85,7 +85,7 @@ struct ChangeSet {
 }
 
 public struct OpenChatResult: Sendable {
-    /// Unread incoming messages to pass to `WaBridge.markRead`.
+    /// Unread incoming messages now owed read receipts (queued in `read_outbox`).
     public var unreadKeys: [BridgeMessageKey]
     /// The chat was marked unread; the caller should sync `markChatRead(read: true)`.
     public var wasMarkedUnread: Bool
@@ -214,6 +214,7 @@ public actor IngestActor {
                 try db.execute(sql: "UPDATE chat SET unreadCount = 0, markedUnread = 0, stateAt = ? WHERE jid = ?",
                                arguments: [Self.now, jid])
             }
+            try Self.queueReads(db, keys)
             cs.chatRead(jid)
             return OpenChatResult(unreadKeys: keys, wasMarkedUnread: chat.markedUnread)
         }
@@ -393,6 +394,44 @@ public actor IngestActor {
     }
 
     public func canonicalJid(_ jid: String) -> String { canon(jid) }
+
+    // MARK: Read receipts
+
+    /// Owes read receipts for `keys` until `readsSent`. Runs in the transaction that reads them.
+    private static func queueReads(_ db: Database, _ keys: [BridgeMessageKey]) throws {
+        for k in keys {
+            try db.execute(sql: "INSERT OR IGNORE INTO read_outbox (chatJid, messageId, queuedAt) VALUES (?, ?, ?)",
+                           arguments: [k.chatJid, k.id, now])
+        }
+    }
+
+    /// Read receipts still owed, oldest first, per chat.
+    public func pendingReads(limit: Int = 1000) throws -> [String: [BridgeMessageKey]] {
+        let rows = try database.pool.read { db in
+            try MessageRecord.fetchAll(db, sql: """
+                SELECT message.* FROM read_outbox
+                JOIN message ON message.chatJid = read_outbox.chatJid AND message.id = read_outbox.messageId
+                ORDER BY message.sortKey LIMIT ?
+                """, arguments: [limit])
+        }
+        return Dictionary(grouping: rows.map(\.key), by: \.chatJid)
+    }
+
+    /// The bridge sent receipts for `ids` in `chatJid`.
+    public func readsSent(chatJid: String, ids: [String]) throws {
+        guard !ids.isEmpty else { return }
+        try perform { db, _ in
+            try db.execute(sql: "DELETE FROM read_outbox WHERE chatJid = ? AND messageId IN (\(ids.map { _ in "?" }.joined(separator: ",")))",
+                           arguments: StatementArguments([chatJid] + ids))
+        }
+    }
+
+    /// Drops receipts that could not be sent for so long that they no longer matter.
+    public func pruneReadOutbox(olderThan cutoff: Int64) throws {
+        try perform { db, _ in
+            try db.execute(sql: "DELETE FROM read_outbox WHERE queuedAt < ?", arguments: [cutoff])
+        }
+    }
 
     public func canonicalJids(_ jids: Set<String>) -> [String: String] {
         Dictionary(uniqueKeysWithValues: jids.map { ($0, canon($0)) })
@@ -663,6 +702,7 @@ public actor IngestActor {
         if live, !m.fromMe, m.kind != .system, !m.revoked {
             if focus.isReading(chatJid) {
                 cs.readWhileFocused[chatJid, default: []].append(rec.key)
+                try Self.queueReads(db, [rec.key])
             } else {
                 try db.execute(sql: "UPDATE chat SET unreadCount = unreadCount + 1 WHERE jid = ?", arguments: [chatJid])
                 // A placeholder alerts once its real content arrives (`upgradePlaceholder`).

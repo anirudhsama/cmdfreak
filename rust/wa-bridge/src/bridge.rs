@@ -30,6 +30,7 @@ use whatsapp_rust::{InboundDurabilityHook, RevokeType};
 use whatsapp_rust::Jid;
 use whatsapp_rust::pair_code::PairCodeOptions;
 use whatsapp_rust::prelude::*;
+use whatsapp_rust::wacore_binary::JidExt;
 
 use crate::canon::Canon;
 use crate::history::{self, HistoryInput};
@@ -631,7 +632,7 @@ impl WaBridge {
             let client = shared.require_client()?;
             let to = parse_jid(&chat)?;
             let mut msg = match &reply_to {
-                Some(key) => wa::Message::text_with_context(text.clone(), quote_context(&shared, key)),
+                Some(key) => wa::Message::text_with_context(text.clone(), quote_context(&shared, &client, &to, key).await?),
                 None => wa::Message::text(text.clone()),
             };
             keep_original_secret(&shared, &client, &to, message_id.as_deref(), &mut msg).await;
@@ -661,8 +662,8 @@ impl WaBridge {
         let shared = self.shared.clone();
         self.run(async move {
             let client = shared.require_client()?;
-            let chat = parse_jid(&target.chat_jid)?;
-            client.send_reaction(chat, wire_key(&target), &emoji).await.map_err(net)?;
+            let (chat, key) = wire_key(&client, &target).await?;
+            client.send_reaction(chat, key, &emoji).await.map_err(net)?;
             Ok(())
         })
         .await
@@ -672,7 +673,7 @@ impl WaBridge {
         let shared = self.shared.clone();
         self.run(async move {
             let client = shared.require_client()?;
-            let chat = parse_jid(&target.chat_jid)?;
+            let chat = wire_chat(&client, &target.chat_jid).await?;
             client.edit_message(chat, target.id.clone(), wa::Message::text(text)).await.map_err(net)?;
             Ok(())
         })
@@ -684,7 +685,7 @@ impl WaBridge {
         let shared = self.shared.clone();
         self.run(async move {
             let client = shared.require_client()?;
-            let chat = parse_jid(&target.chat_jid)?;
+            let chat = wire_chat(&client, &target.chat_jid).await?;
             let kind = if target.from_me {
                 RevokeType::Sender
             } else {
@@ -707,7 +708,7 @@ impl WaBridge {
         let shared = self.shared.clone();
         self.run(async move {
             let client = shared.require_client()?;
-            let chat = parse_jid(&chat)?;
+            let chat = wire_chat(&client, &chat).await?;
             let mut groups: Vec<(Option<String>, Vec<String>)> = Vec::new();
             for m in messages.into_iter().filter(|m| !m.from_me) {
                 match groups.iter_mut().find(|(p, _)| *p == m.participant) {
@@ -730,7 +731,7 @@ impl WaBridge {
         let shared = self.shared.clone();
         self.run(async move {
             let client = shared.require_client()?;
-            let to = parse_jid(&chat)?;
+            let to = wire_chat(&client, &chat).await?;
             let state = match state {
                 ChatState::Composing => ChatStateType::Composing,
                 ChatState::Recording => ChatStateType::Recording,
@@ -746,7 +747,7 @@ impl WaBridge {
         let shared = self.shared.clone();
         self.run(async move {
             let client = shared.require_client()?;
-            client.presence().subscribe(parse_jid(&jid)?).await.map_err(net)?;
+            client.presence().subscribe(wire_chat(&client, &jid).await?).await.map_err(net)?;
             Ok(())
         })
         .await
@@ -953,7 +954,7 @@ impl WaBridge {
         let shared = self.shared.clone();
         self.run(async move {
             let client = shared.require_client()?;
-            let j = parse_jid(&chat)?;
+            let j = wire_chat(&client, &chat).await?;
             let actions = client.chat_actions();
             if pinned { actions.pin_chat(&j).await } else { actions.unpin_chat(&j).await }
                 .map_err(net)
@@ -965,7 +966,7 @@ impl WaBridge {
         let shared = self.shared.clone();
         self.run(async move {
             let client = shared.require_client()?;
-            let j = parse_jid(&chat)?;
+            let j = wire_chat(&client, &chat).await?;
             let actions = client.chat_actions();
             if archived {
                 actions.archive_chat(&j, None).await
@@ -982,7 +983,7 @@ impl WaBridge {
         let shared = self.shared.clone();
         self.run(async move {
             let client = shared.require_client()?;
-            let j = parse_jid(&chat)?;
+            let j = wire_chat(&client, &chat).await?;
             let actions = client.chat_actions();
             match until {
                 None => actions.unmute_chat(&j).await,
@@ -998,7 +999,7 @@ impl WaBridge {
         let shared = self.shared.clone();
         self.run(async move {
             let client = shared.require_client()?;
-            client.chat_actions().mark_chat_as_read(&parse_jid(&chat)?, read, None).await.map_err(net)
+            client.chat_actions().mark_chat_as_read(&wire_chat(&client, &chat).await?, read, None).await.map_err(net)
         })
         .await
     }
@@ -1009,7 +1010,6 @@ impl WaBridge {
 /// else the phone-number JID. The routing info is cached by the send that just ran.
 pub(crate) async fn own_participant(shared: &Shared, client: &Client, chat: &Jid) -> Option<String> {
     use whatsapp_rust::wacore::types::message::AddressingMode;
-    use whatsapp_rust::wacore_binary::JidExt;
     if !chat.is_group() {
         return None;
     }
@@ -1028,30 +1028,73 @@ pub(crate) async fn own_participant(shared: &Shared, client: &Client, chat: &Jid
     })
 }
 
+/// The JID a DM peer (or ourselves) goes by on the wire and on our other devices. JIDs crossing
+/// the FFI are PN-canonical, but once the account is 1:1-LID-migrated the phone keys DMs by LID (the
+/// library sends DMs to the LID then): a receipt to the PN never matches its chat, so the unread
+/// count stays, and app-state actions land on an index it never reads. Groups, broadcasts and
+/// newsletters pass through; group participants are stored in their wire form already.
+async fn wire_jid(client: &Client, jid: Jid) -> R<Jid> {
+    if !jid.is_pn() || !client.is_lid_migrated().await {
+        return Ok(jid);
+    }
+    if client.pn().is_some_and(|p| p.user == jid.user)
+        && let Some(own) = client.lid()
+    {
+        return Ok(own.to_non_ad());
+    }
+    Ok(match client.get_lid_pn_entry(&jid).await.map_err(net)? {
+        Some(e) => Jid::lid(&*e.lid),
+        None => jid,
+    })
+}
+
+/// [`wire_jid`] for a JID string from Swift.
+async fn wire_chat(client: &Client, chat: &str) -> R<Jid> {
+    wire_jid(client, parse_jid(chat)?).await
+}
+
 pub(crate) fn own_participant_for(shared: &Shared, lid_addressed: bool) -> Option<String> {
     let own = if lid_addressed { shared.canon.own_lid() } else { shared.canon.own_pn() };
     own.map(|j| j.to_non_ad().to_string())
 }
 
-/// Rebuilds the wire key from our-frame fields.
-fn wire_key(k: &BridgeMessageKey) -> wa::MessageKey {
-    wa::MessageKey {
-        remote_jid: Some(k.chat_jid.clone()),
+/// Rebuilds the wire chat and key from our-frame fields.
+async fn wire_key(client: &Client, k: &BridgeMessageKey) -> R<(Jid, wa::MessageKey)> {
+    let chat = wire_chat(client, &k.chat_jid).await?;
+    let key = wa::MessageKey {
+        remote_jid: Some(chat.to_string()),
         from_me: Some(k.from_me),
         id: Some(k.id.clone()),
         participant: k.participant.clone(),
-    }
+    };
+    Ok((chat, key))
 }
 
-/// Quote context for a reply. Only the key is known here, so the quoted body is left empty; the
-/// phone resolves the quote by id when it has the message.
-fn quote_context(shared: &Shared, key: &BridgeMessageKey) -> wa::ContextInfo {
-    let participant = if key.from_me {
-        shared.canon.own_pn().map(|j| j.to_string())
+/// Quote context for a reply in `chat`. Only the key is known here, so the quoted body is left
+/// empty; the phone resolves the quote by id when it has the message.
+pub(crate) async fn quote_context(
+    shared: &Shared,
+    client: &Client,
+    chat: &Jid,
+    key: &BridgeMessageKey,
+) -> R<wa::ContextInfo> {
+    let participant = if chat.is_group() {
+        // Stored group participants (ours included) are already in the group's wire form.
+        match (&key.participant, key.from_me) {
+            (Some(p), _) => Some(p.clone()),
+            (None, true) => own_participant(shared, client, chat)
+                .await
+                .or_else(|| shared.canon.own_pn().map(|j| j.to_string())),
+            (None, false) => None,
+        }
     } else {
-        key.participant.clone().or_else(|| Some(key.chat_jid.clone()))
+        let peer = if key.from_me { shared.canon.own_pn() } else { Some(chat.clone()) };
+        match peer {
+            Some(j) => Some(wire_jid(client, j).await?.to_string()),
+            None => None,
+        }
     };
-    wa::ContextInfo {
+    Ok(wa::ContextInfo {
         stanza_id: Some(key.id.clone()),
         participant,
         quoted_message: MessageField::some(wa::Message {
@@ -1059,7 +1102,7 @@ fn quote_context(shared: &Shared, key: &BridgeMessageKey) -> wa::ContextInfo {
             ..Default::default()
         }),
         ..Default::default()
-    }
+    })
 }
 
 /// A resend carries the original's message secret (else the library mints a new one): recipients
@@ -1132,10 +1175,6 @@ pub(crate) fn sent_result(
             edited_at: None,
         },
     }
-}
-
-pub(crate) fn quote_ctx_for(shared: &Shared, key: &BridgeMessageKey) -> wa::ContextInfo {
-    quote_context(shared, key)
 }
 
 pub(crate) fn require_client(shared: &Shared) -> R<Arc<Client>> {
