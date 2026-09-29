@@ -19,6 +19,103 @@ import Testing
         #expect(try db.chat(F.bob)?.lastMessageStatus == .read)
     }
 
+    @Test func dmReceiptCoversEarlierSentMessages() async throws {
+        let db = try F.tempDB()
+        let ingest = try IngestActor(database: db)
+        try await ingest.apply([F.live(
+            F.message("P", chat: F.bob, fromMe: true, ts: 1_700_000_000, status: .pending),
+            F.message("A", chat: F.bob, fromMe: true, ts: 1_700_000_001, status: .sent),
+            F.message("B", chat: F.bob, fromMe: true, ts: 1_700_000_002, status: .sent),
+            F.message("C", chat: F.bob, fromMe: true, ts: 1_700_000_003, status: .sent))])
+
+        try await ingest.apply([F.receipt(["B"], chat: F.bob, kind: .read)])
+        #expect(try db.message(F.bob, "A")?.status == .read)
+        #expect(try db.message(F.bob, "B")?.status == .read)
+        #expect(try db.message(F.bob, "C")?.status == .sent)
+        #expect(try db.message(F.bob, "P")?.status == .pending)
+    }
+
+    @Test func groupMessageAdvancesOnceEveryRecipientHasReachedIt() async throws {
+        let db = try F.tempDB()
+        let ingest = try IngestActor(database: db)
+        try await ingest.apply([.group(group: BridgeGroup(jid: F.group, subject: "G", participantCount: 3, participants: []))])
+        try await ingest.apply([F.live(F.message("G1", chat: F.group, fromMe: true, ts: 1_700_000_001, status: .sent))])
+        // Someone joining later doesn't hold back a message sent before.
+        try await ingest.apply([.group(group: BridgeGroup(jid: F.group, subject: nil, participantCount: 4, participants: []))])
+
+        try await ingest.apply([F.receipt(["G1"], chat: F.group, kind: .read, from: F.bob)])
+        #expect(try db.message(F.group, "G1")?.status == .sent)
+        // Readers are counted once each; a reader's LID receipts fold into their phone-number JID.
+        try await ingest.apply([F.receipt(["G1"], chat: F.group, kind: .delivered, from: F.aliceLID)])
+        #expect(try db.message(F.group, "G1")?.status == .delivered)
+        try await ingest.apply([.jidAliases(aliases: [BridgeJidAlias(lid: F.aliceLID, pn: F.alicePN)])])
+        #expect(try db.count("SELECT COUNT(*) FROM receipt WHERE readerJid = ?", [F.aliceLID]) == 0)
+        try await ingest.apply([F.receipt(["G1"], chat: F.group, kind: .delivered, from: F.bob)])
+        #expect(try db.message(F.group, "G1")?.status == .delivered)
+        try await ingest.apply([F.receipt(["G1"], chat: F.group, kind: .read, from: F.alicePN)])
+        #expect(try db.message(F.group, "G1")?.status == .read)
+    }
+
+    @Test func groupReceiptCoversTheReadersEarlierMessages() async throws {
+        let db = try F.tempDB()
+        let ingest = try IngestActor(database: db)
+        try await ingest.apply([.group(group: BridgeGroup(jid: F.group, subject: "G", participantCount: 2, participants: []))])
+        try await ingest.apply([F.live(
+            F.message("G0", chat: F.group, fromMe: true, ts: 1_700_000_000, status: .sent),
+            F.message("G1", chat: F.group, fromMe: true, ts: 1_700_000_001, status: .sent),
+            F.message("G2", chat: F.group, fromMe: true, ts: 1_700_000_002, status: .sent),
+            F.message("G3", chat: F.group, fromMe: true, ts: 1_700_000_003, status: .sent))])
+
+        try await ingest.apply([F.receipt(["G1"], chat: F.group, kind: .delivered, from: F.bob)])
+        try await ingest.apply([F.receipt(["G3"], chat: F.group, kind: .read, from: F.bob)])
+        // Back to the reader's first receipt here, not before it.
+        #expect(try db.message(F.group, "G0")?.status == .sent)
+        #expect(try db.message(F.group, "G1")?.status == .read)
+        #expect(try db.message(F.group, "G2")?.status == .read)
+        #expect(try db.message(F.group, "G3")?.status == .read)
+    }
+
+    @Test func parkedGroupReceiptWaitsForTheGroupSize() async throws {
+        let db = try F.tempDB()
+        let ingest = try IngestActor(database: db)
+        try await ingest.apply([F.receipt(["G1"], chat: F.group, kind: .read, from: F.bob)])
+        try await ingest.apply([F.live(F.message("G1", chat: F.group, fromMe: true, status: .sent))])
+        #expect(try db.message(F.group, "G1")?.status == .sent)
+        try await ingest.apply([.group(group: BridgeGroup(jid: F.group, subject: "G", participantCount: 2, participants: []))])
+        #expect(try db.message(F.group, "G1")?.status == .read)
+    }
+
+    @Test func groupReceiptsSkipUnsentMessagesOwnReadersAndArriveInAnyOrder() async throws {
+        let db = try F.tempDB()
+        let ingest = try IngestActor(database: db)
+        try await ingest.apply([.ownJid(pn: F.me, lid: nil)])
+        try await ingest.apply([.group(group: BridgeGroup(jid: F.group, subject: "G", participantCount: 2, participants: []))])
+        try await ingest.apply([F.live(
+            F.message("G1", chat: F.group, fromMe: true, ts: 1_700_000_001, status: .sent),
+            F.message("G2", chat: F.group, fromMe: true, ts: 1_700_000_002, status: .sent),
+            F.message("G3", chat: F.group, fromMe: true, ts: 1_700_000_003, status: .sent),
+            F.message("G4", chat: F.group, fromMe: true, ts: 1_700_000_004, status: .sent))])
+        let failed = try await ingest.insertOutgoing(chatJid: F.group, text: "x")
+        try await ingest.failSend(localId: failed.id, chatJid: F.group)
+
+        try await ingest.apply([F.receipt(["G1"], chat: F.group, kind: .read, from: F.me)])
+        #expect(try db.message(F.group, "G1")?.status == .sent)
+
+        // Bob's read of G3 lands before his delivery of G1: G2 is covered either way.
+        try await ingest.apply([F.receipt(["G3"], chat: F.group, kind: .read, from: F.bob)])
+        try await ingest.apply([F.receipt(["G1"], chat: F.group, kind: .delivered, from: F.bob)])
+        #expect(try db.message(F.group, "G1")?.status == .read)
+        #expect(try db.message(F.group, "G2")?.status == .read)
+        #expect(try db.message(F.group, "G4")?.status == .sent)
+
+        // The failed send between G4 and G5 is left alone.
+        try await ingest.apply([F.receipt(["G4"], chat: F.group, kind: .delivered, from: F.bob)])
+        try await ingest.apply([F.live(F.message("G5", chat: F.group, fromMe: true, ts: 4_000_000_000, status: .sent))])
+        try await ingest.apply([F.receipt(["G5"], chat: F.group, kind: .read, from: F.bob)])
+        #expect(try db.message(F.group, "G4")?.status == .read)
+        #expect(try db.message(F.group, failed.id)?.status == .failed)
+    }
+
     @Test func receiptBeforeMessageIsParkedThenApplied() async throws {
         let db = try F.tempDB()
         let ingest = try IngestActor(database: db)

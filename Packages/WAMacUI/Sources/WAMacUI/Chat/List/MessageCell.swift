@@ -511,7 +511,7 @@ final class MessageCell: NSTableCellView {
     private func transferFraction(_ item: MessageItem) -> Double? {
         if let downloadFraction { return downloadFraction }
         if item.media?.downloadState == .downloading { return 0 }
-        if item.message.fromMe, item.message.status == .pending, item.media != nil { return 0 }
+        if item.message.fromMe, item.message.isPending, item.media != nil { return 0 }
         return nil
     }
 

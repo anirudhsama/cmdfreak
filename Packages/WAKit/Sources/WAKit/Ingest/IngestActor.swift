@@ -11,6 +11,10 @@ enum MessageMutation: Codable, Hashable, Sendable {
     case reaction(senderJid: String, fromMe: Bool, emoji: String, timestamp: Int64)
     case pollVote(voterJid: String, selected: [String], timestamp: Int64)
     case status(rank: Int)
+    /// A group member's delivered/read receipt for our message.
+    case receipt(readerJid: String, rank: Int)
+    /// The server rejected our message: pending becomes failed.
+    case rejected
     /// An encrypted edit or poll vote whose parent secret the bridge lacked; retried through
     /// `WaBridge.decryptParked` once the target is stored.
     case encrypted(envelope: Data)
@@ -129,6 +133,7 @@ public actor IngestActor {
         self.persistedSeq = seq
         self.pendingCount = pending
         self.hasMessageTombstones = tombstones
+        try Self.failInterruptedSends(database)
     }
 
     // MARK: - Public entry points
@@ -232,6 +237,8 @@ public actor IngestActor {
                 status: .pending, editedAt: nil, revoked: false, isForwarded: false, typeName: nil, pushName: nil, extra: nil
             )
             try rec.insert(db)
+            try db.execute(sql: "UPDATE message SET sentHere = 1 WHERE chatJid = ? AND id = ?", arguments: [jid, localId])
+            try self.stampRecipients(db, jid, localId)
             if let media {
                 try MediaRecord(
                     chatJid: jid, messageId: localId, directPath: "", mediaKey: Data(), fileSha256: Data(), fileEncSha256: Data(),
@@ -248,12 +255,18 @@ public actor IngestActor {
         }
     }
 
-    /// Swaps the optimistic row for the server's id and marks it sent. `stored`: the sent file was
-    /// copied into the media store; otherwise it is downloaded like any other media.
+    /// Swaps the optimistic row for the server's id. It stays pending until the server acks it
+    /// (`handleServerAck`). `stored`: the sent file was copied into the media store; otherwise it is
+    /// downloaded like any other media.
     public func completeSend(localId: String, chatJid: String, result: BridgeSendResult, stored: Bool = false) throws {
         let jid = canon(chatJid)
         try perform { db, cs in
             let newId = result.messageId
+            // An ack that beat us here may be parked under another spelling of the chat (or none).
+            try db.execute(sql: """
+                UPDATE pending_mutation SET chatJid = ?
+                WHERE messageId = ? AND chatJid != ? AND (payload LIKE '{"status":%' OR payload LIKE '{"rejected":%')
+                """, arguments: [jid, newId, jid])
             let echoExists = try Bool.fetchOne(db, sql: "SELECT 1 FROM message WHERE chatJid = ? AND id = ?", arguments: [jid, newId]) ?? false
             if echoExists {
                 try db.execute(sql: "DELETE FROM message WHERE chatJid = ? AND id = ?", arguments: [jid, localId])
@@ -262,13 +275,18 @@ public actor IngestActor {
                 return
             }
             try db.execute(sql: """
-                UPDATE message SET id = ?, timestamp = ?, status = MAX(status, ?),
+                UPDATE message SET id = ?, timestamp = ?,
                     participant = COALESCE(?, participant), participantInferred = CASE WHEN ? IS NULL THEN participantInferred ELSE 0 END
                 WHERE chatJid = ? AND id = ?
-                """, arguments: [newId, result.timestamp, MessageStatus.sent.rank, result.message.participant, result.message.participant, jid, localId])
+                """, arguments: [newId, result.timestamp, result.message.participant, result.message.participant, jid, localId])
             if let media = result.message.media {
                 var rec = Self.mediaRecord(media, chatJid: jid, messageId: newId)
                 rec.downloadState = stored ? .downloaded : .none
+                // Not in the media store: the staged file is what a resend uploads.
+                if !stored {
+                    rec.sourcePath = try String.fetchOne(db, sql: "SELECT sourcePath FROM media WHERE chatJid = ? AND messageId = ?",
+                                                         arguments: [jid, newId])
+                }
                 try rec.upsert(db)
             }
             cs.replaced[jid, default: []].append((localId, newId))
@@ -290,7 +308,8 @@ public actor IngestActor {
     public func markPending(localId: String, chatJid: String) throws {
         let jid = canon(chatJid)
         try perform { db, cs in
-            try db.execute(sql: "UPDATE message SET status = ? WHERE chatJid = ? AND id = ?",
+            // Sent from here now, whatever sent it first, so it's ours to resend until acked.
+            try db.execute(sql: "UPDATE message SET status = ?, sentHere = 1 WHERE chatJid = ? AND id = ?",
                            arguments: [MessageStatus.pending.rank, jid, localId])
             cs.update(jid, localId)
         }
@@ -302,7 +321,7 @@ public actor IngestActor {
     }
 
     public func applyGroups(_ groups: [BridgeGroup]) throws {
-        try perform { db, _ in for g in groups { try self.handleGroup(g, db) } }
+        try perform { db, cs in for g in groups { try self.handleGroup(g, db, &cs) } }
     }
 
     /// Records the check on the chat and, for a person, on their contact row (group members often
@@ -481,6 +500,8 @@ public actor IngestActor {
             for u in updates { try applyUpdate(u, db, &cs) }
         case .receipt(let receipt):
             try handleReceipt(receipt, db, &cs)
+        case .serverAck(let ack):
+            try handleServerAck(ack, db, &cs)
         case .contacts(let contacts):
             for c in contacts { try upsertContact(c, db) }
         case .jidAliases(let aliases):
@@ -488,7 +509,7 @@ public actor IngestActor {
         case .chatAction(let action):
             try handleChatAction(action, db, &cs)
         case .group(let group):
-            try handleGroup(group, db)
+            try handleGroup(group, db, &cs)
         case .pictureChanged(let jid):
             try db.execute(sql: "UPDATE chat SET hasAvatar = 0, avatarCheckedAt = NULL WHERE jid = ?", arguments: [canon(jid)])
             try db.execute(sql: "UPDATE contact SET hasAvatar = 0, avatarCheckedAt = NULL WHERE jid = ?", arguments: [canon(jid)])
@@ -624,6 +645,7 @@ public actor IngestActor {
             extra: extra
         )
         try rec.insert(db)
+        if live, m.fromMe { try stampRecipients(db, chatJid, m.id) }
         if rec.quotedId != nil, (rec.quotedSnippet ?? "").isEmpty {
             try db.execute(sql: AppDatabase.fillQuoteFromTargetSQL + " AND chatJid = ? AND id = ?", arguments: [chatJid, m.id])
         }
@@ -787,7 +809,8 @@ public actor IngestActor {
         switch mutation {
         case .reaction(let sender, let fromMe, let emoji, let ts): .reaction(senderJid: canon(sender), fromMe: fromMe, emoji: emoji, timestamp: ts)
         case .pollVote(let voter, let selected, let ts): .pollVote(voterJid: canon(voter), selected: selected, timestamp: ts)
-        case .edit, .revoke, .status, .encrypted: mutation
+        case .receipt(let reader, let rank): .receipt(readerJid: canon(reader), rank: rank)
+        case .edit, .revoke, .status, .rejected, .encrypted: mutation
         }
     }
 
@@ -892,6 +915,25 @@ public actor IngestActor {
         case .status(let rank):
             try db.execute(sql: "UPDATE message SET status = ? WHERE chatJid = ? AND id = ? AND status < ?",
                            arguments: [rank] + key + [rank])
+            let changed = db.changesCount > 0
+            // In a DM, delivered/read covers every earlier sent message; the peer doesn't always
+            // send a receipt per message.
+            if rank >= MessageStatus.delivered.rank, ChatKind(jid: chatJid) == .dm {
+                let earlier = try String.fetchAll(db, sql: """
+                    UPDATE message SET status = ?
+                    WHERE chatJid = ? AND fromMe = 1 AND status >= ? AND status < ?
+                      AND sortKey < (SELECT sortKey FROM message WHERE chatJid = ? AND id = ? AND fromMe = 1)
+                    RETURNING id
+                    """, arguments: [rank, chatJid, MessageStatus.sent.rank, rank] + key)
+                for id in earlier { cs.update(chatJid, id) }
+            }
+            guard changed else { return true }
+        case .receipt(let reader, let rank):
+            try applyGroupReceipt(db, chatJid, id, reader: reader, rank: rank, &cs)
+            return true
+        case .rejected:
+            try db.execute(sql: "UPDATE message SET status = ? WHERE chatJid = ? AND id = ? AND status = ?",
+                           arguments: [MessageStatus.failed.rank] + key + [MessageStatus.pending.rank])
             guard db.changesCount > 0 else { return true }
         case .encrypted:
             return false
@@ -916,11 +958,181 @@ public actor IngestActor {
         case .retry, .other:
             return
         }
+        let isGroupReceipt = ChatKind(jid: chatJid) == .group && status != .sent
+        let reader = canon(r.senderJid)
+        if isGroupReceipt {
+            // We're not one of our own message's recipients.
+            let own = try String.fetchSet(db, sql: "SELECT value FROM meta WHERE key IN ('ownPn', 'ownLid')")
+            if own.contains(reader) || own.map(canon).contains(reader) { return }
+        }
+        let mutation: MessageMutation = isGroupReceipt
+            ? .receipt(readerJid: reader, rank: status.rank)
+            : .status(rank: status.rank)
         for id in r.messageIds {
-            if try !applyMutation(db, chatJid, id, .status(rank: status.rank), &cs) {
-                try park(db, chatJid, id, .status(rank: status.rank))
+            if try !applyMutation(db, chatJid, id, mutation, &cs) {
+                try park(db, chatJid, id, mutation)
             }
         }
+    }
+
+    /// Records a member's receipt for our group message. Receipts don't list every message, so a
+    /// reader's rank also covers our earlier sent messages back to their first receipt here (before
+    /// that they may not have been a member). Invariant, per reader and rank: every sent message
+    /// from their first receipt to their furthest receipt at that rank holds a row at that rank or
+    /// higher, so each receipt only fills what it newly covers.
+    private func applyGroupReceipt(_ db: Database, _ chatJid: String, _ id: String, reader: String, rank: Int,
+                                   _ cs: inout ChangeSet) throws {
+        guard let target = try Int64.fetchOne(db, sql: "SELECT sortKey FROM message WHERE chatJid = ? AND id = ? AND fromMe = 1",
+                                              arguments: [chatJid, id]) else { return }
+        let base: StatementArguments = [chatJid, reader]
+        let first = try Int64.fetchOne(db, sql: "SELECT MIN(sortKey) FROM receipt WHERE chatJid = ? AND readerJid = ?", arguments: base)
+        let reached = try (rank...MessageStatus.read.rank).compactMap { r in
+            try Int64.fetchOne(db, sql: "SELECT MAX(sortKey) FROM receipt WHERE chatJid = ? AND readerJid = ? AND rank = ?",
+                               arguments: base + [r])
+        }.max()
+        var touched: Set<String> = []
+        func fill(_ lo: Int64, _ hi: Int64, _ rank: Int, sentOnly: Bool = true) throws {
+            guard lo <= hi else { return }
+            touched.formUnion(try String.fetchAll(db, sql: """
+                INSERT INTO receipt (chatJid, messageId, readerJid, rank, sortKey)
+                SELECT chatJid, id, ?, ?, sortKey FROM message
+                WHERE chatJid = ? AND sortKey BETWEEN ? AND ? AND fromMe = 1 AND status >= ?
+                ON CONFLICT DO UPDATE SET rank = excluded.rank WHERE rank < excluded.rank
+                RETURNING messageId
+                """, arguments: [reader, rank, chatJid, lo, hi, sentOnly ? MessageStatus.sent.rank : MessageStatus.failed.rank]))
+        }
+        // The target itself was received, whatever its local state.
+        try fill(target, target, rank, sentOnly: false)
+        if let first, target < first {
+            // An earlier first receipt: everything up to the old one takes the reader's highest rank.
+            let top = try Int.fetchOne(db, sql: "SELECT MAX(rank) FROM receipt WHERE chatJid = ? AND readerJid = ?", arguments: base) ?? rank
+            try fill(target, first - 1, max(rank, top))
+        } else if let reached, target > reached {
+            try fill(reached + 1, target, rank)
+        } else if reached == nil, let first {
+            try fill(first, target, rank)
+        }
+        for messageId in touched { try settleGroupStatus(db, chatJid, messageId, &cs) }
+    }
+
+    /// The ack's chat can be missing or spelled differently from ours (a DM's LID), so an id that
+    /// only one of our messages has finds it too. An ack that beats `completeSend` (the row still
+    /// has its local id) is parked for it; reactions, edits and revokes are acked too, and those
+    /// aren't kept unless a send is in flight.
+    private func handleServerAck(_ ack: BridgeServerAck, _ db: Database, _ cs: inout ChangeSet) throws {
+        let mutation: MessageMutation = ack.error == nil ? .status(rank: MessageStatus.sent.rank) : .rejected
+        if ack.error != nil { WAKit.log.error("server rejected \(ack.messageId, privacy: .public): \(ack.error ?? "", privacy: .public)") }
+        let ackChat = ack.chatJid.map(canon)
+        if let ackChat, try applyMutation(db, ackChat, ack.messageId, mutation, &cs) { return }
+        let chats = try String.fetchAll(db, sql: "SELECT chatJid FROM message WHERE id = ? AND fromMe = 1 LIMIT 2",
+                                        arguments: [ack.messageId])
+        if chats.count == 1 {
+            try applyMutation(db, chats[0], ack.messageId, mutation, &cs)
+            return
+        }
+        guard chats.isEmpty, try Bool.fetchOne(db, sql: """
+            SELECT EXISTS(SELECT 1 FROM message WHERE fromMe = 1 AND status = ? AND id LIKE 'local-%')
+            """, arguments: [MessageStatus.pending.rank]) == true else { return }
+        try park(db, ackChat ?? "", ack.messageId, mutation)
+    }
+
+    /// Sends interrupted before the server gave them an id (the app quit mid-send) can't be told
+    /// apart from ones never sent: they fail, for a manual retry. Runs at launch, before any send.
+    static func failInterruptedSends(_ database: AppDatabase) throws {
+        try database.pool.write { db in
+            try db.execute(sql: "UPDATE message SET status = ? WHERE status = ? AND id LIKE 'local-%'",
+                           arguments: [MessageStatus.failed.rank, MessageStatus.pending.rank])
+        }
+    }
+
+    /// Acks parked without a chat, once no send is in flight to claim them.
+    public func dropUnclaimedAcks() throws {
+        try perform { db, _ in
+            let inFlight = try Bool.fetchOne(db, sql: """
+                SELECT EXISTS(SELECT 1 FROM message WHERE fromMe = 1 AND status = ? AND id LIKE 'local-%')
+                """, arguments: [MessageStatus.pending.rank]) ?? false
+            guard !inFlight, self.pendingCount > 0 else { return }
+            try db.execute(sql: "DELETE FROM pending_mutation WHERE chatJid = ''")
+            self.pendingCount = max(0, self.pendingCount - db.changesCount)
+        }
+    }
+
+    /// A resent media message was uploaded again: recipients download the new copy. Our own file
+    /// and its state stay as they are.
+    public func refreshSentMedia(chatJid: String, id: String, media m: BridgeMedia) throws {
+        try perform { db, _ in
+            try db.execute(sql: """
+                UPDATE media SET directPath = ?, mediaKey = ?, fileEncSha256 = ?, fileLength = ?
+                WHERE chatJid = ? AND messageId = ?
+                """, arguments: [m.directPath, m.mediaKey, m.fileEncSha256, Int64(m.fileLength), chatJid, id])
+        }
+    }
+
+    /// Whether our message is still waiting for the server's ack.
+    public func isUnacked(chatJid: String, id: String) throws -> Bool {
+        try database.pool.read { db in
+            try Bool.fetchOne(db, sql: "SELECT status = ? FROM message WHERE chatJid = ? AND id = ?",
+                              arguments: [MessageStatus.pending.rank, chatJid, id]) ?? false
+        }
+    }
+
+    /// Our messages written to the server but never acked (the connection died under them), with
+    /// the key of the message each quotes. Oldest first.
+    public func unackedSends() throws -> [(item: MessageItem, quoted: BridgeMessageKey?)] {
+        try database.pool.read { db in
+            let rows = try Row.fetchAll(db, sql: """
+                SELECT chatJid, id FROM message
+                WHERE sentHere = 1 AND status = ? AND id NOT LIKE 'local-%' AND revoked = 0
+                ORDER BY sortKey
+                """, arguments: [MessageStatus.pending.rank])
+            return try rows.compactMap { row -> (MessageItem, BridgeMessageKey?)? in
+                let chatJid: String = row["chatJid"]
+                guard let item = try MessageItemFetcher.items(db, chatJid: chatJid, ids: [row["id"]]).first else { return nil }
+                return (item, try Self.quotedKey(db, item.message))
+            }
+        }
+    }
+
+    /// Key of the message `m` quotes, for sending the quote again.
+    public func quotedKey(of m: MessageRecord) throws -> BridgeMessageKey? {
+        try database.pool.read { db in try Self.quotedKey(db, m) }
+    }
+
+    static func quotedKey(_ db: Database, _ m: MessageRecord) throws -> BridgeMessageKey? {
+        guard let quotedId = m.quotedId else { return nil }
+        if let quoted = try MessageRecord.fetchOne(db, key: ["chatJid": m.chatJid, "id": quotedId]) { return quoted.key }
+        let own = try String.fetchSet(db, sql: "SELECT value FROM meta WHERE key IN ('ownPn', 'ownLid')")
+        let fromMe = m.quotedSenderJid.map(own.contains) ?? false
+        return BridgeMessageKey(chatJid: m.chatJid, id: quotedId, fromMe: fromMe,
+                                participant: ChatKind(jid: m.chatJid) == .group ? m.quotedSenderJid : nil)
+    }
+
+    /// Our group message becomes delivered/read once every recipient has reached that rank.
+    /// Recipients are the other members when it was sent, else now; until the group's size is
+    /// known it stays as it is (`handleGroup` settles it then).
+    private func settleGroupStatus(_ db: Database, _ chatJid: String, _ id: String, _ cs: inout ChangeSet) throws {
+        guard let row = try Row.fetchOne(db, sql: """
+            SELECT MAX(1, COALESCE(m.recipientCount, c.participantCount - 1)) AS needed,
+                   (SELECT COUNT(*) FROM receipt WHERE chatJid = m.chatJid AND messageId = m.id AND rank >= ?1) AS delivered,
+                   (SELECT COUNT(*) FROM receipt WHERE chatJid = m.chatJid AND messageId = m.id AND rank >= ?2) AS read
+            FROM message m LEFT JOIN chat c ON c.jid = m.chatJid
+            WHERE m.chatJid = ?3 AND m.id = ?4
+            """, arguments: [MessageStatus.delivered.rank, MessageStatus.read.rank, chatJid, id]),
+              let needed: Int = row["needed"] else { return }
+        let status: MessageStatus? = row["read"] >= needed ? .read : row["delivered"] >= needed ? .delivered : nil
+        guard let status else { return }
+        try db.execute(sql: "UPDATE message SET status = ? WHERE chatJid = ? AND id = ? AND status < ?",
+                       arguments: [status.rank, chatJid, id, status.rank])
+        if db.changesCount > 0 { cs.update(chatJid, id) }
+    }
+
+    /// Records how many other members a group had when we sent a message to it.
+    private func stampRecipients(_ db: Database, _ chatJid: String, _ id: String) throws {
+        guard ChatKind(jid: chatJid) == .group else { return }
+        try db.execute(sql: """
+            UPDATE message SET recipientCount = (SELECT participantCount - 1 FROM chat WHERE jid = ?1 AND participantCount > 1)
+            WHERE chatJid = ?1 AND id = ?2
+            """, arguments: [chatJid, id])
     }
 
     // MARK: Chats, contacts, groups
@@ -1034,17 +1246,26 @@ public actor IngestActor {
         cs.dirty.insert(jid)
     }
 
-    private func handleGroup(_ g: BridgeGroup, _ db: Database) throws {
+    private func handleGroup(_ g: BridgeGroup, _ db: Database, _ cs: inout ChangeSet) throws {
         try db.execute(sql: "INSERT OR IGNORE INTO chat (jid, kind) VALUES (?, 'group')", arguments: [g.jid])
         // A zero count is unknown: keep the stored one, except that a membership change
         // (`membershipChanged`) makes it stale, so it is cleared for `GroupService` to re-fetch.
         let count: Int? = g.participantCount > 0 ? Int(g.participantCount) : nil
         let stale = g.membershipChanged && count == nil
+        let sizeWasUnknown = try Int.fetchOne(db, sql: "SELECT participantCount FROM chat WHERE jid = ?", arguments: [g.jid]) == nil
         try db.execute(sql: """
             UPDATE chat SET name = COALESCE(?, name),
                 participantCount = CASE WHEN ? IS NOT NULL THEN ? WHEN ? THEN NULL ELSE participantCount END
             WHERE jid = ?
             """, arguments: [g.subject.nonEmpty, count, count, stale, g.jid])
+        if count != nil, sizeWasUnknown {
+            // Our messages that were waiting on the group's size.
+            let waiting = try String.fetchAll(db, sql: """
+                SELECT DISTINCT r.messageId FROM receipt r JOIN message m ON m.chatJid = r.chatJid AND m.id = r.messageId
+                WHERE r.chatJid = ? AND m.recipientCount IS NULL AND m.status < ?
+                """, arguments: [g.jid, MessageStatus.read.rank])
+            for id in waiting { try settleGroupStatus(db, g.jid, id, &cs) }
+        }
         guard !g.participants.isEmpty else { return }
         try db.execute(sql: "DELETE FROM group_participant WHERE groupJid = ?", arguments: [g.jid])
         for p in g.participants {
@@ -1191,6 +1412,12 @@ public actor IngestActor {
         try db.execute(sql: "UPDATE chat SET lastMessageSenderJid = ? WHERE lastMessageSenderJid = ?", arguments: [pn, lid])
         try db.execute(sql: "UPDATE OR REPLACE reaction SET senderJid = ? WHERE senderJid = ?", arguments: [pn, lid])
         try db.execute(sql: "UPDATE OR REPLACE poll_vote SET voterJid = ? WHERE voterJid = ?", arguments: [pn, lid])
+        try db.execute(sql: """
+            INSERT INTO receipt (chatJid, messageId, readerJid, rank, sortKey)
+            SELECT chatJid, messageId, ?2, rank, sortKey FROM receipt WHERE readerJid = ?1
+            ON CONFLICT DO UPDATE SET rank = MAX(rank, excluded.rank)
+            """, arguments: [lid, pn])
+        try db.execute(sql: "DELETE FROM receipt WHERE readerJid = ?", arguments: [lid])
         try db.execute(sql: "UPDATE OR REPLACE group_participant SET jid = ? WHERE jid = ?", arguments: [pn, lid])
         // Folded into the PN spelling keeping the newest removal time, then the LID rows go.
         try db.execute(sql: """

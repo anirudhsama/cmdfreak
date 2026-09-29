@@ -177,7 +177,9 @@ public struct MessageRecord: Codable, Hashable, Sendable, FetchableRecord, Mutab
         BridgeMessageKey(chatJid: chatJid, id: id, fromMe: fromMe, participant: participant)
     }
 
-    public var isPending: Bool { status == .pending }
+    /// Still being sent: no server id yet. A message awaiting the server's ack already has one,
+    /// so it can be replied to, edited or deleted.
+    public var isPending: Bool { status == .pending && id.hasPrefix("local-") }
 }
 
 public enum MediaDownloadState: Int, Codable, Hashable, Sendable, DatabaseValueConvertible {

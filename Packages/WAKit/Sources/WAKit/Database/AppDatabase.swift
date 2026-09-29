@@ -296,6 +296,34 @@ extension AppDatabase {
                 """)
         }
 
+        // Group receipts per reader: our group message is delivered or read once every recipient has
+        // reached that rank. `recipientCount` is how many other members the group had when we sent it;
+        // `sortKey` is the message's. Group receipts parked by older builds carry no reader and go.
+        m.registerMigration("v10") { db in
+            try db.create(table: "receipt", options: .withoutRowID) { t in
+                t.column("chatJid", .text).notNull()
+                t.column("messageId", .text).notNull()
+                t.column("readerJid", .text).notNull()
+                t.primaryKey(["chatJid", "messageId", "readerJid"])
+                t.foreignKey(["chatJid", "messageId"], references: "message", columns: ["chatJid", "id"],
+                             onDelete: .cascade, onUpdate: .cascade)
+                t.column("rank", .integer).notNull()
+                t.column("sortKey", .integer).notNull()
+            }
+            try db.create(index: "receipt_on_reader", on: "receipt", columns: ["chatJid", "readerJid", "rank", "sortKey"])
+            try db.create(index: "receipt_on_reader_sortKey", on: "receipt", columns: ["chatJid", "readerJid", "sortKey"])
+            try db.alter(table: "message") { t in t.add(column: "recipientCount", .integer) }
+            // Sent from this Mac (`insertOutgoing`), so ours to resend until the server acks it.
+            // History can carry our other devices' messages still pending there.
+            try db.alter(table: "message") { t in t.add(column: "sentHere", .boolean).notNull().defaults(to: false) }
+            // Server acks name only the message id (their chat may be missing or spelled otherwise).
+            try db.create(index: "message_on_id", on: "message", columns: ["id"])
+            try db.execute(sql: """
+                DELETE FROM pending_mutation
+                WHERE chatJid LIKE '%@g.us' AND json_extract(payload, '$.status.rank') >= ?
+                """, arguments: [MessageStatus.delivered.rank])
+        }
+
         return m
     }
 

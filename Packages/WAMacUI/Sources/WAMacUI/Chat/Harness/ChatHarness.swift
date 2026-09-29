@@ -143,7 +143,7 @@ final class HarnessBridge: WaBridgeProtocol, @unchecked Sendable {
     func profilePicture(jid: String, commonGid: String?, preview: Bool, destPath: String) async throws -> Bool { false }
     func revokeMessage(target: BridgeMessageKey) async throws {}
     func sendChatState(chat: String, state: ChatState) async throws { NSLog("harness: chat state \(state)") }
-    func sendMedia(chat: String, media: BridgeOutgoingMedia, replyTo: BridgeMessageKey?, progress: (any ProgressSink)?) async throws -> BridgeSendResult {
+    func sendMedia(chat: String, media: BridgeOutgoingMedia, replyTo: BridgeMessageKey?, messageId: String?, progress: (any ProgressSink)?) async throws -> BridgeSendResult {
         let data = try Data(contentsOf: URL(filePath: media.filePath))
         let total = UInt64(data.count)
         for step in 0...20 {
@@ -170,16 +170,25 @@ final class HarnessBridge: WaBridgeProtocol, @unchecked Sendable {
                                width: media.width.map(Int.init), height: media.height.map(Int.init), duration: media.durationSecs.map(Int.init),
                                thumb: media.jpegThumbnail, pages: media.pageCount.map(Int.init), animated: media.kind == .gif ? true : nil)
         let ts = Int64(Date().timeIntervalSince1970)
-        return BridgeSendResult(messageId: "SRV-" + UUID().uuidString.prefix(8), timestamp: ts,
+        let id = messageId ?? "SRV-" + UUID().uuidString.prefix(8)
+        ack(id, chat: chat)
+        return BridgeSendResult(messageId: id, timestamp: ts,
                                 message: Seed.message("x", chat: chat, sender: ChatHarness.me, fromMe: true, ts: ts, kind: kind,
                                                       text: media.caption, media: m, status: .sent))
     }
+    /// The server's ack, a moment after the send returns.
+    private func ack(_ id: String, chat: String) {
+        DispatchQueue.global().asyncAfter(deadline: .now() + 0.3) { [sink] in
+            _ = sink?.onEvents(events: [.serverAck(ack: BridgeServerAck(chatJid: chat, messageId: id, error: nil))])
+        }
+    }
     func sendReaction(target: BridgeMessageKey, emoji: String) async throws {}
-    func sendText(chat: String, text: String, replyTo: BridgeMessageKey?) async throws -> BridgeSendResult {
+    func sendText(chat: String, text: String, replyTo: BridgeMessageKey?, messageId: String?) async throws -> BridgeSendResult {
         try await Task.sleep(for: .milliseconds(700))
         if text.localizedCaseInsensitiveContains("fail") { throw BridgeError.Network("harness: simulated failure") }
         let ts = Int64(Date().timeIntervalSince1970)
-        let id = "SRV-" + UUID().uuidString.prefix(8)
+        let id = messageId ?? "SRV-" + UUID().uuidString.prefix(8)
+        ack(id, chat: chat)
         if text.lowercased() == "ping" {
             Task { @MainActor in
                 try? await Task.sleep(for: .seconds(1))

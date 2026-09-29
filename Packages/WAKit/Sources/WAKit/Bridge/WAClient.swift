@@ -119,6 +119,155 @@ actor ParkedRetrier {
     }
 }
 
+/// Resends our messages the server never acked, under their ids: after a reconnect, and a while
+/// after a send in case the ack goes missing without the connection dropping. One pass at a time.
+/// Nothing is resent while disconnected; the reconnect resends it. A send error leaves the message
+/// pending for the next pass; after `maxAttempts` sends that were never acked, it fails, for a
+/// manual retry. A message being sent (by a pass or a manual retry) is claimed until that send ends.
+actor SendRecovery {
+    static let ackTimeout: Duration = .seconds(30)
+    static let maxAttempts = 3
+
+    private let ingest: IngestActor
+    private let bridge: any WaBridgeProtocol
+    private let media: MediaStore
+    private let clock = ContinuousClock()
+    private var attempts: [String: (count: Int, at: ContinuousClock.Instant)] = [:]
+    private var sending: Set<String> = []
+    private var connected = false
+    private var running = false
+    private var again: Bool?
+    private var checkScheduled = false
+
+    init(ingest: IngestActor, bridge: any WaBridgeProtocol, media: MediaStore) {
+        self.ingest = ingest
+        self.bridge = bridge
+        self.media = media
+    }
+
+    func setConnected(_ connected: Bool) { self.connected = connected }
+
+    /// `reconnected`: resend everything unacked; otherwise only what has waited `ackTimeout`.
+    func run(reconnected: Bool) async {
+        if running {
+            again = (again ?? false) || reconnected
+            return
+        }
+        running = true
+        var all = reconnected
+        while true {
+            await pass(all: all)
+            guard let next = again else { break }
+            again = nil
+            all = next
+        }
+        running = false
+    }
+
+    func scheduleCheck() {
+        guard !checkScheduled else { return }
+        checkScheduled = true
+        Task {
+            try? await Task.sleep(for: Self.ackTimeout)
+            await self.runScheduledCheck()
+        }
+    }
+
+    /// A manual retry of a failed message: starts its attempts over and reports failure at once.
+    func retry(_ item: MessageItem, quoted: BridgeMessageKey?) async {
+        let m = item.message
+        let key = Self.key(m)
+        attempts[key] = (1, clock.now)
+        guard sending.insert(key).inserted else { return }
+        defer { sending.remove(key) }
+        do {
+            try await send(item, quoted: quoted)
+            scheduleCheck()
+        } catch {
+            WAKit.log.error("retry \(m.id, privacy: .public) failed: \(error)")
+            try? await ingest.failSend(localId: m.id, chatJid: m.chatJid)
+        }
+    }
+
+    private func runScheduledCheck() async {
+        checkScheduled = false
+        await run(reconnected: false)
+    }
+
+    private func pass(all: Bool) async {
+        guard connected else { return }
+        let unacked: [(item: MessageItem, quoted: BridgeMessageKey?)]
+        do { unacked = try await ingest.unackedSends() } catch {
+            WAKit.log.error("unacked sends: \(error)")
+            return
+        }
+        let live = Set(unacked.map { Self.key($0.item.message) })
+        attempts = attempts.filter { live.contains($0.key) }
+        let now = clock.now
+        for (item, quoted) in unacked {
+            let m = item.message
+            let key = Self.key(m)
+            guard connected, !sending.contains(key) else { continue }
+            let previous = attempts[key]
+            if !all {
+                let waited = previous.map { now - $0.at } ?? .seconds(Int64(Date().timeIntervalSince1970) - m.timestamp)
+                guard waited >= Self.ackTimeout else { continue }
+            }
+            // An ack may have landed since the snapshot.
+            guard (try? await ingest.isUnacked(chatJid: m.chatJid, id: m.id)) == true else { continue }
+            let count = (previous?.count ?? 0) + 1
+            if count > Self.maxAttempts {
+                WAKit.log.error("\(m.id, privacy: .public) never acked; giving up")
+                attempts[key] = nil
+                try? await ingest.failSend(localId: m.id, chatJid: m.chatJid)
+                continue
+            }
+            attempts[key] = (count, clock.now)
+            sending.insert(key)
+            do { try await send(item, quoted: quoted) } catch {
+                WAKit.log.error("resend \(m.id, privacy: .public) failed: \(error)")
+                // Dropped while sending: the reconnect sends it again, and this one doesn't count.
+                if !connected { attempts[key] = previous }
+            }
+            sending.remove(key)
+        }
+        if !unacked.isEmpty { scheduleCheck() }
+        try? await ingest.dropUnclaimedAcks()
+    }
+
+    /// Media goes out with its file again, never as its caption alone.
+    private func send(_ item: MessageItem, quoted: BridgeMessageKey?) async throws {
+        let m = item.message
+        if item.media != nil {
+            guard let outgoing = Self.outgoingMedia(item, media: media) else {
+                throw BridgeError.NotFound("file for \(m.id)")
+            }
+            let result = try await bridge.sendMedia(chat: m.chatJid, media: outgoing, replyTo: quoted, messageId: m.id, progress: nil)
+            if let media = result.message.media {
+                try? await ingest.refreshSentMedia(chatJid: m.chatJid, id: m.id, media: media)
+            }
+        } else if let text = m.text {
+            _ = try await bridge.sendText(chat: m.chatJid, text: text, replyTo: quoted, messageId: m.id)
+        } else {
+            throw BridgeError.NotImplemented("resend of \(m.kind)")
+        }
+    }
+
+    /// The staged file for a send in progress, else the copy the media store kept.
+    static func outgoingMedia(_ item: MessageItem, media store: MediaStore) -> BridgeOutgoingMedia? {
+        guard let m = item.media,
+              let path = m.sourcePath.flatMap({ FileManager.default.fileExists(atPath: $0) ? $0 : nil })
+                ?? store.localURL(for: m)?.path else { return nil }
+        return BridgeOutgoingMedia(
+            kind: item.message.kind.sendKind, filePath: path, mimetype: m.mimetype ?? "application/octet-stream",
+            fileName: m.fileName, caption: item.message.text, width: m.width.map(UInt32.init), height: m.height.map(UInt32.init),
+            durationSecs: m.durationSecs.map(UInt32.init), jpegThumbnail: m.jpegThumbnail,
+            thumbnailWidth: nil, thumbnailHeight: nil, pageCount: m.pageCount.map(UInt32.init))
+    }
+
+    private static func key(_ m: MessageRecord) -> String { m.chatJid + "/" + m.id }
+}
+
 /// Sends read receipts for messages that arrived while their chat was open, batched per chat.
 actor ReadReceiptBatcher {
     private let bridge: any WaBridgeProtocol
@@ -194,6 +343,7 @@ public final class WAClient: Sendable {
     public let groups: GroupService
     public let businesses: BusinessService
     public let avatars: AvatarService
+    let recovery: SendRecovery
     public var feed: MessageChangeFeed { ingest.feed }
     public var focus: ChatFocus { ingest.focus }
     /// Messages to notify about and notifications to withdraw. Single consumer.
@@ -232,7 +382,10 @@ public final class WAClient: Sendable {
         ownJidState = Mutex(ownJid)
         let session = SessionService(bridge: bridge, ownJid: ownJid)
         self.session = session
-        media = MediaStore(bridge: bridge, ingest: ingest)
+        let media = MediaStore(bridge: bridge, ingest: ingest)
+        self.media = media
+        let recovery = SendRecovery(ingest: ingest, bridge: bridge, media: media)
+        self.recovery = recovery
         let groups = GroupService(bridge: bridge, ingest: ingest)
         self.groups = groups
         let businesses = BusinessService(bridge: bridge, ingest: ingest)
@@ -260,8 +413,13 @@ public final class WAClient: Sendable {
                     await retrier.retry(result.parked)
                     await retrier.scheduleSweep()
                 }
+                if let state = batch.events.last(where: { if case .connection = $0 { true } else { false } }),
+                   case .connection(let connection) = state {
+                    await recovery.setConnected(connection == .connected)
+                }
                 if batch.events.contains(where: { if case .connection(.connected) = $0 { true } else { false } }) {
                     await retrier.scheduleSweep()
+                    Task { await recovery.run(reconnected: true) }
                 }
                 let staleGroups = batch.events.compactMap { event -> String? in
                     if case .group(let g) = event, g.membershipChanged { g.jid } else { nil }
@@ -342,7 +500,7 @@ public final class WAClient: Sendable {
         let pending = try await ingest.insertOutgoing(
             chatJid: chatJid, text: text, quoted: replyTo.map(Self.quote), ownJid: ownJid)
         await performSend(localId: pending.id, chatJid: chatJid) { [bridge] in
-            try await bridge.sendText(chat: chatJid, text: text, replyTo: replyTo?.message.key)
+            try await bridge.sendText(chat: chatJid, text: text, replyTo: replyTo?.message.key, messageId: nil)
         }
         return pending.id
     }
@@ -387,7 +545,7 @@ public final class WAClient: Sendable {
         let source = URL(filePath: outgoing.filePath)
         await performSend(localId: localId, chatJid: chatJid) { [bridge, media] in
             defer { media.clearUploadProgress(chatJid: jid, localId: localId) }
-            let result = try await bridge.sendMedia(chat: chatJid, media: outgoing, replyTo: replyKey, progress: relay)
+            let result = try await bridge.sendMedia(chat: chatJid, media: outgoing, replyTo: replyKey, messageId: nil, progress: relay)
             guard let m = result.message.media else { return (result, false) }
             let stored = await media.adoptSentFile(source, for: IngestActor.mediaRecord(m, chatJid: jid, messageId: result.messageId))
             if stored != nil, source.path.hasPrefix(OutgoingMediaPreparer.stagingDirectory.path) {
@@ -397,22 +555,24 @@ public final class WAClient: Sendable {
         }
     }
 
-    /// Re-sends a failed optimistic message.
+    /// Re-sends a failed message. One the server already has an id for goes out under that id, so
+    /// recipients who did get it don't see it twice.
     public func retry(localId: String, chatJid: String) async throws {
         guard let item = try await windowLoader(for: chatJid).items(ids: [localId]).first,
               item.message.status == .failed else { return }
         try await ingest.markPending(localId: localId, chatJid: chatJid)
-        let text = item.message.text
-        if let m = item.media, let path = m.sourcePath {
-            let outgoing = BridgeOutgoingMedia(
-                kind: item.message.kind.sendKind, filePath: path, mimetype: m.mimetype ?? "application/octet-stream",
-                fileName: m.fileName, caption: text, width: m.width.map(UInt32.init), height: m.height.map(UInt32.init),
-                durationSecs: m.durationSecs.map(UInt32.init), jpegThumbnail: m.jpegThumbnail,
-                thumbnailWidth: nil, thumbnailHeight: nil, pageCount: m.pageCount.map(UInt32.init))
-            await uploadAndSend(localId: localId, outgoing: outgoing, chatJid: chatJid, replyKey: nil)
-        } else if let text {
+        let quoted = try await ingest.quotedKey(of: item.message)
+        if !localId.hasPrefix("local-") {
+            await recovery.retry(item, quoted: quoted)
+        } else if item.media != nil {
+            guard let outgoing = SendRecovery.outgoingMedia(item, media: media) else {
+                try await ingest.failSend(localId: localId, chatJid: chatJid)
+                return
+            }
+            await uploadAndSend(localId: localId, outgoing: outgoing, chatJid: chatJid, replyKey: quoted)
+        } else if let text = item.message.text {
             await performSend(localId: localId, chatJid: chatJid) { [bridge] in
-                try await bridge.sendText(chat: chatJid, text: text, replyTo: nil)
+                try await bridge.sendText(chat: chatJid, text: text, replyTo: quoted, messageId: nil)
             }
         }
     }
@@ -425,6 +585,7 @@ public final class WAClient: Sendable {
         do {
             let (result, stored) = try await send()
             try await ingest.completeSend(localId: localId, chatJid: chatJid, result: result, stored: stored)
+            await recovery.scheduleCheck()
         } catch {
             WAKit.log.error("send failed: \(error)")
             try? await ingest.failSend(localId: localId, chatJid: chatJid)
