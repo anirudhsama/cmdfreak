@@ -107,12 +107,27 @@ public final class CommandRegistry {
                       shortcut: "⌃⌘S", #selector(NSSplitViewController.toggleSidebar(_:))),
             ]
         }
-        // Only when the app handles it: the demo app has no account to log out of.
+        // Only when the app handles them: the demo app has no updater and no account to log out of.
         registry.register { _ in
-            guard NSApp.target(forAction: Selector(("logOut:"))) != nil else { return [] }
-            return [.menu("app.logout", "Log Out…", symbol: "rectangle.portrait.and.arrow.right", keywords: ["sign out", "unlink", "logout"],
-                          Selector(("logOut:")))]
+            var actions: [CommandAction] = []
+            if isAppActionEnabled(Selector(("checkForUpdates:"))) {
+                actions.append(.menu("app.checkForUpdates", "Check for Updates…", symbol: "arrow.triangle.2.circlepath",
+                                     keywords: ["update", "upgrade", "new version", "release"], Selector(("checkForUpdates:"))))
+            }
+            if isAppActionEnabled(Selector(("logOut:"))) {
+                actions.append(.menu("app.logout", "Log Out…", symbol: "rectangle.portrait.and.arrow.right",
+                                     keywords: ["sign out", "unlink", "logout"], Selector(("logOut:"))))
+            }
+            return actions
         }
         return registry
+    }
+
+    /// Whether an app-level action has a handler and that handler would enable its menu item
+    /// (e.g. no update check while Sparkle is already checking, or in Debug where it never starts).
+    private static func isAppActionEnabled(_ selector: Selector) -> Bool {
+        guard let target = NSApp.target(forAction: selector) else { return false }
+        guard let validator = target as? NSMenuItemValidation else { return true }
+        return validator.validateMenuItem(NSMenuItem(title: "", action: selector, keyEquivalent: ""))
     }
 }
