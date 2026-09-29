@@ -58,7 +58,7 @@ final class ChatListViewController: NSViewController, NSCollectionViewDelegate {
         self.client = client
         self.filter = filter
         actions = ChatActions(client: client)
-        avatarLoader = AvatarLoader(avatars: client.avatars)
+        avatarLoader = AvatarLoader(avatars: client.avatars, pixelSize: Int(ChatRowMetrics.avatarSize) * 2)
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -125,7 +125,10 @@ final class ChatListViewController: NSViewController, NSCollectionViewDelegate {
         live.reserveCapacity(newItems.count)
         for item in newItems {
             if let state = states[item.id] {
+                let avatarURL = state.avatarURL
                 state.apply(item)
+                // A picture fetched or changed since the row was configured.
+                if state.avatarURL != avatarURL { avatarLoader.load(state) }
                 live[item.id] = state
             } else {
                 let state = ChatRowState(item: item)

@@ -46,6 +46,14 @@ public final class ThumbnailCache: @unchecked Sendable {
 
     public func removeAll() { cache.removeAllObjects() }
 
+    /// Key for a file that is rewritten in place (avatars): it changes with the modification time, so
+    /// a new picture is decoded instead of the old one being served. Nil when the file is missing.
+    public static func fileKey(_ url: URL) -> String? {
+        guard let modified = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.modificationDate] as? Date
+        else { return nil }
+        return "\(url.path)#\(modified.timeIntervalSince1970)"
+    }
+
     static func cacheKey(_ key: String, _ size: Int) -> NSString { "\(key)@\(size)" as NSString }
 
     static func decode(_ source: Source, maxPixelSize: Int) -> CGImage? {

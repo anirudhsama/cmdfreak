@@ -137,7 +137,7 @@ final class DemoBridge: WaBridgeProtocol, @unchecked Sendable {
         progress?.onProgress(done: 1, total: 1)
     }
 
-    func profilePicture(jid: String, preview: Bool, destPath: String) async throws -> Bool {
+    func profilePicture(jid: String, commonGid: String?, preview: Bool, destPath: String) async throws -> Bool {
         let source = Demo.resources.appending(path: "avatars/\(jid).jpg")
         guard FileManager.default.fileExists(atPath: source.path) else { return false }
         try? FileManager.default.removeItem(atPath: destPath)

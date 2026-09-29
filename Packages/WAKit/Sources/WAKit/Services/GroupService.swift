@@ -66,8 +66,9 @@ public actor GroupService {
     }
 }
 
-/// Lazily downloads profile pictures into `~/Library/Caches/CmdFreak/avatars/` and records on the
-/// chat that one exists. Checks each JID at most once per `recheckInterval`.
+/// Lazily downloads profile pictures into `~/Library/Caches/CmdFreak/avatars/` and records that one
+/// exists on the chat and, for a person, on their contact row. Checks each JID at most once per
+/// `recheckInterval`.
 public actor AvatarService {
     public static var defaultRoot: URL {
         WAKit.cacheDirectory.appending(path: "avatars", directoryHint: .isDirectory)
@@ -91,22 +92,33 @@ public actor AvatarService {
         self.recheckInterval = recheckInterval
     }
 
-    /// The cached avatar for `jid`, fetching it if it has not been checked recently.
-    public func avatar(for jid: String) async -> URL? {
+    /// The cached avatar for `jid`, fetching it if it has not been checked recently. A LID whose phone
+    /// number is known resolves to the phone number's file. `commonGroup`, a group shared with the
+    /// person, lets the server answer for people we have no chat with.
+    public func avatar(for jid: String, commonGroup: String? = nil) async -> URL? {
+        let jid = await ingest.canonicalJid(jid)
         if let task = inFlight[jid] { return await task.value }
-        let chat = try? await ingest.database.reader.read { db in try ChatRecord.fetchOne(db, key: jid) }
+        // The chat's record is what the chat list shows, so it decides when there is one.
+        let checked = try? await ingest.database.reader.read { db -> (hasAvatar: Bool, checkedAt: Int64?)? in
+            let row = try Row.fetchOne(db, sql: "SELECT hasAvatar, avatarCheckedAt FROM chat WHERE jid = ?", arguments: [jid])
+                ?? Row.fetchOne(db, sql: "SELECT hasAvatar, avatarCheckedAt FROM contact WHERE jid = ?", arguments: [jid])
+            return row.map { ($0["hasAvatar"], $0["avatarCheckedAt"]) }
+        }
         let dest = root.appending(path: Self.fileName(for: jid))
-        let hasAvatar = chat?.hasAvatar ?? false
+        let hasAvatar = checked?.hasAvatar ?? false
+        let checkedAt = checked?.checkedAt
         if hasAvatar, FileManager.default.fileExists(atPath: dest.path) { return dest }
         // A recorded avatar whose file is gone (Caches purged) is fetched again right away.
         let now = Int64(Date().timeIntervalSince1970)
-        if !hasAvatar, let checkedAt = chat?.avatarCheckedAt, now - checkedAt < recheckInterval { return nil }
+        if !hasAvatar, let checkedAt, now - checkedAt < recheckInterval { return nil }
+        // Another call may have started the fetch while this one read the database.
+        if let task = inFlight[jid] { return await task.value }
 
         let bridge = self.bridge, ingest = self.ingest, root = self.root
         let task = Task<URL?, Never> {
             do {
                 try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-                let has = try await bridge.profilePicture(jid: jid, preview: true, destPath: dest.path)
+                let has = try await bridge.profilePicture(jid: jid, commonGid: commonGroup, preview: true, destPath: dest.path)
                 try await ingest.setAvatar(jid: jid, present: has, checkedAt: now)
                 return has ? dest : nil
             } catch {

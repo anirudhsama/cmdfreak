@@ -151,4 +151,26 @@ import AppKit
         try await ingest.apply([.pictureChanged(jid: F.bob)])
         #expect(try db.chat(F.bob)?.hasAvatar == false)
     }
+
+    @Test func groupMemberAvatarsRecordedWithoutChat() async throws {
+        let db = try F.tempDB()
+        let ingest = try IngestActor(database: db)
+        try await ingest.apply([
+            .jidAliases(aliases: [BridgeJidAlias(lid: F.aliceLID, pn: F.alicePN)]),
+            F.live(F.message("a", chat: F.group, sender: F.alicePN)),
+        ])
+        let root = FileManager.default.temporaryDirectory.appending(path: "wakit-avatars-\(UUID().uuidString)")
+        let bridge = FakeBridge()
+        // A LID sender shares the phone number's file; the group is offered as the shared one.
+        let url = try #require(await AvatarService(bridge: bridge, ingest: ingest, root: root).avatar(for: F.aliceLID, commonGroup: F.group))
+        #expect(url == root.appending(path: AvatarService.fileName(for: F.alicePN)))
+        #expect(bridge.calls.withLock { $0.profilePictures.map(\.jid) } == [F.alicePN])
+        #expect(bridge.calls.withLock { $0.profilePictures.map(\.commonGid) } == [F.group])
+        // Next launch: answered from the contact's record.
+        #expect(await AvatarService(bridge: bridge, ingest: ingest, root: root).avatar(for: F.alicePN) == url)
+        #expect(bridge.calls.withLock { $0.profilePictures.count } == 1)
+        try await ingest.apply([.pictureChanged(jid: F.alicePN)])
+        _ = await AvatarService(bridge: bridge, ingest: ingest, root: root).avatar(for: F.alicePN)
+        #expect(bridge.calls.withLock { $0.profilePictures.count } == 2)
+    }
 }

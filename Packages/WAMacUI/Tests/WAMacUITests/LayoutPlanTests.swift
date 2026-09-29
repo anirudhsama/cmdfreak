@@ -65,6 +65,24 @@ import WAKit
         }
     }
 
+    /// The media layer sits above the cell's own drawing, so the time and ticks over an image-only
+    /// message must come from the overlay subview.
+    @MainActor @Test func mediaOnlyMetaDrawsInOverlay() throws {
+        let item = Fx.item("a", ts: 1_700_000_000, kind: .image, text: nil)
+        let plan = LayoutPlanner.plan(item, ctx)
+        let meta = try #require(plan.meta)
+        #expect(meta.overlay)
+        let cell = MessageCell(frame: CGRect(x: 0, y: 0, width: plan.width, height: plan.rowHeight))
+        cell.configure(item: item, plan: plan)
+        cell.layoutSubtreeIfNeeded()
+        let overlay = try #require(cell.subviews.first { $0.frame == cell.bounds && !($0 is NSTextView) })
+        let rep = try #require(overlay.bitmapImageRepForCachingDisplay(in: overlay.bounds))
+        overlay.cacheDisplay(in: overlay.bounds, to: rep)
+        let scale = CGFloat(rep.pixelsWide) / overlay.bounds.width
+        let pixel = rep.colorAt(x: Int(meta.frame.minX * scale), y: Int(meta.frame.midY * scale))
+        #expect((pixel?.alphaComponent ?? 0) > 0.3)
+    }
+
     @Test func cacheKeyChangesWithContentAndWidth() {
         let a = Fx.item("a", ts: 1_700_000_000, text: "x")
         var b = a

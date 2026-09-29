@@ -54,13 +54,23 @@ enum MessageTextConfiguration {
 
     /// A stable per-sender hue for group sender names.
     static func senderColor(for jid: String) -> NSColor {
-        var h: UInt32 = 2_166_136_261
-        for b in jid.utf8 { h = (h ^ UInt32(b)) &* 16_777_619 }
-        let hue = CGFloat(h % 360) / 360
-        return NSColor(name: "sender-\(h % 360)") { appearance in
+        let degrees = senderHue(jid)
+        let hue = CGFloat(degrees) / 360
+        return NSColor(name: "sender-\(degrees)") { appearance in
             let dark = appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
             return NSColor(hue: hue, saturation: dark ? 0.55 : 0.7, brightness: dark ? 0.9 : 0.55, alpha: 1)
         }
+    }
+
+    /// The sender's hue, dark enough in both appearances for white initials on it.
+    static func avatarColor(for jid: String) -> NSColor {
+        NSColor(hue: CGFloat(senderHue(jid)) / 360, saturation: 0.7, brightness: 0.5, alpha: 1)
+    }
+
+    private static func senderHue(_ jid: String) -> UInt32 {
+        var h: UInt32 = 2_166_136_261
+        for b in jid.utf8 { h = (h ^ UInt32(b)) &* 16_777_619 }
+        return h % 360
     }
 
     // MARK: Metrics

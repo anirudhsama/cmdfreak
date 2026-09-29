@@ -13,7 +13,8 @@ protocol MessageCellDelegate: AnyObject {
     func cell(_ cell: MessageCell, didClickRetry item: MessageItem)
     func cell(_ cell: MessageCell, menuFor item: MessageItem) -> NSMenu?
     func cell(_ cell: MessageCell, beginDragOf fileURL: URL, with event: NSEvent)
-    /// Group sender avatar; nil until loaded (the cell draws initials meanwhile).
+    /// Group sender avatar; nil until loaded (the cell draws initials meanwhile, and is told through
+    /// `avatarDidLoad` when to ask again). Asked when the cell is configured, never while drawing.
     func cell(_ cell: MessageCell, avatarFor jid: String) -> CGImage?
 }
 
@@ -48,6 +49,7 @@ final class MessageCell: NSTableCellView {
     private var downloadFraction: Double?
     private var audioState: AudioPlaybackController.State?
     private var showsFullImage = false
+    private var avatarImage: CGImage?
     /// Media chrome (play button, duration, progress) must sit above the media sublayer, which is
     /// below the cell's own drawing; this subview draws it.
     private let overlay = OverlayView()
@@ -91,6 +93,7 @@ final class MessageCell: NSTableCellView {
 
         configureMedia(plan: plan)
         configureAudio()
+        avatarImage = plan.avatar.flatMap { delegate?.cell(self, avatarFor: $0.jid) }
         needsLayout = true
         needsDisplay = true
         overlay.needsDisplay = true
@@ -118,6 +121,7 @@ final class MessageCell: NSTableCellView {
         resetTransient()
         item = nil
         plan = nil
+        avatarImage = nil
         textView?.isHidden = true
         mediaLayer?.isHidden = true
     }
@@ -353,7 +357,8 @@ final class MessageCell: NSTableCellView {
 
     /// Redraws the avatar once `delegate` has the image.
     func avatarDidLoad(jid: String) {
-        guard let a = plan?.avatar, a.jid == jid else { return }
+        guard let a = plan?.avatar, a.jid == jid, let image = delegate?.cell(self, avatarFor: jid), image !== avatarImage else { return }
+        avatarImage = image
         setNeedsDisplay(a.frame)
     }
 
@@ -438,7 +443,7 @@ final class MessageCell: NSTableCellView {
 
     private func drawAvatar(_ a: LayoutPlan.Avatar) {
         let circle = NSBezierPath(ovalIn: a.frame)
-        if let image = delegate?.cell(self, avatarFor: a.jid) {
+        if let image = avatarImage {
             NSGraphicsContext.saveGraphicsState()
             circle.addClip()
             NSImage(cgImage: image, size: a.frame.size)
@@ -446,7 +451,7 @@ final class MessageCell: NSTableCellView {
             NSGraphicsContext.restoreGraphicsState()
             return
         }
-        C.senderColor(for: a.jid).setFill()
+        C.avatarColor(for: a.jid).setFill()
         circle.fill()
         if a.initials.isEmpty {
             let cfg = NSImage.SymbolConfiguration(pointSize: a.frame.height * 0.46, weight: .regular)

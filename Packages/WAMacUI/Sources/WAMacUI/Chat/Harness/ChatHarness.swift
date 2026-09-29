@@ -140,7 +140,7 @@ final class HarnessBridge: WaBridgeProtocol, @unchecked Sendable {
     func nudgeReconnect() {}
     func pairWithPhone(number: String) async throws -> String { "ABCD-EFGH" }
     func pinChat(chat: String, pinned: Bool) async throws {}
-    func profilePicture(jid: String, preview: Bool, destPath: String) async throws -> Bool { false }
+    func profilePicture(jid: String, commonGid: String?, preview: Bool, destPath: String) async throws -> Bool { false }
     func revokeMessage(target: BridgeMessageKey) async throws {}
     func sendChatState(chat: String, state: ChatState) async throws { NSLog("harness: chat state \(state)") }
     func sendMedia(chat: String, media: BridgeOutgoingMedia, replyTo: BridgeMessageKey?, progress: (any ProgressSink)?) async throws -> BridgeSendResult {
