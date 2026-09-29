@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import WAKit
 
 /// WhatsApp's inline formatting: `*bold*`, `_italic_`, `~strike~`, `` `mono` `` and ``` ```mono``` ```.
 /// Markers must hug their content (`* bold*` is literal) and cannot span lines, matching the phone.
@@ -136,11 +137,16 @@ enum MarkdownLite {
 
     // MARK: Attributed rendering
 
+    /// Messages' link blue; `NSColor.linkColor` is darker and reads as muted in a bubble.
+    static let linkColor = NSColor.systemBlue
+
     private static let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue
         | NSTextCheckingResult.CheckingType.phoneNumber.rawValue)
 
-    /// Renders with the shared body attributes; links and phone numbers get `.link`.
-    static func attributedString(_ source: String, base: [NSAttributedString.Key: Any] = MessageTextConfiguration.bodyAttributes,
+    /// Renders with the shared body attributes; links and phone numbers get `.link`. `source` is the wire
+    /// text: each "@<number>" in `mentions` is replaced by the semibold name after parsing (see `replaceMentions`).
+    static func attributedString(_ source: String, mentions: [String: Mention] = [:],
+                                 base: [NSAttributedString.Key: Any] = MessageTextConfiguration.bodyAttributes,
                                  baseFont: NSFont = MessageTextConfiguration.body) -> NSAttributedString {
         let parsed = parse(source)
         let result = NSMutableAttributedString(string: parsed.text, attributes: base)
@@ -163,9 +169,11 @@ enum MarkdownLite {
         }
 
         if let detector {
+            let tokens = mentions.isEmpty ? [] : Mentions.ranges(in: parsed.text).map(\.range)
             for match in detector.matches(in: parsed.text, range: full) {
-                // Skip links inside mono spans, like the phone does.
+                // Skip links inside mono spans, like the phone does, and mention numbers.
                 if mask[match.range.location].contains(.mono) { continue }
+                if tokens.contains(where: { NSIntersectionRange($0, match.range).length > 0 }) { continue }
                 let url: URL?
                 switch match.resultType {
                 case .link: url = match.url
@@ -173,11 +181,43 @@ enum MarkdownLite {
                 default: url = nil
                 }
                 if let url {
-                    result.addAttributes([.link: url, .foregroundColor: NSColor.linkColor], range: match.range)
+                    result.addAttributes([.link: url, .foregroundColor: linkColor], range: match.range)
                 }
             }
         }
+
+        replaceMentions(mentions, in: result, linked: true)
         return result
+    }
+
+    /// Replaces each "@<number>" in `mentions` (keyed by user number) with "@<name>" in semibold, keeping the
+    /// token's other attributes. The name goes in as literal text, so formatting characters in it stay as
+    /// written. `linked` also tints it and, when the mention has a JID, makes it a link carrying `.mention`
+    /// (see `MessageTextView`).
+    static func replaceMentions(_ mentions: [String: Mention], in s: NSMutableAttributedString, linked: Bool = false) {
+        guard !mentions.isEmpty else { return }
+        for token in Mentions.ranges(in: s.string).reversed() {
+            guard let mention = mentions[token.user] else { continue }
+            var attrs = s.attributes(at: token.range.location, effectiveRange: nil)
+            if let font = attrs[.font] as? NSFont { attrs[.font] = semibold(font) }
+            if linked {
+                attrs[.foregroundColor] = linkColor
+                if let jid = mention.jid, let url = URL(string: "cmdfreak-mention:" + jid) {
+                    attrs[.link] = url
+                    attrs[.mention] = mention
+                }
+            }
+            s.replaceCharacters(in: token.range, with: NSAttributedString(string: "@" + mention.name, attributes: attrs))
+        }
+    }
+
+    /// At least semibold: bold stays bold, and mono uses the monospaced system font's weight.
+    private static func semibold(_ font: NSFont) -> NSFont {
+        if NSFontManager.shared.weight(of: font) >= 8 { return font }
+        if font.isFixedPitch { return .monospacedSystemFont(ofSize: font.pointSize, weight: .semibold) }
+        var traits = font.fontDescriptor.object(forKey: .traits) as? [NSFontDescriptor.TraitKey: Any] ?? [:]
+        traits[.weight] = NSFont.Weight.semibold
+        return NSFont(descriptor: font.fontDescriptor.addingAttributes([.traits: traits]), size: font.pointSize) ?? font
     }
 
     private static func attributes(for style: Style, baseFont: NSFont) -> [NSAttributedString.Key: Any] {
@@ -206,4 +246,9 @@ enum MarkdownLite {
         }
         return count > 0 && count <= 3
     }
+}
+
+extension NSAttributedString.Key {
+    /// The `Mention` behind a clickable "@<name>".
+    static let mention = NSAttributedString.Key("CmdFreakMention")
 }

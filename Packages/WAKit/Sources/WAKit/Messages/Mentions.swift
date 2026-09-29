@@ -1,6 +1,21 @@
 import Foundation
 import GRDB
 
+/// A mentioned user as shown in a message.
+public struct Mention: Hashable, Sendable {
+    public var name: String
+    /// The user's chat JID (phone-number form when known); nil for yourself.
+    public var jid: String?
+    /// "+<digits>" when the phone number is known.
+    public var phone: String?
+
+    public init(name: String, jid: String?, phone: String?) {
+        self.name = name
+        self.jid = jid
+        self.phone = phone
+    }
+}
+
 /// WhatsApp writes a mention into the text as "@" and the mentioned user's number: a LID for most
 /// group members, a phone number for older messages. These resolve those numbers to display names.
 public enum Mentions {
@@ -9,13 +24,26 @@ public enum Mentions {
         tokens(in: text).map(\.user)
     }
 
+    /// Every "@<number>" in `text` as a UTF-16 range, with its user number.
+    public static func ranges(in text: String) -> [(range: NSRange, user: String)] {
+        tokens(in: text).map { (NSRange($0.range, in: text), String($0.user)) }
+    }
+
     /// Replaces every resolvable "@<number>" with "@<name>". `names` is keyed by user number.
     public static func apply(_ text: String, _ names: [String: String]) -> String {
-        guard !names.isEmpty else { return text }
+        apply(text) { names[$0] }
+    }
+
+    public static func apply(_ text: String, _ mentions: [String: Mention]) -> String {
+        apply(text) { mentions[$0]?.name }
+    }
+
+    private static func apply(_ text: String, name: (String) -> String?) -> String {
+        guard text.contains("@") else { return text }
         var out = ""
         var cursor = text.startIndex
         for t in tokens(in: text) {
-            guard let name = names[String(t.user)] else { continue }
+            guard let name = name(String(t.user)) else { continue }
             out += text[cursor..<t.range.lowerBound]
             out += "@" + name
             cursor = t.range.upperBound
@@ -26,21 +54,30 @@ public enum Mentions {
     /// Names for the numbers mentioned in `texts`, keyed by user number. Unknown users are left out,
     /// so their mention stays as written.
     public static func names(_ db: Database, in texts: some Sequence<String?>) throws -> [String: String] {
+        try resolve(db, in: texts).mapValues(\.name)
+    }
+
+    /// The users mentioned in `texts`, keyed by user number. Unknown users are left out.
+    public static func resolve(_ db: Database, in texts: some Sequence<String?>) throws -> [String: Mention] {
         let users = Set(texts.lazy.compactMap { $0 }.filter { $0.contains("@") }.flatMap(users(in:)).map(String.init))
         guard !users.isEmpty else { return [:] }
         let own = try Set(String.fetchAll(db, sql: "SELECT value FROM meta WHERE key IN ('ownPn', 'ownLid')").map(JID.user))
-        var out: [String: String] = [:]
+        var out: [String: Mention] = [:]
         for user in users {
-            if own.contains(user) { out[user] = "You"; continue }
+            if own.contains(user) { out[user] = Mention(name: "You", jid: nil, phone: nil); continue }
             let lid = user + "@lid"
             let pn = try String.fetchOne(db, sql: "SELECT pn FROM jid_alias WHERE lid = ?", arguments: [lid])
             let candidates = [pn, lid, user + "@s.whatsapp.net"].compactMap { $0 }
             let contacts = Dictionary(try ContactRecord.fetchAll(db, keys: candidates).map { ($0.jid, $0) },
                                       uniquingKeysWith: { a, _ in a })
-            let named = candidates.lazy.compactMap { contacts[$0]?.displayName.flatMap(ChatListQuery.unmasked) }.first
+            let named = candidates.lazy.compactMap { jid in
+                contacts[jid]?.displayName.flatMap(ChatListQuery.unmasked).map { (jid, $0) }
+            }.first
             // Nameless but known: show the phone number, like the phone does.
-            let phone = pn ?? candidates.last.flatMap { contacts[$0] == nil ? nil : $0 }
-            if let name = named ?? phone.flatMap(JID.phoneDisplay) { out[user] = name }
+            let known = pn ?? candidates.last.flatMap { contacts[$0] == nil ? nil : $0 }
+            guard let jid = pn ?? named?.0 ?? known else { continue }
+            let phone = JID.phoneDisplay(jid)
+            if let name = named?.1 ?? phone { out[user] = Mention(name: name, jid: jid, phone: phone) }
         }
         return out
     }
