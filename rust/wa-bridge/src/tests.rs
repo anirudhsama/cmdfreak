@@ -99,13 +99,16 @@ fn fixture() -> Vec<u8> {
         }),
     );
 
+    let mut hello = wmi(key(&bob_chat, false, "M1", None), 1_700_000_100, Some(text("hello")));
+    hello.message.as_option_mut().unwrap().verified_biz_name = Some("Bob's Bakery".into());
+
     let dm = wa::Conversation {
         id: bob_chat.clone(),
         pn_jid: Some(format!("{BOB_PN}@s.whatsapp.net")),
         unread_count: Some(2),
         conversation_timestamp: Some(1_700_000_400),
         messages: vec![
-            wmi(key(&bob_chat, false, "M1", None), 1_700_000_100, Some(text("hello"))),
+            hello,
             image,
             revoked,
             edit,
@@ -215,6 +218,7 @@ fn history_maps_chats_messages_and_updates() {
     assert_eq!((m1.kind, m1.text.as_deref(), m1.chat_jid.as_str()), (MessageKind::Text, Some("hello"), bob.as_str()));
     assert_eq!(m1.sender_jid, bob);
     assert!(!m1.from_me);
+    assert_eq!(m1.verified_name.as_deref(), Some("Bob's Bakery"));
 
     let m2 = msg("M2");
     assert_eq!(m2.kind, MessageKind::Image);
@@ -293,6 +297,7 @@ fn env(chat: &str, sender: &str, participant: Option<&str>, from_me: bool) -> En
         from_me,
         timestamp: 1_700_000_000,
         push_name: None,
+        verified_name: None,
         status: None,
     }
 }

@@ -844,7 +844,16 @@ impl WaBridge {
                         .into_iter()
                         .flatten()
                         .find_map(|j| asked.get(&j.to_non_ad_string()))?;
-                    Some(BridgeBusinessCheck { jid: (*jid).clone(), is_business: r.is_business })
+                    let verified_name = r
+                        .verified_name
+                        .as_ref()
+                        .and_then(|v| v.name.clone())
+                        .filter(|n| !n.is_empty());
+                    Some(BridgeBusinessCheck {
+                        jid: (*jid).clone(),
+                        is_business: r.is_business,
+                        verified_name,
+                    })
                 })
                 .collect())
         })
@@ -1072,6 +1081,7 @@ pub(crate) fn sent_result(
             reactions: vec![],
             type_name: None,
             push_name: None,
+            verified_name: None,
             status: Some(MessageStatus::Sent),
             is_forwarded: false,
             revoked: false,

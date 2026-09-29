@@ -275,6 +275,14 @@ extension AppDatabase {
                 """)
         }
 
+        // Business accounts without a push name are named by their verified name, which their messages
+        // and the business check carry. Businesses checked before it was stored are checked again, so
+        // ones with no new messages pick it up too.
+        m.registerMigration("v8") { db in
+            try db.alter(table: "contact") { t in t.add(column: "verifiedName", .text) }
+            try db.execute(sql: "UPDATE contact SET businessCheckedAt = NULL WHERE isBusiness")
+        }
+
         return m
     }
 

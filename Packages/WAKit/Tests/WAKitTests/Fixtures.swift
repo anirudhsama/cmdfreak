@@ -18,7 +18,7 @@ enum F {
     static func message(
         _ id: String, chat: String, sender: String? = nil, fromMe: Bool = false, ts: Int64 = 1_700_000_000,
         kind: MessageKind = .text, text: String? = "hello", media: BridgeMedia? = nil, quoted: BridgeQuoted? = nil,
-        reactions: [BridgeReaction] = [], pushName: String? = nil, status: MessageStatus? = nil,
+        reactions: [BridgeReaction] = [], pushName: String? = nil, verifiedName: String? = nil, status: MessageStatus? = nil,
         revoked: Bool = false, editedAt: Int64? = nil, poll: BridgePoll? = nil, location: BridgeLocation? = nil
     ) -> BridgeMessage {
         let sender = sender ?? (fromMe ? me : chat)
@@ -26,7 +26,7 @@ enum F {
             id: id, chatJid: chat, senderJid: sender, participant: chat.hasSuffix("@g.us") ? sender : nil,
             fromMe: fromMe, timestamp: ts, kind: kind, text: text, quoted: quoted, media: media,
             location: location, contact: nil, poll: poll, reactions: reactions, typeName: nil, pushName: pushName,
-            status: status, isForwarded: false, revoked: revoked, editedAt: editedAt
+            verifiedName: verifiedName, status: status, isForwarded: false, revoked: revoked, editedAt: editedAt
         )
     }
 

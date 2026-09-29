@@ -59,7 +59,7 @@ public enum QuickSearchQuery {
         let filtering = !normalized.isEmpty
 
         let phoneExpr = "COALESCE(ct.phone, CASE WHEN c.jid LIKE '%@s.whatsapp.net' THEN substr(c.jid, 1, instr(c.jid, '@') - 1) END)"
-        let namesExpr = "wa_fold(IFNULL(c.name,'') || ' ' || IFNULL(ct.fullName,'') || ' ' || IFNULL(ct.firstName,'') || ' ' || IFNULL(ct.pushName,''))"
+        let namesExpr = "wa_fold(IFNULL(c.name,'') || ' ' || IFNULL(ct.fullName,'') || ' ' || IFNULL(ct.firstName,'') || ' ' || IFNULL(ct.verifiedName,'') || ' ' || IFNULL(ct.pushName,''))"
         var chatWhere = ["(c.lastActivityAt IS NOT NULL OR c.pinnedAt IS NOT NULL)"]
         if scope == .contacts { chatWhere.append("c.kind = 'dm'") }
         if filtering {
@@ -67,7 +67,7 @@ public enum QuickSearchQuery {
         }
         let chatSQL = """
             SELECT c.jid, c.kind, c.name, c.lastActivityAt, c.archived, c.hasAvatar,
-                   ct.fullName, ct.firstName, ct.pushName, \(phoneExpr) AS phone
+                   ct.fullName, ct.firstName, ct.pushName, ct.verifiedName, \(phoneExpr) AS phone
             FROM chat c LEFT JOIN contact ct ON ct.jid = c.jid
             WHERE \(chatWhere.joined(separator: " AND "))
             ORDER BY c.lastActivityAt IS NULL, c.lastActivityAt DESC
@@ -77,8 +77,9 @@ public enum QuickSearchQuery {
         let own = try ChatListQuery.ownJid(db)
         var out: [QuickSearchCandidate] = try Row.fetchAll(db, sql: chatSQL, arguments: args).map { row in
             let jid: String = row["jid"]
-            let contact = ContactRecord(jid: row["jid"], fullName: row["fullName"], firstName: row["firstName"],
+            var contact = ContactRecord(jid: row["jid"], fullName: row["fullName"], firstName: row["firstName"],
                                         pushName: row["pushName"], phone: row["phone"])
+            contact.verifiedName = row["verifiedName"]
             var chat = ChatRecord(jid: jid, kind: row["kind"] as ChatKind?)
             chat.name = row["name"]
             let title = ChatListQuery.title(chat, chat.kind == .dm ? contact : nil, ownJid: own)
@@ -119,7 +120,7 @@ public enum QuickSearchQuery {
 
     private static func alternates(_ c: ContactRecord, excluding title: String) -> [String] {
         var seen: Set<String> = [title]
-        return [c.fullName, c.firstName, c.pushName].compactMap { $0 }.filter { !$0.isEmpty && seen.insert($0).inserted }
+        return [c.fullName, c.firstName, c.verifiedName, c.pushName].compactMap { $0 }.filter { !$0.isEmpty && seen.insert($0).inserted }
     }
 
     /// "ab c" → "%a%b%c%" with LIKE metacharacters escaped. Empty for an empty query.

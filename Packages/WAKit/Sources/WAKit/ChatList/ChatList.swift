@@ -157,6 +157,7 @@ public enum ChatListQuery {
         }
         let contacts = try ContactRecord.fetchAll(db, keys: Array(contactJids))
         let byJid = Dictionary(contacts.map { ($0.jid, $0) }, uniquingKeysWith: { a, _ in a })
+        let mentions = try Mentions.names(db, in: chats.map(\.lastMessageText))
 
         return chats.map { chat in
             let contact = chat.kind == .dm ? byJid[chat.jid] : nil
@@ -168,7 +169,7 @@ public enum ChatListQuery {
                     senderName = byJid[s]?.displayName ?? JID.phoneDisplay(s)
                 }
                 preview = ChatPreview(
-                    messageId: mid, kind: kind, text: chat.lastMessageText, fromMe: fromMe,
+                    messageId: mid, kind: kind, text: chat.lastMessageText.map { Mentions.apply($0, mentions) }, fromMe: fromMe,
                     senderJid: chat.lastMessageSenderJid, senderName: senderName,
                     status: chat.lastMessageStatus, revoked: chat.lastMessageRevoked ?? false
                 )

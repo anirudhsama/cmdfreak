@@ -24,6 +24,7 @@ pub struct Envelope {
     pub from_me: bool,
     pub timestamp: i64,
     pub push_name: Option<String>,
+    pub verified_name: Option<String>,
     pub status: Option<MessageStatus>,
 }
 
@@ -171,6 +172,7 @@ pub fn map_message(msg: &wa::Message, env: &Envelope, canon: &Canon, polls: &Pol
         reactions: Vec::new(),
         type_name: content.type_name,
         push_name: env.push_name.clone().filter(|n| !n.is_empty()),
+        verified_name: env.verified_name.clone().filter(|n| !n.is_empty()),
         status: env.status,
         is_forwarded: content.is_forwarded,
         revoked: false,
@@ -224,6 +226,7 @@ fn system_message(env: &Envelope, type_name: &str, text: Option<String>) -> Brid
         reactions: Vec::new(),
         type_name: Some(type_name.to_string()),
         push_name: env.push_name.clone().filter(|n| !n.is_empty()),
+        verified_name: env.verified_name.clone().filter(|n| !n.is_empty()),
         status: env.status,
         is_forwarded: false,
         revoked: false,
@@ -719,6 +722,7 @@ pub fn map_web_message(
         from_me,
         timestamp: wmi.message_timestamp.unwrap_or(0) as i64,
         push_name: wmi.push_name.clone(),
+        verified_name: wmi.verified_biz_name.clone(),
         status: if from_me { status_from_web(wmi.status) } else { None },
     };
 

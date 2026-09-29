@@ -42,6 +42,7 @@ struct ChangeSet {
     /// Chats whose last-message preview must be recomputed before commit.
     var dirty: Set<String> = []
     var pushNames: [String: String] = [:]
+    var verifiedNames: [String: String] = [:]
     /// Incoming live messages that landed in the focused chat: not counted unread, so the caller
     /// sends read receipts for them after commit.
     var readWhileFocused: [String: [BridgeMessageKey]] = [:]
@@ -312,13 +313,14 @@ public actor IngestActor {
     }
 
     public func setBusiness(_ checks: [BridgeBusinessCheck], checkedAt: Int64) throws {
-        let checks = checks.map { (jid: canon($0.jid), isBusiness: $0.isBusiness) }
+        let checks = checks.map { (jid: canon($0.jid), isBusiness: $0.isBusiness, verifiedName: $0.verifiedName) }
         try perform { db, _ in
             for c in checks {
                 try db.execute(sql: """
-                    INSERT INTO contact (jid, isBusiness, businessCheckedAt) VALUES (?, ?, ?)
-                    ON CONFLICT(jid) DO UPDATE SET isBusiness = excluded.isBusiness, businessCheckedAt = excluded.businessCheckedAt
-                    """, arguments: [c.jid, c.isBusiness, checkedAt])
+                    INSERT INTO contact (jid, isBusiness, businessCheckedAt, verifiedName) VALUES (?, ?, ?, ?)
+                    ON CONFLICT(jid) DO UPDATE SET isBusiness = excluded.isBusiness, businessCheckedAt = excluded.businessCheckedAt,
+                        verifiedName = COALESCE(excluded.verifiedName, verifiedName)
+                    """, arguments: [c.jid, c.isBusiness, checkedAt, c.verifiedName])
             }
         }
     }
@@ -399,6 +401,14 @@ public actor IngestActor {
             try db.execute(sql: """
                 INSERT INTO contact (jid, pushName) VALUES (?, ?)
                 ON CONFLICT(jid) DO UPDATE SET pushName = excluded.pushName
+                """, arguments: [jid, name])
+        }
+        // Only business accounts carry a verified name. `BusinessService` still checks them, and
+        // clears the flag for one that switched back to a personal account.
+        for (jid, name) in cs.verifiedNames {
+            try db.execute(sql: """
+                INSERT INTO contact (jid, verifiedName, isBusiness) VALUES (?, ?, 1)
+                ON CONFLICT(jid) DO UPDATE SET verifiedName = excluded.verifiedName, isBusiness = 1
                 """, arguments: [jid, name])
         }
         for jid in cs.dirty { try refreshPreview(db, jid) }
@@ -527,6 +537,7 @@ public actor IngestActor {
         try ensureContact(db, sender)
 
         if !m.fromMe, let name = m.pushName, !name.isEmpty, !sender.isEmpty { cs.pushNames[sender] = name }
+        if !m.fromMe, let name = m.verifiedName, !name.isEmpty, !sender.isEmpty { cs.verifiedNames[sender] = name }
 
         // Deleted for me: a later (history or redelivered) copy must not bring it back.
         if hasMessageTombstones, try Self.tombstone(db, chatJid, m.id, .message) != nil {
@@ -1037,7 +1048,8 @@ public actor IngestActor {
             }
             incoming.append(IncomingNotice(
                 chatJid: jid, messageId: id, chatTitle: ChatListQuery.title(chat, contact, ownJid: own),
-                senderName: sender, kind: m.kind, text: m.text, timestamp: m.timestamp,
+                senderName: sender, kind: m.kind, text: try m.text.map { Mentions.apply($0, try Mentions.names(db, in: [$0])) },
+                timestamp: m.timestamp,
                 avatarURL: chat.avatarURL))
         }
         cs.notices += incoming.sorted { $0.timestamp < $1.timestamp }.map(NoticeEvent.incoming)
@@ -1078,15 +1090,17 @@ public actor IngestActor {
         // Contacts
         if let lc = try ContactRecord.fetchOne(db, key: lid) {
             try db.execute(sql: """
-                INSERT INTO contact (jid, fullName, firstName, pushName, phone, isBusiness, businessCheckedAt) VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO contact (jid, fullName, firstName, pushName, phone, isBusiness, businessCheckedAt, verifiedName)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(jid) DO UPDATE SET
                     fullName = COALESCE(fullName, excluded.fullName),
                     firstName = COALESCE(firstName, excluded.firstName),
                     pushName = COALESCE(pushName, excluded.pushName),
                     phone = COALESCE(phone, excluded.phone),
                     isBusiness = isBusiness OR excluded.isBusiness,
-                    businessCheckedAt = COALESCE(businessCheckedAt, excluded.businessCheckedAt)
-                """, arguments: [pn, lc.fullName, lc.firstName, lc.pushName, lc.phone, lc.isBusiness, lc.businessCheckedAt])
+                    businessCheckedAt = COALESCE(businessCheckedAt, excluded.businessCheckedAt),
+                    verifiedName = COALESCE(verifiedName, excluded.verifiedName)
+                """, arguments: [pn, lc.fullName, lc.firstName, lc.pushName, lc.phone, lc.isBusiness, lc.businessCheckedAt, lc.verifiedName])
             try db.execute(sql: "DELETE FROM contact WHERE jid = ?", arguments: [lid])
         }
 

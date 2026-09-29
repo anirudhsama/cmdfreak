@@ -9,14 +9,22 @@ public struct MessageItem: Hashable, Sendable, Identifiable {
     public var pollVotes: [PollVoteRecord]
     /// Group chats: the sender's display name (nil for own messages).
     public var senderName: String?
+    /// Names for the users mentioned in the text and quote, keyed by user number (see `Mentions`).
+    public var mentionNames: [String: String]
 
-    public init(message: MessageRecord, media: MediaRecord? = nil, reactions: [ReactionRecord] = [], pollVotes: [PollVoteRecord] = [], senderName: String? = nil) {
+    public init(message: MessageRecord, media: MediaRecord? = nil, reactions: [ReactionRecord] = [], pollVotes: [PollVoteRecord] = [],
+                senderName: String? = nil, mentionNames: [String: String] = [:]) {
         self.message = message
         self.media = media
         self.reactions = reactions
         self.pollVotes = pollVotes
         self.senderName = senderName
+        self.mentionNames = mentionNames
     }
+
+    /// The text with mentions shown by name. `message.text` keeps the wire form.
+    public var displayText: String? { message.text.map { Mentions.apply($0, mentionNames) } }
+    public var displayQuotedSnippet: String? { message.quotedSnippet.map { Mentions.apply($0, mentionNames) } }
 
     public var id: String { message.id }
     public var sortKey: Int64 { message.sortKey }
@@ -63,13 +71,16 @@ enum MessageItemFetcher {
             }
         }
 
+        let mentions = try Mentions.names(db, in: messages.flatMap { [$0.text, $0.quotedSnippet] })
+
         return messages.map { m in
             MessageItem(
                 message: m,
                 media: media[m.id],
                 reactions: reactions[m.id] ?? [],
                 pollVotes: votes[m.id] ?? [],
-                senderName: m.fromMe ? nil : (names[m.senderJid] ?? m.pushName.nonEmpty ?? JID.phoneDisplay(m.senderJid))
+                senderName: m.fromMe ? nil : (names[m.senderJid] ?? m.pushName.nonEmpty ?? JID.phoneDisplay(m.senderJid)),
+                mentionNames: mentions
             )
         }
     }
