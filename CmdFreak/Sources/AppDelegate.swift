@@ -148,6 +148,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: Actions
 
+    #if !DEMO
     @objc func logOut(_ sender: Any?) {
         let alert = NSAlert()
         alert.messageText = "Log out of WhatsApp on this Mac?"
@@ -169,6 +170,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
     }
+    #endif
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
 

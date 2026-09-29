@@ -29,23 +29,34 @@ enum Demo {
     }
 
     /// Moves every stored point in time (a migration that adds a timestamp column must add it here)
-    /// by whole days and the local UTC offset. The generator writes times as GMT, so each message keeps
-    /// its time of day on this Mac's clock; the newest lands on the latest day where it is not in the future.
+    /// by whole days, then from GMT to this Mac's zone using the offset in effect at that moment. The
+    /// generator writes times as GMT, so each message keeps its time of day on this Mac's clock, across
+    /// DST changes too; the newest lands on the latest day where it is not in the future.
     private static func shiftTimestamps(_ database: AppDatabase) throws {
         try database.pool.write { db in
             guard let newest = try Int64.fetchOne(db, sql: "SELECT MAX(timestamp) FROM message") else { return }
-            let offset = Int64(TimeZone.current.secondsFromGMT())
             let latest = Int64(Date().timeIntervalSince1970) - 4 * 60
-            let days = Int64((Double(latest - (newest - offset)) / 86_400).rounded(.down))
-            let delta = days * 86_400 - offset
+            let offsetNow = Int64(TimeZone.current.secondsFromGMT())
+            let days = Int64((Double(latest - (newest - offsetNow)) / 86_400).rounded(.down))
+            db.add(function: DatabaseFunction("demo_shift", argumentCount: 1, pure: true) { values in
+                guard let t = Int64.fromDatabaseValue(values[0]) else { return nil }
+                let wall = t + days * 86_400
+                return wall - Int64(TimeZone.current.secondsFromGMT(for: Date(timeIntervalSince1970: TimeInterval(wall))))
+            })
             for sql in [
-                "UPDATE message SET timestamp = timestamp + ?1, sortKey = sortKey + (?1 << \(SortKey.seqBits)), editedAt = editedAt + ?1",
-                "UPDATE reaction SET timestamp = timestamp + ?1",
-                "UPDATE poll_vote SET timestamp = timestamp + ?1",
-                "UPDATE chat SET lastActivityAt = lastActivityAt + ?1, pinnedAt = pinnedAt + ?1, stateAt = stateAt + ?1",
-                "UPDATE contact SET businessCheckedAt = businessCheckedAt + ?1",
+                """
+                UPDATE message SET sortKey = sortKey + ((demo_shift(timestamp) - timestamp) << \(SortKey.seqBits)),
+                    timestamp = demo_shift(timestamp), editedAt = demo_shift(editedAt)
+                """,
+                "UPDATE reaction SET timestamp = demo_shift(timestamp)",
+                "UPDATE poll_vote SET timestamp = demo_shift(timestamp)",
+                """
+                UPDATE chat SET lastActivityAt = demo_shift(lastActivityAt), pinnedAt = demo_shift(pinnedAt),
+                    stateAt = demo_shift(stateAt)
+                """,
+                "UPDATE contact SET businessCheckedAt = demo_shift(businessCheckedAt)",
             ] {
-                try db.execute(sql: sql, arguments: [delta])
+                try db.execute(sql: sql)
             }
         }
     }
