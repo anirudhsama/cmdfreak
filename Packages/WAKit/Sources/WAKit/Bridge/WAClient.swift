@@ -268,34 +268,63 @@ actor SendRecovery {
     private static func key(_ m: MessageRecord) -> String { m.chatJid + "/" + m.id }
 }
 
-/// Sends read receipts for messages that arrived while their chat was open, batched per chat.
-actor ReadReceiptBatcher {
+/// Sends the read receipts ingest queued in `read_outbox`, one bridge call per chat. A chat's
+/// receipts leave the outbox only once the bridge sent them; a failed send (offline, a dropped
+/// connection) stays queued for the next flush: the next read, or a reconnect. One flush at a time;
+/// calls during one run another after it.
+actor ReadReceiptSender {
+    private let ingest: IngestActor
     private let bridge: any WaBridgeProtocol
     private let delay: Duration
-    private var pending: [String: [BridgeMessageKey]] = [:]
     private var scheduled = false
+    private var running = false
+    private var again = false
 
-    init(bridge: any WaBridgeProtocol, delay: Duration = .milliseconds(300)) {
+    init(ingest: IngestActor, bridge: any WaBridgeProtocol, delay: Duration = .milliseconds(300)) {
+        self.ingest = ingest
         self.bridge = bridge
         self.delay = delay
     }
 
-    func add(_ keys: [String: [BridgeMessageKey]]) {
-        for (chat, k) in keys { pending[chat, default: []].append(contentsOf: k) }
-        guard !scheduled, !pending.isEmpty else { return }
+    /// Flushes after `delay`, so receipts for messages arriving together go out in one call.
+    func schedule() {
+        guard !scheduled else { return }
         scheduled = true
         Task {
             try? await Task.sleep(for: delay)
-            await flush()
+            await runScheduled()
         }
     }
 
-    private func flush() async {
-        let batch = pending
-        pending = [:]
+    func flush() async {
+        if running {
+            again = true
+            return
+        }
+        running = true
+        repeat {
+            again = false
+            await pass()
+        } while again
+        running = false
+    }
+
+    private func runScheduled() async {
         scheduled = false
-        for (chat, keys) in batch {
-            do { try await bridge.markRead(chat: chat, messages: keys) } catch {
+        await flush()
+    }
+
+    private func pass() async {
+        let pending: [String: [BridgeMessageKey]]
+        do { pending = try await ingest.pendingReads() } catch {
+            WAKit.log.error("pending reads: \(error)")
+            return
+        }
+        for (chat, keys) in pending {
+            do {
+                try await bridge.markRead(chat: chat, messages: keys)
+                try await ingest.readsSent(chatJid: chat, ids: keys.map(\.id))
+            } catch {
                 WAKit.log.error("markRead \(chat, privacy: .private) failed: \(error)")
             }
         }
@@ -344,6 +373,7 @@ public final class WAClient: Sendable {
     public let businesses: BusinessService
     public let avatars: AvatarService
     let recovery: SendRecovery
+    let receipts: ReadReceiptSender
     public var feed: MessageChangeFeed { ingest.feed }
     public var focus: ChatFocus { ingest.focus }
     /// Messages to notify about and notifications to withdraw. Single consumer.
@@ -391,7 +421,8 @@ public final class WAClient: Sendable {
         let businesses = BusinessService(bridge: bridge, ingest: ingest)
         self.businesses = businesses
         avatars = AvatarService(bridge: bridge, ingest: ingest)
-        let receipts = ReadReceiptBatcher(bridge: bridge)
+        let receipts = ReadReceiptSender(ingest: ingest, bridge: bridge)
+        self.receipts = receipts
         let retrier = ParkedRetrier(ingest: ingest, bridge: bridge)
 
         // Single consumer: batches are applied one at a time, in bridge order.
@@ -399,6 +430,7 @@ public final class WAClient: Sendable {
             let now = Int64(Date().timeIntervalSince1970)
             try? await ingest.prunePendingMutations(olderThan: now - 14 * 86_400)
             try? await ingest.pruneTombstones(olderThan: now - 90 * 86_400)
+            try? await ingest.pruneReadOutbox(olderThan: now - 14 * 86_400)
             for await batch in ingestStream {
                 var result = IngestResult()
                 do {
@@ -408,7 +440,7 @@ public final class WAClient: Sendable {
                     WAKit.log.error("ingest failed: \(error)")
                     batch.done?.finish(committed: false)
                 }
-                if !result.reads.isEmpty { await receipts.add(result.reads) }
+                if !result.reads.isEmpty { await receipts.schedule() }
                 if !result.parked.isEmpty {
                     await retrier.retry(result.parked)
                     await retrier.scheduleSweep()
@@ -420,6 +452,7 @@ public final class WAClient: Sendable {
                 if batch.events.contains(where: { if case .connection(.connected) = $0 { true } else { false } }) {
                     await retrier.scheduleSweep()
                     Task { await recovery.run(reconnected: true) }
+                    Task { await receipts.flush() }
                 }
                 let staleGroups = batch.events.compactMap { event -> String? in
                     if case .group(let g) = event, g.membershipChanged { g.jid } else { nil }
@@ -480,7 +513,7 @@ public final class WAClient: Sendable {
     public func markRead(_ chatJid: String) async {
         do {
             let result = try await ingest.chatOpened(chatJid)
-            if !result.unreadKeys.isEmpty { try await bridge.markRead(chat: chatJid, messages: result.unreadKeys) }
+            if !result.unreadKeys.isEmpty { await receipts.flush() }
             if result.wasMarkedUnread { try await bridge.markChatRead(chat: chatJid, read: true) }
         } catch {
             WAKit.log.error("markRead \(chatJid, privacy: .private) failed: \(error)")

@@ -236,6 +236,33 @@ import Testing
         #expect(calls.first?.1.map(\.participant) == [F.bob, F.alicePN])
     }
 
+    @Test func failedReceiptsStayQueuedUntilReconnect() async throws {
+        let db = try F.tempDB()
+        let bridge = FakeBridge()
+        let (client, sink) = try await makeClient(db, bridge)
+        await deliver(sink, [F.live(F.message("1", chat: F.bob), F.message("2", chat: F.bob, ts: 1_700_000_001))])
+        bridge.markReadFails = true
+        await client.openChat(F.bob)
+        #expect(try db.chat(F.bob)?.unreadCount == 0)
+        #expect(try db.count("SELECT COUNT(*) FROM read_outbox") == 2)
+
+        // Reopening owes nothing new, but the queued receipts still go out once connected.
+        bridge.markReadFails = false
+        await client.openChat(F.bob)
+        #expect(bridge.calls.withLock { $0.markRead.count } == 1)
+        await deliver(sink, [.connection(state: .connected)])
+        var tries = 0
+        while try db.count("SELECT COUNT(*) FROM read_outbox") > 0, tries < 200 {
+            tries += 1
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(try db.count("SELECT COUNT(*) FROM read_outbox") == 0)
+        let calls = bridge.calls.withLock { $0.markRead }
+        #expect(calls.count == 2)
+        #expect(calls.last?.0 == F.bob)
+        #expect(calls.last?.1.map(\.id) == ["1", "2"])
+    }
+
     @MainActor @Test func logoutForgetsOwnIdentity() async throws {
         let db = try F.tempDB()
         let bridge = FakeBridge()

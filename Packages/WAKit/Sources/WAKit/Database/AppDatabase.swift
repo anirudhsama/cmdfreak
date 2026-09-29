@@ -324,6 +324,20 @@ extension AppDatabase {
                 """, arguments: [MessageStatus.delivered.rank])
         }
 
+        // Read receipts owed for incoming messages we read, written in the transaction that clears
+        // unread and removed once the bridge sent them, so one lost to a dropped connection goes
+        // out on the next flush instead of leaving the phone's unread count behind.
+        m.registerMigration("v11") { db in
+            try db.create(table: "read_outbox", options: .withoutRowID) { t in
+                t.column("chatJid", .text).notNull()
+                t.column("messageId", .text).notNull()
+                t.primaryKey(["chatJid", "messageId"])
+                t.foreignKey(["chatJid", "messageId"], references: "message", columns: ["chatJid", "id"],
+                             onDelete: .cascade, onUpdate: .cascade)
+                t.column("queuedAt", .integer).notNull()
+            }
+        }
+
         return m
     }
 

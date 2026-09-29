@@ -15,7 +15,7 @@ use whatsapp_rust::wacore::upload::{UploadSource, encrypt_media_streaming, encry
 use whatsapp_rust::wacore::net::{HttpClient, HttpRequest};
 use whatsapp_rust_ureq_http_client::UreqHttpClient;
 
-use crate::bridge::{Shared, quote_ctx_for, require_client, sent_result};
+use crate::bridge::{Shared, quote_context, require_client, sent_result};
 use crate::map::media_type;
 use crate::types::*;
 
@@ -282,7 +282,10 @@ pub async fn send_media(
     let stream = matches!(m.kind, SendMediaKind::Video | SendMediaKind::Document) && plain_len > STREAM_THRESHOLD;
     let up = upload_file(&client, path, wa_type, stream, progress).await?;
 
-    let ctx = reply_to.as_ref().map(|k| quote_ctx_for(&shared, k));
+    let ctx = match &reply_to {
+        Some(k) => Some(quote_context(&shared, &client, &to, k).await?),
+        None => None,
+    };
     let ctx_field = || ctx.clone().map(MessageField::some).unwrap_or_default();
     let caption = m.caption.clone().filter(|c| !c.is_empty());
     let doc_name = m.file_name.clone().or_else(|| {
