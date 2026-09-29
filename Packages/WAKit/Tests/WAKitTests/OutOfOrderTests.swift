@@ -19,13 +19,13 @@ import Testing
     @Test func editBeforeOriginalAndStaleEditIgnored() async throws {
         let db = try F.tempDB()
         let ingest = try IngestActor(database: db)
-        try await ingest.apply([F.live(updates: [.edit(target: F.key("E1", chat: F.bob), text: "fixed", editedAt: 200)])])
+        try await ingest.apply([F.live(updates: [.edit(target: F.key("E1", chat: F.bob), text: "fixed", mentions: [], editedAt: 200)])])
         try await ingest.apply([F.live(F.message("E1", chat: F.bob, text: "typo"))])
         var m = try #require(try db.message(F.bob, "E1"))
         #expect(m.text == "fixed" && m.editedAt == 200)
         #expect(try db.chat(F.bob)?.lastMessageText == "fixed")
 
-        try await ingest.apply([F.live(updates: [.edit(target: F.key("E1", chat: F.bob), text: "older", editedAt: 150)])])
+        try await ingest.apply([F.live(updates: [.edit(target: F.key("E1", chat: F.bob), text: "older", mentions: [], editedAt: 150)])])
         m = try #require(try db.message(F.bob, "E1"))
         #expect(m.text == "fixed")
         #expect(try db.count("SELECT COUNT(*) FROM message_fts WHERE message_fts MATCH 'fixed'") == 1)
@@ -57,7 +57,7 @@ import Testing
         let ingest = try IngestActor(database: db)
         // Same batch: updates are applied after the batch's messages, but a later chunk may still precede.
         try await ingest.apply([
-            F.history(updates: [.edit(target: F.key("B1", chat: F.bob), text: "v2", editedAt: 9)]),
+            F.history(updates: [.edit(target: F.key("B1", chat: F.bob), text: "v2", mentions: [], editedAt: 9)]),
             F.history(messages: [F.message("B1", chat: F.bob, text: "v1")]),
         ])
         #expect(try db.message(F.bob, "B1")?.text == "v2")
@@ -160,10 +160,10 @@ import Testing
         let db = try F.tempDB()
         let ingest = try IngestActor(database: db)
         try await ingest.apply([.chatAction(action: .deleteMessageForMe(target: F.key("D", chat: F.bob)))])
-        try await ingest.apply([F.live(updates: [.edit(target: F.key("D", chat: F.bob), text: "x", editedAt: 5)])])
+        try await ingest.apply([F.live(updates: [.edit(target: F.key("D", chat: F.bob), text: "x", mentions: [], editedAt: 5)])])
         #expect(try db.count("SELECT COUNT(*) FROM pending_mutation") == 0)
         // Parked before the delete and still there when the (deleted) message shows up: dropped then.
-        try await ingest.apply([F.live(updates: [.edit(target: F.key("E", chat: F.bob), text: "x", editedAt: 5)])])
+        try await ingest.apply([F.live(updates: [.edit(target: F.key("E", chat: F.bob), text: "x", mentions: [], editedAt: 5)])])
         try await db.pool.write { db in
             try db.execute(sql: "INSERT INTO tombstone (chatJid, messageId, kind, senderJid, timestamp) VALUES (?, 'E', 'message', '', 0)",
                            arguments: [F.bob])

@@ -65,7 +65,7 @@ import Testing
                    F.message("R", chat: F.aliceLID, kind: .image, media: F.media()), F.message("E", chat: F.aliceLID), F.message("P", chat: F.aliceLID, kind: .poll, text: nil, poll: poll),
                    updates: [
                        .revoke(target: F.key("R", chat: F.aliceLID), revokedBy: F.aliceLID, timestamp: 5),
-                       .edit(target: F.key("E", chat: F.aliceLID), text: "edited", editedAt: 9),
+                       .edit(target: F.key("E", chat: F.aliceLID), text: "edited", mentions: [], editedAt: 9),
                        .reaction(target: F.key("E", chat: F.aliceLID),
                                  reaction: BridgeReaction(senderJid: F.me, fromMe: true, emoji: "👍", timestamp: 2)),
                        .pollVote(target: F.key("P", chat: F.aliceLID), voterJid: F.me, selected: ["B"], timestamp: 3),

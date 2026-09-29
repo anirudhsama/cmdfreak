@@ -6,7 +6,7 @@ import os
 
 /// A mutation of a message that may arrive before the message itself; parked in `pending_mutation`.
 enum MessageMutation: Codable, Hashable, Sendable {
-    case edit(text: String?, editedAt: Int64)
+    case edit(text: String?, mentions: [String]? = nil, editedAt: Int64)
     case revoke(timestamp: Int64)
     case reaction(senderJid: String, fromMe: Bool, emoji: String, timestamp: Int64)
     case pollVote(voterJid: String, selected: [String], timestamp: Int64)
@@ -726,7 +726,9 @@ public actor IngestActor {
         let extra = MessageExtra(
             location: m.location.map { LocationInfo(latitude: $0.latitude, longitude: $0.longitude, name: $0.name, address: $0.address, isLive: $0.isLive) },
             contact: m.contact.map { ContactCardInfo(displayName: $0.displayName, vcard: $0.vcard) },
-            poll: m.poll.map { PollInfo(question: $0.question, options: $0.options, selectableCount: Int($0.selectableCount)) }
+            poll: m.poll.map { PollInfo(question: $0.question, options: $0.options, selectableCount: Int($0.selectableCount)) },
+            mentions: Mentions.stored(m.mentions, text: m.text),
+            quotedMentions: m.quoted.flatMap { Mentions.stored($0.mentions, text: $0.snippet) }
         )
         return extra.isEmpty ? nil : extra
     }
@@ -774,8 +776,8 @@ public actor IngestActor {
 
     private func applyUpdate(_ u: BridgeMessageUpdate, _ db: Database, _ cs: inout ChangeSet) throws {
         switch u {
-        case .edit(let target, let text, let editedAt):
-            try applyOrPark(db, target, .edit(text: text, editedAt: editedAt), &cs)
+        case .edit(let target, let text, let mentions, let editedAt):
+            try applyOrPark(db, target, .edit(text: text, mentions: Mentions.stored(mentions, text: text), editedAt: editedAt), &cs)
         case .revoke(let target, _, let timestamp):
             try applyOrPark(db, target, .revoke(timestamp: timestamp), &cs)
         case .reaction(let target, let r):
@@ -911,11 +913,14 @@ public actor IngestActor {
         }
         let key: StatementArguments = [chatJid, id]
         switch mutation {
-        case .edit(let text, let editedAt):
+        case .edit(let text, let mentions, let editedAt):
+            let mentionsJSON = try mentions.map { String(decoding: try JSONEncoder().encode($0), as: UTF8.self) }
             try db.execute(sql: """
-                UPDATE message SET text = ?, editedAt = ?
+                UPDATE message SET text = ?, editedAt = ?,
+                    extra = CASE WHEN ? IS NULL THEN json_remove(extra, '$.mentions')
+                                 ELSE json_set(COALESCE(extra, '{}'), '$.mentions', json(?)) END
                 WHERE chatJid = ? AND id = ? AND revoked = 0 AND (editedAt IS NULL OR editedAt <= ?)
-                """, arguments: [text, editedAt] + key + [editedAt])
+                """, arguments: [text, editedAt, mentionsJSON, mentionsJSON] + key + [editedAt])
         case .revoke:
             try db.execute(sql: "UPDATE message SET revoked = 1, text = NULL WHERE chatJid = ? AND id = ?", arguments: key)
             try db.execute(sql: "DELETE FROM media WHERE chatJid = ? AND messageId = ?", arguments: key)
@@ -1324,6 +1329,7 @@ public actor IngestActor {
     private func resolveAlerts(_ db: Database, _ cs: inout ChangeSet) throws {
         let cutoff = Self.now - Self.maxAlertAge
         let own = try ChatListQuery.ownJid(db)
+        var resolver = try Mentions.Resolver(db)
         var incoming: [IncomingNotice] = []
         for (jid, alert) in cs.alerts {
             let id = alert.id
@@ -1340,7 +1346,8 @@ public actor IngestActor {
             }
             incoming.append(IncomingNotice(
                 chatJid: jid, messageId: id, chatTitle: ChatListQuery.title(chat, contact, ownJid: own),
-                senderName: sender, kind: m.kind, text: try m.text.map { Mentions.apply($0, try Mentions.names(db, in: [$0])) },
+                senderName: sender, kind: m.kind,
+                text: try m.text.map { Mentions.apply($0, try resolver.mentions(in: $0, jids: m.extra?.mentions)) },
                 timestamp: m.timestamp,
                 avatarURL: chat.avatarURL))
         }

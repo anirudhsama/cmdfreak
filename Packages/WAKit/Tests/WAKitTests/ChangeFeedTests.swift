@@ -22,7 +22,7 @@ import Testing
 
         try await ingest.apply([F.live(F.message("a", chat: F.bob), F.message("b", chat: F.bob, ts: 1_700_000_001))])
         try await ingest.apply([F.live(F.message("g", chat: F.group, sender: F.bob))])
-        try await ingest.apply([F.live(updates: [.edit(target: F.key("a", chat: F.bob), text: "edited", editedAt: 9)])])
+        try await ingest.apply([F.live(updates: [.edit(target: F.key("a", chat: F.bob), text: "edited", mentions: [], editedAt: 9)])])
         try await ingest.apply([.chatAction(action: .deleteMessageForMe(target: F.key("b", chat: F.bob)))])
         try await ingest.apply([.chatAction(action: .clear(chatJid: F.bob))])
 
@@ -149,7 +149,7 @@ import Testing
         let pending = try await ingest.insertOutgoing(chatJid: F.bob, text: "yo")
         try await ingest.apply([.serverAck(ack: BridgeServerAck(chatJid: F.aliceLID, messageId: "SRV1", error: nil))])
         try await ingest.apply([.messages(messages: [], updates: [
-            .edit(target: BridgeMessageKey(chatJid: F.group, id: "SRV1", fromMe: false, participant: F.alicePN), text: "e", editedAt: 1)])])
+            .edit(target: BridgeMessageKey(chatJid: F.group, id: "SRV1", fromMe: false, participant: F.alicePN), text: "e", mentions: [], editedAt: 1)])])
         try await ingest.completeSend(localId: pending.id, chatJid: F.bob, result: BridgeSendResult(
             messageId: "SRV1", timestamp: 1_700_000_900, message: F.message("SRV1", chat: F.bob, fromMe: true, text: "yo")))
         #expect(try db.message(F.bob, "SRV1")?.status == .sent)

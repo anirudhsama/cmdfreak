@@ -9,22 +9,24 @@ public struct MessageItem: Hashable, Sendable, Identifiable {
     public var pollVotes: [PollVoteRecord]
     /// Group chats: the sender's display name (nil for own messages).
     public var senderName: String?
-    /// The users mentioned in the text and quote, keyed by user number (see `Mentions`).
+    /// The users mentioned in the text, and in the quote, keyed by user number (see `Mentions`).
     public var mentions: [String: Mention]
+    public var quotedMentions: [String: Mention]
 
     public init(message: MessageRecord, media: MediaRecord? = nil, reactions: [ReactionRecord] = [], pollVotes: [PollVoteRecord] = [],
-                senderName: String? = nil, mentions: [String: Mention] = [:]) {
+                senderName: String? = nil, mentions: [String: Mention] = [:], quotedMentions: [String: Mention] = [:]) {
         self.message = message
         self.media = media
         self.reactions = reactions
         self.pollVotes = pollVotes
         self.senderName = senderName
         self.mentions = mentions
+        self.quotedMentions = quotedMentions
     }
 
     /// The text with mentions shown by name. `message.text` keeps the wire form.
     public var displayText: String? { message.text.map { Mentions.apply($0, mentions) } }
-    public var displayQuotedSnippet: String? { message.quotedSnippet.map { Mentions.apply($0, mentions) } }
+    public var displayQuotedSnippet: String? { message.quotedSnippet.map { Mentions.apply($0, quotedMentions) } }
 
     public var id: String { message.id }
     public var sortKey: Int64 { message.sortKey }
@@ -71,16 +73,16 @@ enum MessageItemFetcher {
             }
         }
 
-        let mentions = try Mentions.resolve(db, in: messages.flatMap { [$0.text, $0.quotedSnippet] })
-
-        return messages.map { m in
+        var resolver = try Mentions.Resolver(db)
+        return try messages.map { m in
             MessageItem(
                 message: m,
                 media: media[m.id],
                 reactions: reactions[m.id] ?? [],
                 pollVotes: votes[m.id] ?? [],
                 senderName: m.fromMe ? nil : (names[m.senderJid] ?? m.pushName.nonEmpty ?? JID.phoneDisplay(m.senderJid)),
-                mentions: mentions
+                mentions: try resolver.mentions(in: m.text, jids: m.extra?.mentions),
+                quotedMentions: try resolver.mentions(in: m.quotedSnippet, jids: m.extra?.quotedMentions)
             )
         }
     }

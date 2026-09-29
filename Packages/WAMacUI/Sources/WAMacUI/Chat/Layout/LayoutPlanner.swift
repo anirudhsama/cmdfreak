@@ -100,7 +100,7 @@ enum LayoutPlanner {
             let snippet = quoteSnippet(m, m.quotedSnippet)
             let nameAttr = NSAttributedString(string: qName, attributes: [.font: C.quoteName, .foregroundColor: C.senderColor(for: m.quotedSenderJid ?? "me")])
             let snipAttr = NSMutableAttributedString(string: snippet, attributes: [.font: C.quoteBody, .foregroundColor: NSColor.secondaryLabelColor])
-            MarkdownLite.replaceMentions(item.mentions, in: snipAttr)
+            MarkdownLite.replaceMentions(item.quotedMentions, in: snipAttr)
             let w = min(innerMax, max(180, ceil(snipAttr.size().width) + 24, TextMeasurer.width(qName, font: C.quoteName) + 24))
             quote = .init(frame: CGRect(x: M.bubblePaddingH, y: contentY, width: w, height: M.quoteHeight),
                           name: nameAttr, snippet: snipAttr, color: C.senderColor(for: m.quotedSenderJid ?? "me"), targetId: qid)

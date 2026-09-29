@@ -51,35 +51,89 @@ public enum Mentions {
         return cursor == text.startIndex ? text : out + text[cursor...]
     }
 
-    /// Names for the numbers mentioned in `texts`, keyed by user number. Unknown users are left out,
-    /// so their mention stays as written.
+    /// Names for the numbers mentioned in `texts`, keyed by user number, guessing which user each
+    /// number is (see `Resolver`). Unknown users are left out, so their mention stays as written.
     public static func names(_ db: Database, in texts: some Sequence<String?>) throws -> [String: String] {
-        try resolve(db, in: texts).mapValues(\.name)
+        var resolver = try Resolver(db)
+        var out: [String: String] = [:]
+        for text in texts {
+            for (user, mention) in try resolver.mentions(in: text, jids: nil) { out[user] = mention.name }
+        }
+        return out
     }
 
-    /// The users mentioned in `texts`, keyed by user number. Unknown users are left out.
-    public static func resolve(_ db: Database, in texts: some Sequence<String?>) throws -> [String: Mention] {
-        let users = Set(texts.lazy.compactMap { $0 }.filter { $0.contains("@") }.flatMap(users(in:)).map(String.init))
-        guard !users.isEmpty else { return [:] }
-        let own = try Set(String.fetchAll(db, sql: "SELECT value FROM meta WHERE key IN ('ownPn', 'ownLid')").map(JID.user))
-        var out: [String: Mention] = [:]
-        for user in users {
-            if own.contains(user) { out[user] = Mention(name: "You", jid: nil, phone: nil); continue }
-            let lid = user + "@lid"
-            let pn = try String.fetchOne(db, sql: "SELECT pn FROM jid_alias WHERE lid = ?", arguments: [lid])
-            let candidates = [pn, lid, user + "@s.whatsapp.net"].compactMap { $0 }
+    /// Stored form of a message's mentioned JIDs: nil when there are none and the text has no "@", so
+    /// messages without mentions store nothing. nil otherwise means "not recorded" (see `Resolver`).
+    static func stored(_ jids: [String], text: String?) -> [String]? {
+        jids.isEmpty && !(text?.contains("@") ?? false) ? nil : jids
+    }
+
+    /// Resolves the users a text mentions, caching lookups across a page of messages.
+    struct Resolver {
+        private let db: Database
+        private let own: Set<String>
+        private var cache: [String: Mention?] = [:]
+
+        init(_ db: Database) throws {
+            self.db = db
+            own = try Set(String.fetchAll(db, sql: "SELECT value FROM meta WHERE key IN ('ownPn', 'ownLid')").map(JID.user))
+        }
+
+        /// The users mentioned in `text`, keyed by user number. `jids` are the JIDs the message says it
+        /// mentions: only "@<number>"s among them count. nil for messages stored before those were
+        /// kept (and quotes filled from their target), where each number is tried as a LID, then a
+        /// phone number. Unknown users are left out.
+        mutating func mentions(in text: String?, jids: [String]?) throws -> [String: Mention] {
+            guard let text, text.contains("@") else { return [:] }
+            let users = Set(Mentions.users(in: text).map(String.init))
+            let targets: [(user: String, jid: String?)] = jids.map { jids in
+                jids.map { (JID.user($0), $0) }.filter { users.contains($0.user) }
+            } ?? users.map { ($0, nil) }
+            var out: [String: Mention] = [:]
+            for t in targets {
+                let key = t.user + " " + (t.jid ?? "")
+                if cache[key] == nil { cache[key] = .some(try resolve(t.user, jid: t.jid)) }
+                if let mention = cache[key] ?? nil { out[t.user] = mention }
+            }
+            return out
+        }
+
+        private func resolve(_ user: String, jid: String?) throws -> Mention? {
+            if own.contains(user) { return Mention(name: "You", jid: nil, phone: nil) }
+            // Phone-number and LID forms of the user; contacts may be stored under either.
+            var pn: String?
+            let candidates: [String]
+            switch jid {
+            case let jid? where JID.isLid(jid):
+                pn = try pnFor(jid)
+                candidates = [pn, jid].compactMap { $0 }
+            case let jid? where JID.isPhoneNumber(jid):
+                pn = jid
+                candidates = [jid, try String.fetchOne(db, sql: "SELECT lid FROM jid_alias WHERE pn = ?", arguments: [jid])].compactMap { $0 }
+            case let jid?:
+                candidates = [jid]
+            case nil:
+                let lid = user + "@lid"
+                pn = try pnFor(lid)
+                candidates = [pn, lid, user + "@s.whatsapp.net"].compactMap { $0 }
+            }
             let contacts = Dictionary(try ContactRecord.fetchAll(db, keys: candidates).map { ($0.jid, $0) },
                                       uniquingKeysWith: { a, _ in a })
             let named = candidates.lazy.compactMap { jid in
                 contacts[jid]?.displayName.flatMap(ChatListQuery.unmasked).map { (jid, $0) }
             }.first
+            // An unnamed guessed number counts as a phone number only if we know that contact.
+            if jid == nil, pn == nil, named == nil, let phone = candidates.last, contacts[phone] != nil { pn = phone }
             // Nameless but known: show the phone number, like the phone does.
-            let known = pn ?? candidates.last.flatMap { contacts[$0] == nil ? nil : $0 }
-            guard let jid = pn ?? named?.0 ?? known else { continue }
-            let phone = JID.phoneDisplay(jid)
-            if let name = named?.1 ?? phone { out[user] = Mention(name: name, jid: jid, phone: phone) }
+            guard let chat = pn ?? named?.0 else { return nil }
+            let phone = JID.phoneDisplay(chat)
+            guard let name = named?.1 ?? phone else { return nil }
+            return Mention(name: name, jid: chat, phone: phone)
         }
-        return out
+
+        private func pnFor(_ lid: String) throws -> String? {
+            try String.fetchOne(db, sql: "SELECT pn FROM jid_alias WHERE lid = ?", arguments: [lid])
+        }
     }
 
     private static func tokens(in text: String) -> [(range: Range<String.Index>, user: Substring)] {

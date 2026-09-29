@@ -110,8 +110,12 @@ public struct MessageExtra: Codable, Hashable, Sendable {
     public var location: LocationInfo?
     public var contact: ContactCardInfo?
     public var poll: PollInfo?
+    /// JIDs the text mentions, as sent (see `Mentions.stored`); nil for rows stored before these were kept.
+    public var mentions: [String]?
+    /// JIDs the quoted text mentions, likewise.
+    public var quotedMentions: [String]?
 
-    var isEmpty: Bool { location == nil && contact == nil && poll == nil }
+    var isEmpty: Bool { location == nil && contact == nil && poll == nil && mentions == nil && quotedMentions == nil }
 }
 
 public struct MessageRecord: Codable, Hashable, Sendable, FetchableRecord, MutablePersistableRecord, Identifiable {

@@ -1155,11 +1155,13 @@ pub(crate) fn sent_result(
             timestamp: now,
             kind,
             text,
+            mentions: vec![],
             quoted: reply_to.map(|k| BridgeQuoted {
                 id: k.id,
                 sender_jid: k.participant,
                 kind: MessageKind::Unsupported,
                 snippet: String::new(),
+                mentions: vec![],
             }),
             media,
             location: None,
