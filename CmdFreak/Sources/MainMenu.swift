@@ -27,9 +27,12 @@ enum MainMenu {
         let name = ProcessInfo.processInfo.processName
         let menu = NSMenu(title: name)
         menu.addItem(item("About \(name)", #selector(NSApplication.orderFrontStandardAboutPanel(_:))))
+        // The demo has no account to log out of and is not updated in place.
+        #if !DEMO
         menu.addItem(item("Check for Updates…", #selector(AppDelegate.checkForUpdates(_:))))
         menu.addItem(.separator())
         menu.addItem(item("Log Out…", #selector(AppDelegate.logOut(_:))))
+        #endif
         menu.addItem(.separator())
         let services = NSMenu(title: "Services")
         let servicesItem = item("Services", nil)

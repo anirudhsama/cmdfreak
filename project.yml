@@ -10,6 +10,24 @@ settings:
     ARCHS: arm64
     ONLY_ACTIVE_ARCH: YES
     MACOSX_DEPLOYMENT_TARGET: "26.0"
+settingGroups:
+  # Shared by CmdFreak and CmdFreak Demo.
+  app:
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+    # Ad-hoc locally; CI passes the self-signed release identity. A command-line
+    # CODE_SIGN_IDENTITY would also reach SPM resource bundles, which then demand a team.
+    CMDFREAK_SIGN_IDENTITY: "-"
+    CODE_SIGN_IDENTITY: "$(CMDFREAK_SIGN_IDENTITY)"
+    CODE_SIGN_STYLE: Manual
+    ENABLE_HARDENED_RUNTIME: YES
+    ENABLE_APP_SANDBOX: NO
+    ENABLE_USER_SCRIPT_SANDBOXING: NO
+    SWIFT_STRICT_CONCURRENCY: complete
+    OTHER_CODE_SIGN_FLAGS: "--options=runtime"
+    # Hardened runtime rejects the separately ad-hoc-signed CmdFreak.debug.dylib.
+    ENABLE_DEBUG_DYLIB: NO
 packages:
   WAMacUI:
     path: Packages/WAMacUI
@@ -50,25 +68,48 @@ targets:
         # embedded Sparkle.framework. Drop this once releases are signed with a paid Developer ID.
         com.apple.security.cs.disable-library-validation: true
     settings:
+      groups: [app]
       base:
         PRODUCT_BUNDLE_IDENTIFIER: net.anirudhs.CmdFreak
-        MARKETING_VERSION: "0.1.0"
-        CURRENT_PROJECT_VERSION: "1"
         # Public half of the key CI signs updates with (SPARKLE_PRIVATE_KEY); see scripts/setup-release-signing.sh.
         SPARKLE_PUBLIC_KEY: "bd49RGNIwHPobZV1EP4lwfXJ/Ul1e/sxe7OdOk8FSW8="
-        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
-        # Ad-hoc locally; CI passes the self-signed release identity. A command-line
-        # CODE_SIGN_IDENTITY would also reach SPM resource bundles, which then demand a team.
-        CMDFREAK_SIGN_IDENTITY: "-"
-        CODE_SIGN_IDENTITY: "$(CMDFREAK_SIGN_IDENTITY)"
-        CODE_SIGN_STYLE: Manual
-        ENABLE_HARDENED_RUNTIME: YES
-        ENABLE_APP_SANDBOX: NO
-        ENABLE_USER_SCRIPT_SANDBOXING: NO
-        SWIFT_STRICT_CONCURRENCY: complete
-        OTHER_CODE_SIGN_FLAGS: "--options=runtime"
-        # Hardened runtime rejects the separately ad-hoc-signed CmdFreak.debug.dylib.
-        ENABLE_DEBUG_DYLIB: NO
+    preBuildScripts:
+      - name: Build wa-bridge
+        script: '"$SRCROOT/scripts/build-bridge.sh" --if-stale'
+        basedOnDependencyAnalysis: false
+  # Made-up chats from a bundled database, no WhatsApp account and no network (see Tools/demo-gen).
+  # Its own bundle ID and storage folders, no Sparkle.
+  CmdFreak Demo:
+    type: application
+    platform: macOS
+    sources:
+      - CmdFreak/Sources
+      - path: CmdFreak/Resources
+        optional: true
+      - CmdFreak/Demo/Sources
+      - path: CmdFreak/Demo/Resources/Demo
+        type: folder
+        buildPhase: resources
+    dependencies:
+      - package: WAMacUI
+      - package: WAKit
+    info:
+      path: CmdFreak/Demo/Info.plist
+      properties:
+        CFBundleDisplayName: CmdFreak Demo
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
+        LSApplicationCategoryType: public.app-category.social-networking
+        LSMinimumSystemVersion: "26.0"
+        NSPrincipalClass: NSApplication
+        # Read by WAKit.storageName.
+        CmdFreakStorageName: CmdFreak Demo
+    settings:
+      groups: [app]
+      base:
+        PRODUCT_NAME: CmdFreak Demo
+        PRODUCT_BUNDLE_IDENTIFIER: net.anirudhs.CmdFreak.Demo
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) DEMO"
     preBuildScripts:
       - name: Build wa-bridge
         script: '"$SRCROOT/scripts/build-bridge.sh" --if-stale'
@@ -78,5 +119,11 @@ schemes:
     build:
       targets:
         CmdFreak: all
+    run:
+      config: Debug
+  CmdFreak Demo:
+    build:
+      targets:
+        CmdFreak Demo: all
     run:
       config: Debug

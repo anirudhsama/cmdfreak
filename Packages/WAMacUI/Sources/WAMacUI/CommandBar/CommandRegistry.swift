@@ -105,9 +105,13 @@ public final class CommandRegistry {
                       shortcut: "⌥⌘5", tag: 5, #selector(MainWindowController.selectRailItem(_:))),
                 .menu("view.sidebar", "Toggle Sidebar", symbol: "sidebar.left", keywords: ["sidebar", "hide list"],
                       shortcut: "⌃⌘S", #selector(NSSplitViewController.toggleSidebar(_:))),
-                .menu("app.logout", "Log Out…", symbol: "rectangle.portrait.and.arrow.right", keywords: ["sign out", "unlink", "logout"],
-                      Selector(("logOut:"))),
             ]
+        }
+        // Only when the app handles it: the demo app has no account to log out of.
+        registry.register { _ in
+            guard NSApp.target(forAction: Selector(("logOut:"))) != nil else { return [] }
+            return [.menu("app.logout", "Log Out…", symbol: "rectangle.portrait.and.arrow.right", keywords: ["sign out", "unlink", "logout"],
+                          Selector(("logOut:")))]
         }
         return registry
     }

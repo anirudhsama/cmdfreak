@@ -52,6 +52,13 @@ Requires macOS 26 on Apple silicon.
 
 Later versions arrive through **CmdFreak → Check for Updates…** and install without the Gatekeeper step.
 
+### Demo
+
+To try CmdFreak without linking an account, download `CmdFreak-Demo-<version>.dmg` from the same
+release. It opens on a set of made-up chats, groups and businesses and never connects to WhatsApp.
+Messages you send are delivered and read locally, and every launch starts from the same state. It keeps
+its data in separate `CmdFreak Demo` folders, installs next to CmdFreak, and does not update itself.
+
 ## Privacy
 
 Everything stays on your Mac. The session keys and the message database live in
@@ -76,10 +83,17 @@ open CmdFreak.xcodeproj
 The Xcode build rebuilds the bridge when Rust sources change. Debug builds are ad-hoc signed and
 never check for updates. `swift build` and `swift test` work inside each package under `Packages/`.
 
+The **CmdFreak Demo** scheme builds the demo app. Its chats live in `CmdFreak/Demo/Resources/Demo`:
+`demo.sqlite` plus the photos, voice notes and avatars it refers to. The database is generated from
+`Tools/demo-gen/Sources/demo-gen/Content.swift`; after editing the chats (or adding a migration), run
+`swift run --package-path Tools/demo-gen` and commit the new `demo.sqlite`. Photos are from
+[Lorem Picsum](https://picsum.photos) (Unsplash license).
+
 ### Layout
 
 ```
 CmdFreak/        app target: entry point, menus, Info.plist, entitlements, icon
+  Demo/          demo app: stub bridge, bundled database and media
 Packages/
   WAKit/         data layer: GRDB database, ingest, sync, media store
   WAMacUI/       AppKit and SwiftUI interface
@@ -88,6 +102,7 @@ rust/
   wa-bridge/     UniFFI bridge over whatsapp-rust
   wa-link/       CLI that links an account and records events for fixtures
 Tools/wa-cli/    CLI for smoke-testing the bridge
+Tools/demo-gen/  generates the demo app's database
 scripts/         bridge build and release setup
 ```
 
@@ -95,7 +110,7 @@ scripts/         bridge build and release setup
 
 Releases are built by the **Release** workflow (Actions → Release → version `X.Y.Z`). It signs the
 app, publishes a DMG, a zip and a Sparkle appcast to GitHub Releases, and installed copies pick it
-up from there. `scripts/setup-release-signing.sh` creates the signing identity and update key once.
+up from there. The same release carries the demo app's DMG. `scripts/setup-release-signing.sh` creates the signing identity and update key once.
 
 ## Disclaimer
 
