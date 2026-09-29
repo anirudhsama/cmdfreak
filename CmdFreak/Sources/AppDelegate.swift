@@ -1,11 +1,13 @@
 import AppKit
+#if !DEMO
 import Sparkle
+#endif
 import WAKit
 import WAMacUI
 
 @main
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
+final class AppDelegate: NSObject, NSApplicationDelegate {
     private var client: WAClient!
     private var mainWindow: MainWindowController?
     private var onboarding: OnboardingWindowController?
@@ -17,6 +19,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     private var liveSeedTask: Task<Void, Never>?
     /// Debug: onboarding forced by `CMDFREAK_ONBOARDING`, so no bridge calls are made.
     private var inertOnboarding: OnboardingModel.Method?
+    #if !DEMO
     /// Checks the appcast daily. Never started in Debug, so dev builds are not offered releases.
     private let updater: SPUStandardUpdaterController = {
         #if DEBUG
@@ -25,6 +28,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         SPUStandardUpdaterController(startingUpdater: true, updaterDelegate: nil, userDriverDelegate: nil)
         #endif
     }()
+    #endif
 
     static func main() {
         let app = NSApplication.shared
@@ -80,6 +84,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     }
 
     private func makeClient() throws -> WAClient {
+        #if DEMO
+        return try Demo.makeClient()
+        #else
         #if DEBUG
         if DevSupport.seedCount != nil {
             let dir = try DevSupport.seedDirectory()
@@ -87,14 +94,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         }
         #endif
         return try WAClient(database: AppDatabase.openDefault())
+        #endif
     }
 
     /// Seeded debug runs stay silent unless they simulate live traffic.
     private var notificationsEnabled: Bool {
+        #if DEMO
+        return false
+        #else
         #if DEBUG
         if DevSupport.seedCount != nil { return DevSupport.seedLive }
         #endif
         return true
+        #endif
     }
 
     /// Onboarding until the first history chunk lands (or when logged out); the main window otherwise.
@@ -135,15 +147,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     }
 
     // MARK: Actions
-
-    @objc func checkForUpdates(_ sender: Any?) {
-        updater.checkForUpdates(sender)
-    }
-
-    func validateMenuItem(_ item: NSMenuItem) -> Bool {
-        guard item.action == #selector(checkForUpdates(_:)) else { return true }
-        return updater.updater.canCheckForUpdates
-    }
 
     @objc func logOut(_ sender: Any?) {
         let alert = NSAlert()
@@ -205,3 +208,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     }
     #endif
 }
+
+#if !DEMO
+extension AppDelegate: NSMenuItemValidation {
+    @objc func checkForUpdates(_ sender: Any?) {
+        updater.checkForUpdates(sender)
+    }
+
+    func validateMenuItem(_ item: NSMenuItem) -> Bool {
+        guard item.action == #selector(checkForUpdates(_:)) else { return true }
+        return updater.updater.canCheckForUpdates
+    }
+}
+#endif

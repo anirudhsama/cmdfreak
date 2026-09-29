@@ -102,13 +102,30 @@ jobs:
           codesign -dv "$APP" 2>&1 | grep -E '^(Authority|Runtime|Identifier)'
           echo "APP=$APP" >> "$GITHUB_ENV"
 
-      - name: Package DMG and zip
+      # Bundled made-up chats, no account or network; shipped as a DMG only (never in the appcast).
+      - name: Build demo app
+        run: |
+          xcodebuild -project CmdFreak.xcodeproj -scheme "CmdFreak Demo" -configuration Release \
+            -derivedDataPath "$DERIVED_DATA" \
+            CMDFREAK_SIGN_IDENTITY="$SIGNING_IDENTITY" \
+            MARKETING_VERSION="$VERSION" CURRENT_PROJECT_VERSION="$BUILD_NUMBER" \
+            build
+          DEMO_APP="$DERIVED_DATA/Build/Products/Release/CmdFreak Demo.app"
+          codesign --verify --deep --strict "$DEMO_APP"
+          echo "DEMO_APP=$DEMO_APP" >> "$GITHUB_ENV"
+
+      - name: Package DMGs and zip
         run: |
           mkdir -p dist
-          STAGE="$(mktemp -d)"
-          cp -R "$APP" "$STAGE/"
-          ln -s /Applications "$STAGE/Applications"
-          diskutil image create from "$STAGE" --format UDZO --volumeName CmdFreak "dist/CmdFreak-$VERSION.dmg"
+          dmg() {
+            local stage
+            stage="$(mktemp -d)"
+            cp -R "$1" "$stage/"
+            ln -s /Applications "$stage/Applications"
+            diskutil image create from "$stage" --format UDZO --volumeName "$2" "$3"
+          }
+          dmg "$APP" CmdFreak "dist/CmdFreak-$VERSION.dmg"
+          dmg "$DEMO_APP" "CmdFreak Demo" "dist/CmdFreak-Demo-$VERSION.dmg"
           # ditto keeps symlinks and the code signature intact; plain zip breaks the seal.
           ditto -c -k --keepParent --sequesterRsrc "$APP" "dist/CmdFreak-$VERSION.zip"
 
@@ -169,7 +186,7 @@ jobs:
       - name: Publish GitHub release
         run: |
           gh release create "$TAG" \
-            "dist/CmdFreak-$VERSION.dmg" "dist/CmdFreak-$VERSION.zip" dist/appcast.xml \
+            "dist/CmdFreak-$VERSION.dmg" "dist/CmdFreak-Demo-$VERSION.dmg" "dist/CmdFreak-$VERSION.zip" dist/appcast.xml \
             --target "$GITHUB_SHA" \
             --title "CmdFreak $VERSION" \
             --notes-file "$RUNNER_TEMP/notes.md"
