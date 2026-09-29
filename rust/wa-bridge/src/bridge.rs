@@ -882,7 +882,7 @@ impl WaBridge {
             let pic = match contacts.lookup_profile_picture_with_options(options).await.map_err(net)? {
                 whatsapp_rust::ProfilePictureLookup::Found(pic) => pic,
                 whatsapp_rust::ProfilePictureLookup::RateOverlimit => {
-                    return Err(BridgeError::Network("profile picture rate-overlimit".into()));
+                    return Err(BridgeError::RateLimited);
                 }
                 _ => return Ok(false),
             };

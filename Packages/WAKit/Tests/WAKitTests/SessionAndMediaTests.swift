@@ -169,8 +169,33 @@ import AppKit
         // Next launch: answered from the contact's record.
         #expect(await AvatarService(bridge: bridge, ingest: ingest, root: root).avatar(for: F.alicePN) == url)
         #expect(bridge.calls.withLock { $0.profilePictures.count } == 1)
+        // A DM chat that appears later takes the contact's record instead of asking again.
+        try await ingest.apply([F.live(F.message("b", chat: F.alicePN))])
+        #expect(await AvatarService(bridge: bridge, ingest: ingest, root: root).avatar(for: F.alicePN) == url)
+        #expect(bridge.calls.withLock { $0.profilePictures.count } == 1)
+        #expect(try db.chat(F.alicePN)?.hasAvatar == true)
+        // Changed to none: asked again, and the old file goes.
         try await ingest.apply([.pictureChanged(jid: F.alicePN)])
-        _ = await AvatarService(bridge: bridge, ingest: ingest, root: root).avatar(for: F.alicePN)
+        bridge.hasPicture = false
+        #expect(await AvatarService(bridge: bridge, ingest: ingest, root: root).avatar(for: F.alicePN) == nil)
         #expect(bridge.calls.withLock { $0.profilePictures.count } == 2)
+        #expect(!FileManager.default.fileExists(atPath: url.path))
+    }
+
+    @Test func avatarLookupFindsSharedGroupAndBacksOffWhenRateLimited() async throws {
+        let db = try F.tempDB()
+        let ingest = try IngestActor(database: db)
+        let bridge = FakeBridge()
+        try await ingest.applyGroups([try await bridge.fetchGroupMetadata(jid: F.group)])
+        let avatars = AvatarService(bridge: bridge, ingest: ingest,
+                                    root: FileManager.default.temporaryDirectory.appending(path: "wakit-avatars-\(UUID().uuidString)"))
+        bridge.pictureError = .RateLimited
+        #expect(await avatars.avatar(for: F.bob) == nil)
+        #expect(bridge.calls.withLock { $0.profilePictures.map(\.commonGid) } == [F.group])
+        // Backing off: neither retried nor recorded as having none.
+        bridge.pictureError = nil
+        #expect(await avatars.avatar(for: F.alicePN) == nil)
+        #expect(bridge.calls.withLock { $0.profilePictures.count } == 1)
+        #expect(try db.count("SELECT COUNT(*) FROM contact WHERE avatarCheckedAt IS NOT NULL") == 0)
     }
 }

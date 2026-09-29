@@ -1132,6 +1132,12 @@ public actor IngestActor {
                     businessCheckedAt = COALESCE(businessCheckedAt, excluded.businessCheckedAt),
                     verifiedName = COALESCE(verifiedName, excluded.verifiedName)
                 """, arguments: [pn, lc.fullName, lc.firstName, lc.pushName, lc.phone, lc.isBusiness, lc.businessCheckedAt, lc.verifiedName])
+            // The LID's picture is in a file named after it; a phone number checked as having none
+            // (without the privacy token the LID was asked with) is asked again.
+            try db.execute(sql: """
+                UPDATE contact SET avatarCheckedAt = NULL
+                WHERE jid = ? AND hasAvatar = 0 AND EXISTS (SELECT 1 FROM contact WHERE jid = ? AND hasAvatar)
+                """, arguments: [pn, lid])
             try db.execute(sql: "DELETE FROM contact WHERE jid = ?", arguments: [lid])
         }
 

@@ -81,7 +81,7 @@ final class MessageListController: NSViewController {
         super.init(nibName: nil, bundle: nil)
         avatarLoader.onSenderAvatar = { [weak self] jid in
             self?.tableView.enumerateAvailableRowViews { rowView, _ in
-                (rowView.view(atColumn: 0) as? MessageCell)?.avatarDidLoad(jid: jid)
+                (rowView.view(atColumn: 0) as? MessageCell)?.avatarDidChange(jid: jid)
             }
         }
     }

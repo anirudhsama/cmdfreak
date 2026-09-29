@@ -127,8 +127,8 @@ final class ChatListViewController: NSViewController, NSCollectionViewDelegate {
             if let state = states[item.id] {
                 let avatarURL = state.avatarURL
                 state.apply(item)
-                // A picture fetched or changed since the row was configured.
-                if state.avatarURL != avatarURL { avatarLoader.load(state) }
+                // A picture fetched, changed or removed since the row was configured.
+                if state.avatarURL != avatarURL { avatarLoader.reload(state) }
                 live[item.id] = state
             } else {
                 let state = ChatRowState(item: item)

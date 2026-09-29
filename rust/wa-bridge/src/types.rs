@@ -17,6 +17,9 @@ pub enum BridgeError {
     Store(String),
     #[error("network: {0}")]
     Network(String),
+    /// The server asked us to slow down; callers back off before trying again.
+    #[error("rate limited")]
+    RateLimited,
     #[error("protocol: {0}")]
     Protocol(String),
     #[error("cancelled")]

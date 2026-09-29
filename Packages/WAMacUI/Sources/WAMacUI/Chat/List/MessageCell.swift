@@ -13,8 +13,8 @@ protocol MessageCellDelegate: AnyObject {
     func cell(_ cell: MessageCell, didClickRetry item: MessageItem)
     func cell(_ cell: MessageCell, menuFor item: MessageItem) -> NSMenu?
     func cell(_ cell: MessageCell, beginDragOf fileURL: URL, with event: NSEvent)
-    /// Group sender avatar; nil until loaded (the cell draws initials meanwhile, and is told through
-    /// `avatarDidLoad` when to ask again). Asked when the cell is configured, never while drawing.
+    /// Group sender avatar; nil until loaded or when there is none (the cell draws initials, and is
+    /// told through `avatarDidChange` when to ask again). Asked when the cell is configured, never while drawing.
     func cell(_ cell: MessageCell, avatarFor jid: String) -> CGImage?
 }
 
@@ -355,9 +355,11 @@ final class MessageCell: NSTableCellView {
         if let meta = plan.meta, meta.overlay { drawMeta(meta, plan: plan) }
     }
 
-    /// Redraws the avatar once `delegate` has the image.
-    func avatarDidLoad(jid: String) {
-        guard let a = plan?.avatar, a.jid == jid, let image = delegate?.cell(self, avatarFor: jid), image !== avatarImage else { return }
+    /// Asks `delegate` again once `jid`'s picture has loaded, changed or gone away.
+    func avatarDidChange(jid: String) {
+        guard let a = plan?.avatar, a.jid == jid else { return }
+        let image = delegate?.cell(self, avatarFor: jid)
+        guard image !== avatarImage else { return }
         avatarImage = image
         setNeedsDisplay(a.frame)
     }

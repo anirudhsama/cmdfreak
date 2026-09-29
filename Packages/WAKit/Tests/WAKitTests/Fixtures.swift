@@ -139,8 +139,13 @@ final class FakeBridge: WaBridgeProtocol, @unchecked Sendable {
     func nudgeReconnect() { calls.withLock { $0.nudges += 1 } }
     func pairWithPhone(number: String) async throws -> String { "ABCD-EFGH" }
     func pinChat(chat: String, pinned: Bool) async throws {}
+    /// What `profilePicture` answers: a picture, none, or this error.
+    var hasPicture = true
+    var pictureError: BridgeError?
     func profilePicture(jid: String, commonGid: String?, preview: Bool, destPath: String) async throws -> Bool {
         calls.withLock { $0.profilePictures.append((jid, commonGid)) }
+        if let pictureError { throw pictureError }
+        guard hasPicture else { return false }
         try Data([0xFF, 0xD8]).write(to: URL(filePath: destPath))
         return true
     }

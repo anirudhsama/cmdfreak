@@ -66,12 +66,12 @@ import WAKit
     }
 
     /// The media layer sits above the cell's own drawing, so the time and ticks over an image-only
-    /// message must come from the overlay subview.
+    /// message must come from the overlay subview: white text and ticks on a dark pill.
     @MainActor @Test func mediaOnlyMetaDrawsInOverlay() throws {
-        let item = Fx.item("a", ts: 1_700_000_000, kind: .image, text: nil)
+        let item = Fx.item("a", ts: 1_700_000_000, fromMe: true, kind: .image, text: nil)
         let plan = LayoutPlanner.plan(item, ctx)
         let meta = try #require(plan.meta)
-        #expect(meta.overlay)
+        #expect(meta.overlay && meta.status == .delivered)
         let cell = MessageCell(frame: CGRect(x: 0, y: 0, width: plan.width, height: plan.rowHeight))
         cell.configure(item: item, plan: plan)
         cell.layoutSubtreeIfNeeded()
@@ -79,8 +79,21 @@ import WAKit
         let rep = try #require(overlay.bitmapImageRepForCachingDisplay(in: overlay.bounds))
         overlay.cacheDisplay(in: overlay.bounds, to: rep)
         let scale = CGFloat(rep.pixelsWide) / overlay.bounds.width
-        let pixel = rep.colorAt(x: Int(meta.frame.minX * scale), y: Int(meta.frame.midY * scale))
-        #expect((pixel?.alphaComponent ?? 0) > 0.3)
+        func brightest(_ r: CGRect) -> CGFloat {
+            var best: CGFloat = 0
+            for y in Int(r.minY * scale)..<Int(r.maxY * scale) {
+                for x in Int(r.minX * scale)..<Int(r.maxX * scale) {
+                    guard let c = rep.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB) else { continue }
+                    best = max(best, min(c.redComponent, c.greenComponent, c.blueComponent) * c.alphaComponent)
+                }
+            }
+            return best
+        }
+        let ticks = CGRect(x: meta.frame.maxX - MessageTextConfiguration.Metrics.tickWidth, y: meta.frame.minY,
+                           width: MessageTextConfiguration.Metrics.tickWidth, height: meta.frame.height)
+        let time = CGRect(x: meta.frame.minX, y: meta.frame.minY, width: ticks.minX - meta.frame.minX, height: meta.frame.height)
+        #expect(brightest(time) > 0.8)
+        #expect(brightest(ticks) > 0.8)
     }
 
     @Test func cacheKeyChangesWithContentAndWidth() {
