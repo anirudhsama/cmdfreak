@@ -32,7 +32,7 @@ try await ingest.apply(events)
 // Answered up front so the app never asks; the demo shifts `checkedAt` along with everything else.
 let businesses = Set(Cast.businesses.map(\.jid))
 try await ingest.setBusiness(people.sorted().map {
-    BridgeBusinessCheck(jid: $0, isBusiness: businesses.contains($0))
+    BridgeBusinessCheck(jid: $0, isBusiness: businesses.contains($0), verifiedName: nil)
 }, checkedAt: Clock.now)
 
 let target = out.appending(path: "demo.sqlite")
