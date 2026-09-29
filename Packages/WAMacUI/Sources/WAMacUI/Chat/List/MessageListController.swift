@@ -58,6 +58,7 @@ final class MessageListController: NSViewController {
     private var previewItems: [PreviewItem] = []
     private var previewIndex = 0
     private var openedPreviewPanel = false
+    private var previewResizeObserver: NSObjectProtocol?
 
     private enum ListOp: Sendable {
         case change(MessageChange)
@@ -909,9 +910,21 @@ final class MessageListController: NSViewController {
             panel.reloadData()
             panel.currentPreviewItemIndex = previewIndex
         } else {
+            centerPreviewPanel(panel)
             panel.makeKeyAndOrderFront(nil)
             openedPreviewPanel = true
         }
+    }
+
+    /// QL restores its last frame and resizes to each item's aspect ratio from that anchor, so the
+    /// panel drifts; keep it centered on the chat window's screen instead.
+    private func centerPreviewPanel(_ panel: QLPreviewPanel) {
+        guard let screen = view.window?.screen ?? NSScreen.main else { return }
+        let area = screen.visibleFrame
+        var frame = panel.frame
+        frame.origin.x = (area.midX - frame.width / 2).rounded()
+        frame.origin.y = (area.midY - frame.height / 2).rounded()
+        if frame != panel.frame { panel.setFrame(frame, display: true) }
     }
 
     /// The preview items belong to the chat being left; close the panel rather than let it step
@@ -936,11 +949,23 @@ final class MessageListController: NSViewController {
             panel.delegate = self
             panel.reloadData()
             panel.currentPreviewItemIndex = previewIndex
+            if let previewResizeObserver { NotificationCenter.default.removeObserver(previewResizeObserver) }
+            previewResizeObserver = NotificationCenter.default.addObserver(
+                forName: NSWindow.didResizeNotification, object: panel, queue: .main
+            ) { [weak self, weak panel] _ in
+                MainActor.assumeIsolated {
+                    // A user dragging the corner owns the frame until they let go.
+                    guard let self, let panel, !panel.inLiveResize else { return }
+                    self.centerPreviewPanel(panel)
+                }
+            }
         }
     }
 
     override func endPreviewPanelControl(_ panel: QLPreviewPanel!) {
         MainActor.assumeIsolated {
+            if let previewResizeObserver { NotificationCenter.default.removeObserver(previewResizeObserver) }
+            previewResizeObserver = nil
             panel.dataSource = nil
             panel.delegate = nil
         }
