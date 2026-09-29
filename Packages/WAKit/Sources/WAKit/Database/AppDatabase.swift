@@ -260,6 +260,21 @@ extension AppDatabase {
             try Self.backfillOwnGroupParticipants(db)
         }
 
+        // Every person we know of gets a contact row, named or not: DM partners, group members and
+        // message senders. Business accounts are marked on it by `BusinessService`.
+        m.registerMigration("v7") { db in
+            try db.alter(table: "contact") { t in
+                t.add(column: "isBusiness", .boolean).notNull().defaults(to: false)
+                t.add(column: "businessCheckedAt", .integer)
+            }
+            try db.execute(sql: """
+                INSERT OR IGNORE INTO contact (jid)
+                SELECT jid FROM chat WHERE kind = 'dm'
+                UNION SELECT jid FROM group_participant
+                UNION SELECT DISTINCT senderJid FROM message WHERE senderJid LIKE '%@s.whatsapp.net' OR senderJid LIKE '%@lid'
+                """)
+        }
+
         return m
     }
 

@@ -98,6 +98,27 @@ import Testing
         #expect(hidden.map(\.id) == [c1])
     }
 
+    @Test func businessChatsLeaveChatsForBusinesses() async throws {
+        let db = try F.tempDB()
+        let ingest = try IngestActor(database: db)
+        try await ingest.apply([F.live(F.message("a", chat: F.bob, ts: 100), F.message("b", chat: F.aliceLID, ts: 200),
+                                       F.message("c", chat: F.group, sender: F.alicePN, ts: 300))])
+        // Every DM partner and sender has a contact row, named or not.
+        #expect(try db.count("SELECT COUNT(*) FROM contact WHERE jid IN ('\(F.bob)', '\(F.aliceLID)', '\(F.alicePN)')") == 3)
+
+        try await ingest.setBusiness([BridgeBusinessCheck(jid: F.aliceLID, isBusiness: true),
+                                      BridgeBusinessCheck(jid: F.bob, isBusiness: false)], checkedAt: 1)
+        // The flag follows the contact through a LID → PN merge.
+        try await ingest.apply([.jidAliases(aliases: [BridgeJidAlias(lid: F.aliceLID, pn: F.alicePN)])])
+
+        let chats = try await db.reader.read { try ChatListQuery.fetch($0, filter: RailItem.chats.filter()) }
+        #expect(chats.map(\.id) == [F.group, F.bob])
+        let businesses = try await db.reader.read { try ChatListQuery.fetch($0, filter: RailItem.businesses.filter()) }
+        #expect(businesses.map(\.id) == [F.alicePN])
+        let counts = try await db.reader.read(SidebarCounts.fetch)
+        #expect(counts.chats == 2 && counts.businesses == 1 && counts.unread == 3)
+    }
+
     @MainActor @Test func chatListObservationDeliversImmediately() async throws {
         let db = try F.tempDB()
         let ingest = try IngestActor(database: db)

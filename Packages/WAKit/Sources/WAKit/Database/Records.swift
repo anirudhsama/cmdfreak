@@ -55,6 +55,9 @@ public struct ContactRecord: Codable, Hashable, Sendable, FetchableRecord, Persi
     public var firstName: String?
     public var pushName: String?
     public var phone: String?
+    /// A WhatsApp Business account, as of `businessCheckedAt` (nil: never checked).
+    public var isBusiness: Bool
+    public var businessCheckedAt: Int64?
 
     public var id: String { jid }
 
@@ -64,6 +67,7 @@ public struct ContactRecord: Codable, Hashable, Sendable, FetchableRecord, Persi
         self.firstName = firstName
         self.pushName = pushName
         self.phone = phone
+        isBusiness = false
     }
 
     /// Saved name first, then the sender's push name, then the phone number.

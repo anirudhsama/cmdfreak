@@ -12,22 +12,26 @@ public struct ChatFilter: Hashable, Sendable {
     /// The chat must carry none of these tags.
     public var excludeTags: Set<Int64>
     public var unreadOnly: Bool
+    /// `nil` shows both business and other chats. Business chats are DMs whose contact is a business.
+    public var business: Bool?
 
     public init(
         archived: Bool? = false,
         kinds: Set<ChatKind> = [.dm, .group, .broadcast],
         includeTags: Set<Int64> = [],
         excludeTags: Set<Int64> = [],
-        unreadOnly: Bool = false
+        unreadOnly: Bool = false,
+        business: Bool? = nil
     ) {
         self.archived = archived
         self.kinds = kinds
         self.includeTags = includeTags
         self.excludeTags = excludeTags
         self.unreadOnly = unreadOnly
+        self.business = business
     }
 
-    public static let chats = ChatFilter(archived: false)
+    public static let chats = ChatFilter(archived: false, business: false)
     public static let archived = ChatFilter(archived: true)
 }
 
@@ -36,15 +40,17 @@ public enum RailItem: Hashable, Sendable {
     case chats
     case unread
     case groups
+    case businesses
     case archived
     case tag(id: Int64, name: String)
 
     /// `hiddenTags` are tags whose chats should not appear under `Chats`.
     public func filter(hiddenTags: Set<Int64> = []) -> ChatFilter {
         switch self {
-        case .chats: ChatFilter(archived: false, excludeTags: hiddenTags)
+        case .chats: ChatFilter(archived: false, excludeTags: hiddenTags, business: false)
         case .unread: ChatFilter(archived: false, unreadOnly: true)
         case .groups: ChatFilter(archived: false, kinds: [.group])
+        case .businesses: ChatFilter(archived: false, kinds: [.dm], business: true)
         case .archived: ChatFilter(archived: true)
         case .tag(let id, _): ChatFilter(archived: nil, includeTags: [id])
         }
@@ -53,16 +59,21 @@ public enum RailItem: Hashable, Sendable {
 
 /// Unread-chat counts for the sidebar badges.
 public struct SidebarCounts: Hashable, Sendable {
+    /// Excludes business chats, like the Chats list.
     public var chats = 0
+    public var unread = 0
     public var groups = 0
+    public var businesses = 0
     public var archived = 0
     public init() {}
 
     static func fetch(_ db: Database) throws -> SidebarCounts {
         let row = try Row.fetchOne(db, sql: """
             SELECT
+              COUNT(*) FILTER (WHERE archived = 0 AND NOT \(isBusinessSQL)),
               COUNT(*) FILTER (WHERE archived = 0),
               COUNT(*) FILTER (WHERE archived = 0 AND kind = 'group'),
+              COUNT(*) FILTER (WHERE archived = 0 AND \(isBusinessSQL)),
               COUNT(*) FILTER (WHERE archived = 1)
             FROM chat
             WHERE (unreadCount > 0 OR markedUnread)
@@ -72,8 +83,10 @@ public struct SidebarCounts: Hashable, Sendable {
         var counts = SidebarCounts()
         if let row {
             counts.chats = row[0]
-            counts.groups = row[1]
-            counts.archived = row[2]
+            counts.unread = row[1]
+            counts.groups = row[2]
+            counts.businesses = row[3]
+            counts.archived = row[4]
         }
         return counts
     }
@@ -123,6 +136,9 @@ public enum ChatListQuery {
         if !filter.excludeTags.isEmpty {
             clauses.append("jid NOT IN (SELECT chatJid FROM chat_tag WHERE tagId IN (\(placeholders(filter.excludeTags.count))))")
             args.append(contentsOf: filter.excludeTags.map { $0 as any DatabaseValueConvertible })
+        }
+        if let business = filter.business {
+            clauses.append((business ? "" : "NOT ") + isBusinessSQL)
         }
         if filter.unreadOnly {
             clauses.append("(unreadCount > 0 OR markedUnread)")
@@ -260,6 +276,9 @@ extension AppDatabase {
         try reader.read(BadgeState.fetch)
     }
 }
+
+/// A `chat` row is a DM with a business account.
+let isBusinessSQL = "EXISTS (SELECT 1 FROM contact WHERE contact.jid = chat.jid AND contact.isBusiness)"
 
 func placeholders(_ n: Int) -> String {
     Array(repeating: "?", count: n).joined(separator: ",")

@@ -19,7 +19,7 @@ enum SourceListMetrics {
 /// Sidebar model: the ordered filters and the current selection. Tags append here later.
 @MainActor @Observable
 final class RailModel {
-    var items: [RailItem] = [.chats, .unread, .groups, .archived]
+    var items: [RailItem] = [.chats, .unread, .groups, .businesses, .archived]
     var selection: RailItem = .chats
     var counts = SidebarCounts()
 
@@ -42,8 +42,10 @@ final class RailModel {
 
     func badge(for item: RailItem) -> Int {
         switch item {
-        case .chats, .unread: counts.chats
+        case .chats: counts.chats
+        case .unread: counts.unread
         case .groups: counts.groups
+        case .businesses: counts.businesses
         case .archived: counts.archived
         case .tag: 0
         }
@@ -130,7 +132,7 @@ private struct SourceListView: View {
         ScrollView(.vertical) {
             VStack(spacing: 6) {
                 ForEach(model.filterItems + model.tagItems, id: \.self) { item in
-                    // Unread's count equals Chats'; one badge is enough in the compact rail.
+                    // Unread's count repeats the other badges; skip it in the compact rail.
                     RailIcon(item: item, selected: model.selection == item, badge: item == .unread ? 0 : model.badge(for: item)) { select(item) }
                 }
             }
@@ -203,6 +205,7 @@ extension RailItem {
         case .chats: "Chats"
         case .unread: "Unread"
         case .groups: "Groups"
+        case .businesses: "Businesses"
         case .archived: "Archived"
         case .tag(_, let name): name
         }
@@ -213,6 +216,7 @@ extension RailItem {
         case .chats: "bubble.left.and.bubble.right"
         case .unread: "message.badge"
         case .groups: "person.2"
+        case .businesses: "storefront"
         case .archived: "archivebox"
         case .tag: "tag"
         }

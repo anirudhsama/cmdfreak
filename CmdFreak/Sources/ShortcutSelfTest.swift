@@ -146,8 +146,8 @@ enum ShortcutSelfTest {
         check("⇧⌘A archive", main.debugChat(jid) == nil)
 
         // Rail.
-        await menu("4", 21, [.command, .option])
-        check("⌥⌘4 archived filter", main.debugRailIsArchived)
+        await menu("5", 23, [.command, .option])
+        check("⌥⌘5 archived filter", main.debugRailIsArchived)
         await menu("1", 18, [.command, .option])
         check("⌥⌘1 chats filter", !main.debugRailIsArchived)
         await menu(key(NSDownArrowFunctionKey), 125, [.command, .option, .numericPad, .function])

@@ -311,6 +311,18 @@ public actor IngestActor {
         }
     }
 
+    public func setBusiness(_ checks: [BridgeBusinessCheck], checkedAt: Int64) throws {
+        let checks = checks.map { (jid: canon($0.jid), isBusiness: $0.isBusiness) }
+        try perform { db, _ in
+            for c in checks {
+                try db.execute(sql: """
+                    INSERT INTO contact (jid, isBusiness, businessCheckedAt) VALUES (?, ?, ?)
+                    ON CONFLICT(jid) DO UPDATE SET isBusiness = excluded.isBusiness, businessCheckedAt = excluded.businessCheckedAt
+                    """, arguments: [c.jid, c.isBusiness, checkedAt])
+            }
+        }
+    }
+
     public func setMediaState(chatJid: String, messageId: String, state: MediaDownloadState) throws {
         let jid = canon(chatJid)
         try perform { db, cs in
@@ -495,7 +507,15 @@ public actor IngestActor {
     }
 
     private func ensureChat(_ db: Database, _ jid: String) throws {
-        try db.execute(sql: "INSERT OR IGNORE INTO chat (jid, kind) VALUES (?, ?)", arguments: [jid, ChatKind(jid: jid)])
+        let kind = ChatKind(jid: jid)
+        try db.execute(sql: "INSERT OR IGNORE INTO chat (jid, kind) VALUES (?, ?)", arguments: [jid, kind])
+        if kind == .dm { try ensureContact(db, jid) }
+    }
+
+    /// Every person we know of has a contact row, named or not.
+    private func ensureContact(_ db: Database, _ jid: String) throws {
+        guard JID.isPhoneNumber(jid) || JID.isLid(jid) else { return }
+        try db.execute(sql: "INSERT OR IGNORE INTO contact (jid) VALUES (?)", arguments: [jid])
     }
 
     // MARK: Messages
@@ -504,6 +524,7 @@ public actor IngestActor {
         let chatJid = canon(m.chatJid)
         let sender = canon(m.senderJid)
         try ensureChat(db, chatJid)
+        try ensureContact(db, sender)
 
         if !m.fromMe, let name = m.pushName, !name.isEmpty, !sender.isEmpty { cs.pushNames[sender] = name }
 
@@ -896,6 +917,7 @@ public actor IngestActor {
                 readOnly = excluded.readOnly
             """, arguments: [jid, c.kind, c.name, c.lastActivityAt, Int(c.unreadCount), c.markedUnread,
                              c.pinnedAt, c.mutedUntil, c.archived, c.readOnly])
+        if c.kind == .dm { try ensureContact(db, jid) }
     }
 
     private func handleChatAction(_ action: BridgeChatAction, _ db: Database, _ cs: inout ChangeSet) throws {
@@ -984,8 +1006,10 @@ public actor IngestActor {
         guard !g.participants.isEmpty else { return }
         try db.execute(sql: "DELETE FROM group_participant WHERE groupJid = ?", arguments: [g.jid])
         for p in g.participants {
-            try GroupParticipantRecord(groupJid: g.jid, jid: canon(p.jid), isAdmin: p.isAdmin, isSuperAdmin: p.isSuperAdmin)
+            let jid = canon(p.jid)
+            try GroupParticipantRecord(groupJid: g.jid, jid: jid, isAdmin: p.isAdmin, isSuperAdmin: p.isSuperAdmin)
                 .insert(db, onConflict: .replace)
+            try ensureContact(db, jid)
         }
     }
 
@@ -1054,13 +1078,15 @@ public actor IngestActor {
         // Contacts
         if let lc = try ContactRecord.fetchOne(db, key: lid) {
             try db.execute(sql: """
-                INSERT INTO contact (jid, fullName, firstName, pushName, phone) VALUES (?, ?, ?, ?, ?)
+                INSERT INTO contact (jid, fullName, firstName, pushName, phone, isBusiness, businessCheckedAt) VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(jid) DO UPDATE SET
                     fullName = COALESCE(fullName, excluded.fullName),
                     firstName = COALESCE(firstName, excluded.firstName),
                     pushName = COALESCE(pushName, excluded.pushName),
-                    phone = COALESCE(phone, excluded.phone)
-                """, arguments: [pn, lc.fullName, lc.firstName, lc.pushName, lc.phone])
+                    phone = COALESCE(phone, excluded.phone),
+                    isBusiness = isBusiness OR excluded.isBusiness,
+                    businessCheckedAt = COALESCE(businessCheckedAt, excluded.businessCheckedAt)
+                """, arguments: [pn, lc.fullName, lc.firstName, lc.pushName, lc.phone, lc.isBusiness, lc.businessCheckedAt])
             try db.execute(sql: "DELETE FROM contact WHERE jid = ?", arguments: [lid])
         }
 
