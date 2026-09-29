@@ -216,7 +216,7 @@ extension RailItem {
         case .chats: "bubble.left.and.bubble.right"
         case .unread: "message.badge"
         case .groups: "person.2"
-        case .businesses: "storefront"
+        case .businesses: "building.2"
         case .archived: "archivebox"
         case .tag: "tag"
         }

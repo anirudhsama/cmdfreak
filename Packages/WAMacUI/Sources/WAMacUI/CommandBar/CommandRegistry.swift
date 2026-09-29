@@ -99,7 +99,7 @@ public final class CommandRegistry {
                       shortcut: "⌥⌘2", tag: 2, #selector(MainWindowController.selectRailItem(_:))),
                 .menu("go.groups", "Show Groups", symbol: "person.2", keywords: ["groups", "filter"],
                       shortcut: "⌥⌘3", tag: 3, #selector(MainWindowController.selectRailItem(_:))),
-                .menu("go.businesses", "Show Businesses", symbol: "storefront", keywords: ["business", "shops", "filter"],
+                .menu("go.businesses", "Show Businesses", symbol: "building.2", keywords: ["business", "shops", "filter"],
                       shortcut: "⌥⌘4", tag: 4, #selector(MainWindowController.selectRailItem(_:))),
                 .menu("go.archived", "Show Archived Chats", symbol: "archivebox", keywords: ["archived"],
                       shortcut: "⌥⌘5", tag: 5, #selector(MainWindowController.selectRailItem(_:))),
