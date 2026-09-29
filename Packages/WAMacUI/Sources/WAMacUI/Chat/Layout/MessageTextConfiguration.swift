@@ -67,6 +67,10 @@ enum MessageTextConfiguration {
 
     enum Metrics {
         static let horizontalInset: CGFloat = 16
+        /// Group chats: sender avatar beside the last incoming bubble of a run; every incoming
+        /// bubble is indented past it.
+        static let groupAvatarSize: CGFloat = 28
+        static let groupAvatarIndent: CGFloat = groupAvatarSize + 8
         static let bubbleMaxWidthFraction: CGFloat = 0.72
         static let bubbleMaxWidth: CGFloat = 520
         static let bubbleMinWidth: CGFloat = 60

@@ -61,6 +61,9 @@ final class MessageListController: NSViewController {
     private var previewIndex = 0
     private var openedPreviewPanel = false
     private var previewResizeObserver: NSObjectProtocol?
+    /// Group sender avatars, decoded; a jid is fetched at most once per session.
+    private var senderAvatars: [String: CGImage] = [:]
+    private var requestedAvatars: Set<String> = []
 
     private enum ListOp: Sendable {
         case change(MessageChange)
@@ -1171,6 +1174,7 @@ extension MessageListController: NSTableViewDataSource, NSTableViewDelegate {
                 c.identifier = id
                 return c
             }()
+            cell.isGroupChat = rows.isGroupChat
             cell.bubble.update(typing)
             return cell
         }
@@ -1228,6 +1232,34 @@ extension MessageListController: MessageCellDelegate {
         let p = cell.convert(event.locationInWindow, from: nil)
         item.setDraggingFrame(NSRect(x: p.x - 24, y: p.y - 24, width: 48, height: 48), contents: icon)
         cell.beginDraggingSession(with: [item], event: event, source: self)
+    }
+
+    func cell(_ cell: MessageCell, avatarFor jid: String) -> CGImage? {
+        if let image = senderAvatars[jid] { return image }
+        loadAvatar(jid)
+        return nil
+    }
+
+    private static let avatarPixelSize = Int(M.groupAvatarSize) * 2
+
+    /// Shows a cached file straight away, then asks `AvatarService`, which refetches when stale.
+    private func loadAvatar(_ jid: String) {
+        guard requestedAvatars.insert(jid).inserted else { return }
+        let url = AvatarService.fileURL(for: jid)
+        let avatars = client.avatars
+        Task { [weak self] in
+            let decode = { await ThumbnailCache.shared.image(key: url.path, source: .file(url), maxPixelSize: Self.avatarPixelSize) }
+            if FileManager.default.fileExists(atPath: url.path), let image = await decode() { self?.setAvatar(image, for: jid) }
+            if await avatars.avatar(for: jid) != nil, let image = await decode() { self?.setAvatar(image, for: jid) }
+        }
+    }
+
+    private func setAvatar(_ image: CGImage, for jid: String) {
+        guard senderAvatars[jid] !== image else { return }
+        senderAvatars[jid] = image
+        tableView.enumerateAvailableRowViews { rowView, _ in
+            (rowView.view(atColumn: 0) as? MessageCell)?.avatarDidLoad(jid: jid)
+        }
     }
 }
 

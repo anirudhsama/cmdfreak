@@ -93,6 +93,13 @@ struct LayoutPlan: @unchecked Sendable {
         let overlay: Bool
     }
 
+    /// Group chats: the sender's avatar, beside the last bubble of an incoming run.
+    struct Avatar: Sendable {
+        let frame: CGRect
+        let jid: String
+        let initials: String
+    }
+
     struct Chip: Sendable {
         let emoji: String
         let count: Int
@@ -107,6 +114,7 @@ struct LayoutPlan: @unchecked Sendable {
     let shape: Shape
     let bubble: CGRect
     let sender: Label?
+    let avatar: Avatar?
     let forwarded: Label?
     let quote: Quote?
     let content: Content
