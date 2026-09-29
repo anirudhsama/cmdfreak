@@ -20,5 +20,8 @@ import Testing
         let page = try await ChatWindowLoader(database: db, chatJid: F.group).initial()
         #expect(page.items.first?.displayText == "@Alice Example @You @+15552220000 @55554444")
         #expect(page.items.first?.message.text == "@99887766 @11112222 @15552220000 @55554444")
+        let mentions = page.items.first?.mentions ?? [:]
+        #expect(mentions["99887766"] == Mention(name: "Alice Example", jid: F.alicePN, phone: JID.phoneDisplay(F.alicePN)))
+        #expect(mentions["11112222"]?.jid == nil)
     }
 }

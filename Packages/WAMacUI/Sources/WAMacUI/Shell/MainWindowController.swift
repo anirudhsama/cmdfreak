@@ -304,6 +304,20 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, N
         Task { await reveal(candidate.jid, archived: candidate.archived, waitForList: false) }
     }
 
+    /// Opens the 1:1 chat with a mentioned user (the mention menu's "Message"), creating it if needed.
+    @objc func messageMention(_ sender: NSMenuItem) {
+        guard let jid = sender.representedObject as? String else { return }
+        Task { [weak self, client] in
+            do {
+                let chatJid = try await client.startChat(with: jid)
+                let archived = try await client.database.reader.read { db in try ChatRecord.fetchOne(db, key: chatJid)?.archived } ?? false
+                await self?.reveal(chatJid, archived: archived, waitForList: true)
+            } catch {
+                WAKit.log.error("start chat failed: \(error)")
+            }
+        }
+    }
+
     /// Brings the window forward on `jid` (a notification click). Notified chats are never archived.
     public func openChat(_ jid: String) {
         showWindow(nil)

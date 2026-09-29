@@ -1,5 +1,6 @@
 import AppKit
 import Testing
+import WAKit
 @testable import WAMacUI
 
 @Suite struct MarkdownLiteTests {
@@ -44,6 +45,26 @@ import Testing
         }
         #expect(links.contains { $0.absoluteString == "https://example.com" })
         #expect(links.contains { $0.scheme == "tel" })
+    }
+
+    @Test func mentionsStyledAndLinked() {
+        let mentions = [Mention(name: "Bob", jid: "15552220000@s.whatsapp.net", phone: "+15552220000"),
+                        Mention(name: "Alice", jid: nil, phone: nil)]
+        let a = MarkdownLite.attributedString("*@Alice* hi @Bob and @Bob", mentions: mentions)
+        var tinted: [String] = []
+        a.enumerateAttribute(.foregroundColor, in: NSRange(location: 0, length: a.length)) { v, r, _ in
+            if (v as? NSColor) == MarkdownLite.linkColor { tinted.append((a.string as NSString).substring(with: r)) }
+        }
+        #expect(tinted == ["@Alice", "@Bob", "@Bob"])
+        let bob = a.attribute(.font, at: (a.string as NSString).range(of: "@Bob").location, effectiveRange: nil) as! NSFont
+        let hi = a.attribute(.font, at: (a.string as NSString).range(of: "hi").location, effectiveRange: nil) as! NSFont
+        #expect(NSFontManager.shared.weight(of: bob) > NSFontManager.shared.weight(of: hi))
+        var linked: [String] = []
+        a.enumerateAttribute(.mention, in: NSRange(location: 0, length: a.length)) { v, r, _ in
+            if (v as? Mention)?.name == "Bob" { linked.append((a.string as NSString).substring(with: r)) }
+        }
+        #expect(linked == ["@Bob", "@Bob"])
+        #expect(a.attribute(.link, at: 1, effectiveRange: nil) == nil)
     }
 
     @Test func emojiOnly() {

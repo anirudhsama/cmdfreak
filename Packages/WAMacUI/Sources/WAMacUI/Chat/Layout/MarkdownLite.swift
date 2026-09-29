@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import WAKit
 
 /// WhatsApp's inline formatting: `*bold*`, `_italic_`, `~strike~`, `` `mono` `` and ``` ```mono``` ```.
 /// Markers must hug their content (`* bold*` is literal) and cannot span lines, matching the phone.
@@ -136,11 +137,16 @@ enum MarkdownLite {
 
     // MARK: Attributed rendering
 
+    /// Messages' link blue; `NSColor.linkColor` is darker and reads as muted in a bubble.
+    static let linkColor = NSColor.systemBlue
+
     private static let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue
         | NSTextCheckingResult.CheckingType.phoneNumber.rawValue)
 
-    /// Renders with the shared body attributes; links and phone numbers get `.link`.
-    static func attributedString(_ source: String, base: [NSAttributedString.Key: Any] = MessageTextConfiguration.bodyAttributes,
+    /// Renders with the shared body attributes; links and phone numbers get `.link`, and "@<name>" for each
+    /// of `mentions` is semibold in the link colour, and clickable when it has a JID.
+    static func attributedString(_ source: String, mentions: some Collection<Mention> = [Mention](),
+                                 base: [NSAttributedString.Key: Any] = MessageTextConfiguration.bodyAttributes,
                                  baseFont: NSFont = MessageTextConfiguration.body) -> NSAttributedString {
         let parsed = parse(source)
         let result = NSMutableAttributedString(string: parsed.text, attributes: base)
@@ -173,11 +179,42 @@ enum MarkdownLite {
                 default: url = nil
                 }
                 if let url {
-                    result.addAttributes([.link: url, .foregroundColor: NSColor.linkColor], range: match.range)
+                    result.addAttributes([.link: url, .foregroundColor: linkColor], range: match.range)
                 }
             }
         }
+
+        emphasizeMentions(mentions, in: result, linked: true)
         return result
+    }
+
+    /// Sets each "@<name>" for `mentions` in semibold, keeping any italic or mono. `linked` also tints it
+    /// and, when the mention has a JID, makes it a link carrying `.mention` (see `MessageTextView`).
+    static func emphasizeMentions(_ mentions: some Collection<Mention>, in s: NSMutableAttributedString, linked: Bool = false) {
+        let text = s.string as NSString
+        var seen: Set<String> = []
+        for mention in mentions where seen.insert(mention.name).inserted {
+            let token = "@" + mention.name
+            var r = text.range(of: token)
+            while r.location != NSNotFound {
+                s.enumerateAttribute(.font, in: r) { font, sub, _ in
+                    if let font = font as? NSFont { s.addAttribute(.font, value: semibold(font), range: sub) }
+                }
+                if linked {
+                    s.addAttribute(.foregroundColor, value: linkColor, range: r)
+                    if let jid = mention.jid, let url = URL(string: "cmdfreak-mention:" + jid) {
+                        s.addAttributes([.link: url, .mention: mention], range: r)
+                    }
+                }
+                r = text.range(of: token, range: NSRange(location: NSMaxRange(r), length: text.length - NSMaxRange(r)))
+            }
+        }
+    }
+
+    private static func semibold(_ font: NSFont) -> NSFont {
+        var traits = font.fontDescriptor.object(forKey: .traits) as? [NSFontDescriptor.TraitKey: Any] ?? [:]
+        traits[.weight] = NSFont.Weight.semibold
+        return NSFont(descriptor: font.fontDescriptor.addingAttributes([.traits: traits]), size: font.pointSize) ?? font
     }
 
     private static func attributes(for style: Style, baseFont: NSFont) -> [NSAttributedString.Key: Any] {
@@ -206,4 +243,9 @@ enum MarkdownLite {
         }
         return count > 0 && count <= 3
     }
+}
+
+extension NSAttributedString.Key {
+    /// The `Mention` behind a clickable "@<name>".
+    static let mention = NSAttributedString.Key("CmdFreakMention")
 }

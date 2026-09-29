@@ -99,8 +99,9 @@ enum LayoutPlanner {
             let qName = quoteName(m, ctx)
             let snippet = quoteSnippet(m, item.displayQuotedSnippet)
             let nameAttr = NSAttributedString(string: qName, attributes: [.font: C.quoteName, .foregroundColor: C.senderColor(for: m.quotedSenderJid ?? "me")])
-            let snipAttr = NSAttributedString(string: snippet, attributes: [.font: C.quoteBody, .foregroundColor: NSColor.secondaryLabelColor])
-            let w = min(innerMax, max(180, TextMeasurer.width(snippet, font: C.quoteBody) + 24, TextMeasurer.width(qName, font: C.quoteName) + 24))
+            let snipAttr = NSMutableAttributedString(string: snippet, attributes: [.font: C.quoteBody, .foregroundColor: NSColor.secondaryLabelColor])
+            MarkdownLite.emphasizeMentions(item.mentions.values, in: snipAttr)
+            let w = min(innerMax, max(180, ceil(snipAttr.size().width) + 24, TextMeasurer.width(qName, font: C.quoteName) + 24))
             quote = .init(frame: CGRect(x: M.bubblePaddingH, y: contentY, width: w, height: M.quoteHeight),
                           name: nameAttr, snippet: snipAttr, color: C.senderColor(for: m.quotedSenderJid ?? "me"), targetId: qid)
             innerWidth = max(innerWidth, w)
@@ -123,12 +124,12 @@ enum LayoutPlanner {
                 if MarkdownLite.isEmojiOnly(t) {
                     bodyAttr = NSAttributedString(string: t, attributes: [.font: C.bigEmoji, .paragraphStyle: C.paragraph])
                 } else {
-                    bodyAttr = MarkdownLite.attributedString(t)
+                    bodyAttr = MarkdownLite.attributedString(t, mentions: item.mentions.values)
                 }
             case .poll:
                 break  // the question is part of the card
             default:
-                if let t = item.displayText, !t.isEmpty { bodyAttr = MarkdownLite.attributedString(t) }
+                if let t = item.displayText, !t.isEmpty { bodyAttr = MarkdownLite.attributedString(t, mentions: item.mentions.values) }
             }
         }
 
