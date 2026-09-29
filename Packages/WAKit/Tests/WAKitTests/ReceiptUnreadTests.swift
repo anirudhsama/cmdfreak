@@ -34,7 +34,7 @@ import Testing
     @Test func incomingIncrementsUnlessOpenAndKey() async throws {
         let db = try F.tempDB()
         let ingest = try IngestActor(database: db)
-        try await ingest.apply([F.live(F.message("1", chat: F.bob), F.message("2", chat: F.bob, fromMe: true, ts: 1_700_000_001))])
+        try await ingest.apply([F.live(F.message("2", chat: F.bob, fromMe: true, ts: 1_700_000_001), F.message("1", chat: F.bob))])
         #expect(try db.chat(F.bob)?.unreadCount == 1)
 
         ingest.focus.set(chatJid: F.bob, windowIsKey: false)

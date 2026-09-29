@@ -3,8 +3,9 @@ import UserNotifications
 import WAKit
 
 /// Posts a system notification for each incoming message that ingest flags (`WAClient.notices`) and
-/// withdraws delivered ones when their chat is read anywhere or the message is deleted. Clicking one
-/// opens the chat; Reply sends from the banner; Mark as Read sends read receipts.
+/// withdraws delivered ones when their chat is read anywhere or the message is deleted, and on launch
+/// and activation any whose chat has nothing unread. Clicking one opens the chat; Reply sends from
+/// the banner; Mark as Read sends read receipts.
 @MainActor
 public final class NotificationController: NSObject, UNUserNotificationCenterDelegate {
     private nonisolated static let category = "message"
@@ -15,6 +16,7 @@ public final class NotificationController: NSObject, UNUserNotificationCenterDel
     private let client: WAClient
     private let center = UNUserNotificationCenter.current()
     private var listener: Task<Void, Never>?
+    private var activeObserver: NSObjectProtocol?
     /// Posted this session, per chat: withdrawn directly, since a just-added request may not be in
     /// `deliveredNotifications()` yet. That query still covers earlier sessions.
     private var posted: [String: Set<String>] = [:]
@@ -36,9 +38,17 @@ public final class NotificationController: NSObject, UNUserNotificationCenterDel
                 await self.handle(event)
             }
         }
+        activeObserver = NotificationCenter.default.addObserver(forName: NSApplication.didBecomeActiveNotification, object: nil,
+                                                                queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.withdrawStale() }
+        }
+        withdrawStale()
     }
 
-    isolated deinit { listener?.cancel() }
+    isolated deinit {
+        listener?.cancel()
+        activeObserver.map(NotificationCenter.default.removeObserver)
+    }
 
     /// Asks once; later calls return the stored answer without prompting.
     public func requestAuthorization() {
@@ -54,15 +64,42 @@ public final class NotificationController: NSObject, UNUserNotificationCenterDel
         case .incoming(let notice):
             await post(notice)
         case .chatRead(let jid):
-            if let ids = posted.removeValue(forKey: jid) { center.removeDeliveredNotifications(withIdentifiers: Array(ids)) }
-            let earlier = await center.deliveredNotifications()
-                .filter { $0.request.content.threadIdentifier == jid }
-                .map(\.request.identifier)
-            if !earlier.isEmpty { center.removeDeliveredNotifications(withIdentifiers: earlier) }
+            await withdraw(chat: jid)
         case .messageRemoved(let chatJid, let messageId):
+            // Under a LID since merged, it is left to `withdrawStale`.
             let id = Self.identifier(chatJid, messageId)
             posted[chatJid]?.remove(id)
             center.removeDeliveredNotifications(withIdentifiers: [id])
+        }
+    }
+
+    /// Withdraws `jid`'s notifications, including ones posted under a LID it has since merged from.
+    private func withdraw(chat jid: String) async {
+        let delivered = await center.deliveredNotifications()
+        let threads = Set(delivered.map(\.request.content.threadIdentifier)).union(posted.keys)
+        let canonical = await client.ingest.canonicalJids(threads)
+        var ids = delivered.filter { canonical[$0.request.content.threadIdentifier] == jid }.map(\.request.identifier)
+        for key in posted.keys where canonical[key] == jid {
+            ids += posted.removeValue(forKey: key) ?? []
+        }
+        if !ids.isEmpty { center.removeDeliveredNotifications(withIdentifiers: ids) }
+    }
+
+    /// Withdraws notifications whose chat has nothing unread: a safety net for withdrawals no event
+    /// covered (a LID merged after posting, events dropped from a full notice buffer).
+    /// Removes by identifier, so a notification posted meanwhile is never caught.
+    private func withdrawStale() {
+        Task { [center, client] in
+            let delivered = await center.deliveredNotifications()
+            let threads = Set(delivered.map(\.request.content.threadIdentifier))
+            guard !threads.isEmpty else { return }
+            do {
+                let read = try await client.ingest.readChats(among: threads)
+                let ids = delivered.filter { read.contains($0.request.content.threadIdentifier) }.map(\.request.identifier)
+                if !ids.isEmpty { center.removeDeliveredNotifications(withIdentifiers: ids) }
+            } catch {
+                WAKit.log.error("withdraw stale notifications failed: \(error)")
+            }
         }
     }
 
