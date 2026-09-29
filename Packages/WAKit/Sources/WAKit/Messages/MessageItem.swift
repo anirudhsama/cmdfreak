@@ -73,6 +73,21 @@ enum MessageItemFetcher {
             }
         }
 
+        // A quote without its own list uses the quoted message's, when that is stored.
+        var targetMentions: [String: [String]] = [:]
+        let quoting = Set(messages.filter { $0.extra?.quotedMentions == nil && ($0.quotedSnippet?.contains("@") ?? false) }
+            .compactMap(\.quotedId))
+        if !quoting.isEmpty {
+            let rows = try Row.fetchAll(db, sql: """
+                SELECT id, json_extract(extra, '$.mentions') AS mentions FROM message
+                WHERE chatJid = ? AND id IN (\(placeholders(quoting.count))) AND json_extract(extra, '$.mentions') IS NOT NULL
+                """, arguments: StatementArguments([chatJid] + Array(quoting)))
+            for row in rows {
+                let json: String = row["mentions"]
+                targetMentions[row["id"]] = try JSONDecoder().decode([String].self, from: Data(json.utf8))
+            }
+        }
+
         var resolver = try Mentions.Resolver(db)
         return try messages.map { m in
             MessageItem(
@@ -82,7 +97,8 @@ enum MessageItemFetcher {
                 pollVotes: votes[m.id] ?? [],
                 senderName: m.fromMe ? nil : (names[m.senderJid] ?? m.pushName.nonEmpty ?? JID.phoneDisplay(m.senderJid)),
                 mentions: try resolver.mentions(in: m.text, jids: m.extra?.mentions),
-                quotedMentions: try resolver.mentions(in: m.quotedSnippet, jids: m.extra?.quotedMentions)
+                quotedMentions: try resolver.mentions(in: m.quotedSnippet,
+                                                      jids: m.extra?.quotedMentions ?? m.quotedId.flatMap { targetMentions[$0] })
             )
         }
     }

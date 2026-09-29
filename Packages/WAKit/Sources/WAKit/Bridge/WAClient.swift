@@ -641,9 +641,7 @@ public final class WAClient: Sendable {
 
     public func edit(_ key: BridgeMessageKey, text: String) async throws {
         try await bridge.editMessage(target: key, text: text)
-        try await ingest.apply([.messages(messages: [], updates: [
-            .edit(target: key, text: text, mentions: [], editedAt: Int64(Date().timeIntervalSince1970)),
-        ])])
+        try await ingest.localEdit(key, text: text, editedAt: Int64(Date().timeIntervalSince1970))
     }
 
     public func revoke(_ key: BridgeMessageKey) async throws {

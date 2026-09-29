@@ -87,7 +87,7 @@ public enum Mentions {
             guard let text, text.contains("@") else { return [:] }
             let users = Set(Mentions.users(in: text).map(String.init))
             let targets: [(user: String, jid: String?)] = jids.map { jids in
-                jids.map { (JID.user($0), $0) }.filter { users.contains($0.user) }
+                jids.map(Self.bare).map { (JID.user($0), $0) }.filter { users.contains($0.user) }
             } ?? users.map { ($0, nil) }
             var out: [String: Mention] = [:]
             for t in targets {
@@ -96,6 +96,13 @@ public enum Mentions {
                 if let mention = cache[key] ?? nil { out[t.user] = mention }
             }
             return out
+        }
+
+        /// "<user>@<server>" without a device or agent suffix, as contacts and aliases are keyed.
+        static func bare(_ jid: String) -> String {
+            guard let at = jid.firstIndex(of: "@") else { return jid }
+            let user = jid[..<at].prefix { $0 != ":" && $0 != "." }
+            return String(user + jid[at...])
         }
 
         private func resolve(_ user: String, jid: String?) throws -> Mention? {
