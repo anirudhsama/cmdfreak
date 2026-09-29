@@ -24,11 +24,11 @@ final class RailSplitViewController: NSSplitViewController {
         return list.convert(list.bounds, to: splitView).maxX - sidebarWidth - splitView.dividerThickness
     }
 
-    /// Applies the saved sidebar and chat-list widths (the ideal ones on first launch). Call once
-    /// the window has its final frame.
+    /// Applies the saved sidebar and chat-list widths (on first launch, the rail and the ideal
+    /// list width). Call once the window has its final frame.
     func restoreWidths() {
         let saved = UserDefaults.standard.dictionary(forKey: Self.widthsKey) as? [String: Double] ?? [:]
-        let sidebar = saved["sidebar"].map { CGFloat($0) } ?? SourceListMetrics.idealWidth
+        let sidebar = saved["sidebar"].map { CGFloat($0) } ?? SourceListMetrics.railWidth
         let list = saved["list"].map { CGFloat($0) } ?? ChatListMetrics.idealWidth
         lastExpandedWidth = saved["expandedSidebar"].map { CGFloat($0) } ?? SourceListMetrics.idealWidth
         view.layoutSubtreeIfNeeded()
