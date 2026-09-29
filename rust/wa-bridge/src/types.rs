@@ -87,6 +87,14 @@ pub struct BridgeGroup {
     pub membership_changed: bool,
 }
 
+/// Whether a user is a WhatsApp Business account, from `check_business`.
+#[derive(Debug, Clone, serde::Serialize, uniffi::Record)]
+pub struct BridgeBusinessCheck {
+    /// As passed to `check_business`.
+    pub jid: String,
+    pub is_business: bool,
+}
+
 // MARK: - Messages
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, uniffi::Enum)]

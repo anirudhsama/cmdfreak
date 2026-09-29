@@ -192,6 +192,7 @@ public final class WAClient: Sendable {
     public let session: SessionService
     public let media: MediaStore
     public let groups: GroupService
+    public let businesses: BusinessService
     public let avatars: AvatarService
     public var feed: MessageChangeFeed { ingest.feed }
     public var focus: ChatFocus { ingest.focus }
@@ -234,6 +235,8 @@ public final class WAClient: Sendable {
         media = MediaStore(bridge: bridge, ingest: ingest)
         let groups = GroupService(bridge: bridge, ingest: ingest)
         self.groups = groups
+        let businesses = BusinessService(bridge: bridge, ingest: ingest)
+        self.businesses = businesses
         avatars = AvatarService(bridge: bridge, ingest: ingest)
         let receipts = ReadReceiptBatcher(bridge: bridge)
         let retrier = ParkedRetrier(ingest: ingest, bridge: bridge)
@@ -265,6 +268,9 @@ public final class WAClient: Sendable {
                 }
                 if !staleGroups.isEmpty || batch.events.contains(where: \.completesSyncPhase) {
                     Task { await groups.fillMissing(stale: staleGroups) }
+                }
+                if batch.events.contains(where: { if case .messages = $0 { true } else { $0.completesSyncPhase } }) {
+                    Task { await businesses.checkPending() }
                 }
             }
         }

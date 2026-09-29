@@ -131,6 +131,7 @@ final class HarnessBridge: WaBridgeProtocol, @unchecked Sendable {
     func editMessage(target: BridgeMessageKey, text: String) async throws {}
     func fetchGroupMetadata(jid: String) async throws -> BridgeGroup { BridgeGroup(jid: jid, subject: "Design Team", participantCount: 4, participants: []) }
     func fetchGroupOverviews(jids: [String]) async throws -> [BridgeGroup] { [] }
+    func checkBusiness(jids: [String]) async throws -> [BridgeBusinessCheck] { [] }
     func importCapture(captureDir: String) async throws {}
     func logout() async throws {}
     func markChatRead(chat: String, read: Bool) async throws {}

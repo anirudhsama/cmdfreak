@@ -825,6 +825,32 @@ impl WaBridge {
         .await
     }
 
+    /// Batched usync business lookup for PN or LID user JIDs. Users the server did not answer
+    /// for (or answered with a business error) are omitted.
+    pub async fn check_business(&self, jids: Vec<String>) -> R<Vec<BridgeBusinessCheck>> {
+        let shared = self.shared.clone();
+        self.run(async move {
+            let client = shared.require_client()?;
+            let parsed: Vec<Jid> = jids.iter().map(|s| parse_jid(s)).collect::<R<_>>()?;
+            let asked: HashMap<String, &String> =
+                parsed.iter().map(|j| j.to_non_ad_string()).zip(&jids).collect();
+            let results = client.contacts().is_on_whatsapp(&parsed).await.map_err(net)?;
+            Ok(results
+                .into_iter()
+                .filter(|r| r.business_error.is_none())
+                .filter_map(|r| {
+                    // The server may answer a PN query LID-primary (or the reverse).
+                    let jid = [Some(&r.jid), r.pn_jid.as_ref(), r.lid.as_ref()]
+                        .into_iter()
+                        .flatten()
+                        .find_map(|j| asked.get(&j.to_non_ad_string()))?;
+                    Some(BridgeBusinessCheck { jid: (*jid).clone(), is_business: r.is_business })
+                })
+                .collect())
+        })
+        .await
+    }
+
     /// Downloads the picture to `dest_path`; returns false when the user has none.
     pub async fn profile_picture(&self, jid: String, preview: bool, dest_path: String) -> R<bool> {
         let shared = self.shared.clone();

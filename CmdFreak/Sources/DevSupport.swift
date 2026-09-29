@@ -30,6 +30,9 @@ enum DevSupport {
             snapshot(in: dir, suffix: "chats")
             main.selectRailItem(NSMenuItem(title: "", action: nil, keyEquivalent: "").with(tag: 4))
             try? await Task.sleep(for: .milliseconds(400))
+            snapshot(in: dir, suffix: "businesses")
+            main.selectRailItem(NSMenuItem(title: "", action: nil, keyEquivalent: "").with(tag: 5))
+            try? await Task.sleep(for: .milliseconds(400))
             snapshot(in: dir, suffix: "archived")
             main.selectRailItem(NSMenuItem(title: "", action: nil, keyEquivalent: "").with(tag: 1))
         } else {

@@ -77,7 +77,7 @@ enum MainMenu {
         let menu = NSMenu(title: "View")
         menu.addItem(item("Command Bar", #selector(MainWindowController.showCommandBar(_:)), "k"))
         menu.addItem(.separator())
-        for (position, title) in ["Chats", "Unread", "Groups", "Archived"].enumerated() {
+        for (position, title) in ["Chats", "Unread", "Groups", "Businesses", "Archived"].enumerated() {
             let railItem = item(title, #selector(MainWindowController.selectRailItem(_:)), String(position + 1), [.command, .option])
             railItem.tag = position + 1
             menu.addItem(railItem)

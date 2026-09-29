@@ -123,6 +123,7 @@ final class FakeBridge: WaBridgeProtocol, @unchecked Sendable {
             BridgeGroupParticipant(jid: F.bob, isAdmin: false, isSuperAdmin: false),
         ])
     }
+    func checkBusiness(jids: [String]) async throws -> [BridgeBusinessCheck] { [] }
     var overviewsFail = false
     func fetchGroupOverviews(jids: [String]) async throws -> [BridgeGroup] {
         calls.withLock { $0.overviews.append(jids) }

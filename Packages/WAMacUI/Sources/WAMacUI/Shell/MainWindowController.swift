@@ -297,7 +297,8 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, N
 
     private func reveal(_ jid: String, archived: Bool, waitForList: Bool) async {
         // Unread/Groups/tag filters may not contain the chat; fall back to the list that does.
-        let home: RailItem = archived ? .archived : .chats
+        let isBusiness = (try? await client.database.reader.read { db in try ContactRecord.fetchOne(db, key: jid) })?.isBusiness ?? false
+        let home: RailItem = archived ? .archived : isBusiness ? .businesses : .chats
         if railModel.selection != home, !chatList.items.contains(where: { $0.id == jid }) {
             selectRail(home)
         }
