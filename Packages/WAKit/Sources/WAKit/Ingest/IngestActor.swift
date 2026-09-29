@@ -6,7 +6,7 @@ import os
 
 /// A mutation of a message that may arrive before the message itself; parked in `pending_mutation`.
 enum MessageMutation: Codable, Hashable, Sendable {
-    case edit(text: String?, editedAt: Int64)
+    case edit(text: String?, mentions: [String]?, editedAt: Int64)
     case revoke(timestamp: Int64)
     case reaction(senderJid: String, fromMe: Bool, emoji: String, timestamp: Int64)
     case pollVote(voterJid: String, selected: [String], timestamp: Int64)
@@ -194,6 +194,17 @@ public actor IngestActor {
                            arguments: [now, jid])
         }
         return jid
+    }
+
+    /// Our own edit of `key`. We send no mention list, so the message keeps the one it had: mentions the
+    /// new text still has resolve as before.
+    public func localEdit(_ key: BridgeMessageKey, text: String, editedAt: Int64) throws {
+        try perform { db, cs in
+            let mentions = try String.fetchOne(db, sql: "SELECT json_extract(extra, '$.mentions') FROM message WHERE chatJid = ? AND id = ?",
+                                               arguments: [self.canon(key.chatJid), key.id])
+                .map { try JSONDecoder().decode([String].self, from: Data($0.utf8)) }
+            try self.applyOrPark(db, key, .edit(text: text, mentions: mentions, editedAt: editedAt), &cs)
+        }
     }
 
     /// The UI opened `chatJid`: clears unread and marked-unread, returns what to mark read remotely.
@@ -643,7 +654,9 @@ public actor IngestActor {
                 cs.removed(chatJid, m.id)
             }
             if let e = m.editedAt, e > (old.editedAt ?? 0), !m.revoked, !old.revoked {
-                sets.append("text = ?, editedAt = ?"); args.append(m.text); args.append(e)
+                let mentions = try Self.mentionsJSON(Mentions.stored(m.mentions, text: m.text))
+                sets.append("text = ?, editedAt = ?, \(Self.setMentionsSQL)")
+                args += [m.text, e, mentions, mentions]
             }
             if !sets.isEmpty {
                 try db.execute(sql: "UPDATE message SET \(sets.joined(separator: ", ")) WHERE chatJid = ? AND id = ?",
@@ -722,11 +735,31 @@ public actor IngestActor {
         try applyPending(db, chatJid, m.id, &cs)
     }
 
+    /// Sets `extra.mentions` to a JSON array argument, or removes it for NULL. Takes the value twice.
+    static let setMentionsSQL = """
+        extra = CASE WHEN ? IS NULL THEN json_remove(extra, '$.mentions')
+                     ELSE json_set(COALESCE(extra, '{}'), '$.mentions', json(?)) END
+        """
+
+    private static func mentionsJSON(_ mentions: [String]?) throws -> String? {
+        try mentions.map { String(decoding: try JSONEncoder().encode($0), as: UTF8.self) }
+    }
+
+    /// `extra` with the text's mention list replaced; the list travels with the text it belongs to.
+    private static func withMentions(_ extra: MessageExtra?, _ mentions: [String]?) -> MessageExtra? {
+        var e = extra ?? MessageExtra()
+        e.mentions = mentions
+        return e.isEmpty ? nil : e
+    }
+
     private static func extra(_ m: BridgeMessage) -> MessageExtra? {
         let extra = MessageExtra(
             location: m.location.map { LocationInfo(latitude: $0.latitude, longitude: $0.longitude, name: $0.name, address: $0.address, isLive: $0.isLive) },
             contact: m.contact.map { ContactCardInfo(displayName: $0.displayName, vcard: $0.vcard) },
-            poll: m.poll.map { PollInfo(question: $0.question, options: $0.options, selectableCount: Int($0.selectableCount)) }
+            poll: m.poll.map { PollInfo(question: $0.question, options: $0.options, selectableCount: Int($0.selectableCount)) },
+            mentions: Mentions.stored(m.mentions, text: m.text),
+            // Clients strip the quoted message's list, so an empty one says nothing (see `MessageItemFetcher`).
+            quotedMentions: m.quoted.flatMap { $0.mentions.isEmpty ? nil : $0.mentions }
         )
         return extra.isEmpty ? nil : extra
     }
@@ -738,6 +771,7 @@ public actor IngestActor {
     private func upgradePlaceholder(_ old: inout MessageRecord, with m: BridgeMessage, status: MessageStatus?, live: Bool,
                                     _ db: Database, _ cs: inout ChangeSet) throws {
         old.kind = m.kind
+        let editedMentions = old.extra?.mentions
         old.extra = Self.extra(m)
         old.quotedId = m.quoted?.id
         old.quotedSenderJid = m.quoted?.senderJid.map(canon)
@@ -752,6 +786,7 @@ public actor IngestActor {
             old.text = nil
         } else if let applied = old.editedAt, (m.editedAt ?? 0) <= applied {
             // An edit already landed on the placeholder and is newer than this body.
+            old.extra = Self.withMentions(old.extra, editedMentions)
         } else {
             old.text = m.text
             old.editedAt = m.editedAt ?? old.editedAt
@@ -774,8 +809,8 @@ public actor IngestActor {
 
     private func applyUpdate(_ u: BridgeMessageUpdate, _ db: Database, _ cs: inout ChangeSet) throws {
         switch u {
-        case .edit(let target, let text, let editedAt):
-            try applyOrPark(db, target, .edit(text: text, editedAt: editedAt), &cs)
+        case .edit(let target, let text, let mentions, let editedAt):
+            try applyOrPark(db, target, .edit(text: text, mentions: Mentions.stored(mentions, text: text), editedAt: editedAt), &cs)
         case .revoke(let target, _, let timestamp):
             try applyOrPark(db, target, .revoke(timestamp: timestamp), &cs)
         case .reaction(let target, let r):
@@ -911,11 +946,12 @@ public actor IngestActor {
         }
         let key: StatementArguments = [chatJid, id]
         switch mutation {
-        case .edit(let text, let editedAt):
+        case .edit(let text, let mentions, let editedAt):
+            let mentionsJSON = try Self.mentionsJSON(mentions)
             try db.execute(sql: """
-                UPDATE message SET text = ?, editedAt = ?
+                UPDATE message SET text = ?, editedAt = ?, \(Self.setMentionsSQL)
                 WHERE chatJid = ? AND id = ? AND revoked = 0 AND (editedAt IS NULL OR editedAt <= ?)
-                """, arguments: [text, editedAt] + key + [editedAt])
+                """, arguments: [text, editedAt, mentionsJSON, mentionsJSON] + key + [editedAt])
         case .revoke:
             try db.execute(sql: "UPDATE message SET revoked = 1, text = NULL WHERE chatJid = ? AND id = ?", arguments: key)
             try db.execute(sql: "DELETE FROM media WHERE chatJid = ? AND messageId = ?", arguments: key)
@@ -1324,6 +1360,7 @@ public actor IngestActor {
     private func resolveAlerts(_ db: Database, _ cs: inout ChangeSet) throws {
         let cutoff = Self.now - Self.maxAlertAge
         let own = try ChatListQuery.ownJid(db)
+        var resolver = try Mentions.Resolver(db)
         var incoming: [IncomingNotice] = []
         for (jid, alert) in cs.alerts {
             let id = alert.id
@@ -1340,7 +1377,8 @@ public actor IngestActor {
             }
             incoming.append(IncomingNotice(
                 chatJid: jid, messageId: id, chatTitle: ChatListQuery.title(chat, contact, ownJid: own),
-                senderName: sender, kind: m.kind, text: try m.text.map { Mentions.apply($0, try Mentions.names(db, in: [$0])) },
+                senderName: sender, kind: m.kind,
+                text: try m.text.map { Mentions.apply($0, try resolver.mentions(in: $0, jids: m.extra?.mentions)) },
                 timestamp: m.timestamp,
                 avatarURL: chat.avatarURL))
         }
@@ -1502,6 +1540,7 @@ public actor IngestActor {
         } else if let e = l.editedAt, e > (p.editedAt ?? 0) {
             p.text = l.text
             p.editedAt = e
+            p.extra = Self.withMentions(p.extra, l.extra?.mentions)
         }
         if p != original { try p.update(db) }
         let pnKey: StatementArguments = [pn, id]

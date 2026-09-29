@@ -164,6 +164,7 @@ pub fn map_message(msg: &wa::Message, env: &Envelope, canon: &Canon, polls: &Pol
         timestamp: env.timestamp,
         kind: content.kind,
         text: content.text,
+        mentions: content.mentions,
         quoted: content.quoted,
         media: content.media,
         location: content.location,
@@ -196,6 +197,7 @@ fn map_protocol(pm: &wa::message::ProtocolMessage, env: &Envelope, canon: &Canon
             Mapped::Update(BridgeMessageUpdate::Edit {
                 target: edit_target(pm.key.as_option(), env),
                 text: edited.and_then(message_text),
+                mentions: edited.map(mentioned).unwrap_or_default(),
                 edited_at: pm.timestamp_ms.map(|ms| ms / 1000).unwrap_or(env.timestamp),
             })
         }
@@ -218,6 +220,7 @@ fn system_message(env: &Envelope, type_name: &str, text: Option<String>) -> Brid
         timestamp: env.timestamp,
         kind: MessageKind::System,
         text,
+        mentions: Vec::new(),
         quoted: None,
         media: None,
         location: None,
@@ -245,6 +248,7 @@ pub fn undecryptable(env: &Envelope) -> BridgeMessage {
 struct Content {
     kind: MessageKind,
     text: Option<String>,
+    mentions: Vec<String>,
     quoted: Option<BridgeQuoted>,
     media: Option<BridgeMedia>,
     location: Option<BridgeLocation>,
@@ -259,6 +263,7 @@ impl Content {
         Self {
             kind,
             text: None,
+            mentions: Vec::new(),
             quoted: None,
             media: None,
             location: None,
@@ -324,7 +329,7 @@ fn media(
 fn quoted(ctx: Option<&wa::ContextInfo>, canon: &Canon, polls: &PollCache) -> Option<BridgeQuoted> {
     let ctx = ctx?;
     let id = ctx.stanza_id.clone().filter(|s| !s.is_empty())?;
-    let (kind, snippet) = match ctx.quoted_message.as_option() {
+    let (kind, snippet, mentions) = match ctx.quoted_message.as_option() {
         Some(q) => {
             let base = q.get_base_message();
             let content = map_content(base, canon, polls, "");
@@ -342,16 +347,30 @@ fn quoted(ctx: Option<&wa::ContextInfo>, canon: &Canon, polls: &PollCache) -> Op
             if snippet.chars().count() > 200 {
                 snippet = snippet.chars().take(200).collect();
             }
-            (kind, snippet)
+            (kind, snippet, content.map(|c| c.mentions).unwrap_or_default())
         }
-        None => (MessageKind::Unsupported, String::new()),
+        None => (MessageKind::Unsupported, String::new(), Vec::new()),
     };
     Some(BridgeQuoted {
         id,
         sender_jid: ctx.participant.as_deref().and_then(parse).map(|j| canon.cached_str(&j)),
         kind,
         snippet,
+        mentions,
     })
+}
+
+/// JIDs mentioned in a text body or caption (an edit's new content).
+fn mentioned(base: &wa::Message) -> Vec<String> {
+    let ctx = (base.extended_text_message.as_option().and_then(|m| m.context_info.as_option()))
+        .or_else(|| base.image_message.as_option().and_then(|m| m.context_info.as_option()))
+        .or_else(|| base.video_message.as_option().and_then(|m| m.context_info.as_option()))
+        .or_else(|| base.document_message.as_option().and_then(|m| m.context_info.as_option()));
+    ctx.map(mentions_of).unwrap_or_default()
+}
+
+fn mentions_of(ctx: &wa::ContextInfo) -> Vec<String> {
+    ctx.mentioned_jid.iter().filter(|j| !j.is_empty()).cloned().collect()
 }
 
 /// What a quote block shows for the quoted content: its text (body, caption, business/template
@@ -371,6 +390,7 @@ fn quote_snippet(c: &Content) -> Option<String> {
 fn map_content(base: &wa::Message, canon: &Canon, polls: &PollCache, id: &str) -> Option<Content> {
     let with_ctx = |mut c: Content, ctx: Option<&wa::ContextInfo>| {
         c.quoted = quoted(ctx, canon, polls);
+        c.mentions = ctx.map(mentions_of).unwrap_or_default();
         c.is_forwarded = ctx.and_then(|c| c.is_forwarded).unwrap_or(false);
         c
     };

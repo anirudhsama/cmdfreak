@@ -238,7 +238,7 @@ fn history_maps_chats_messages_and_updates() {
         .updates
         .iter()
         .find_map(|u| match u {
-            BridgeMessageUpdate::Edit { target, text, edited_at } => Some((target, text, edited_at)),
+            BridgeMessageUpdate::Edit { target, text, edited_at, .. } => Some((target, text, edited_at)),
             _ => None,
         })
         .unwrap();
@@ -511,6 +511,61 @@ fn quotes_of_business_documents_contacts_and_wrapped_text_get_a_snippet() {
         ..Default::default()
     };
     assert_eq!(quote(ephemeral_text), (MessageKind::Text, "vanishing".into()));
+}
+
+#[test]
+fn mentioned_jids_come_through_for_messages_quotes_and_edits() {
+    let canon = canon();
+    let polls = PollCache::default();
+    let group = "120363000000000001@g.us";
+    let bob = format!("{BOB_PN}@s.whatsapp.net");
+    let mentioning = |text: &str, jids: &[&str]| wa::Message {
+        extended_text_message: MessageField::some(wa::message::ExtendedTextMessage {
+            text: Some(text.into()),
+            context_info: MessageField::some(wa::ContextInfo {
+                mentioned_jid: jids.iter().map(|j| j.to_string()).collect(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let Mapped::Message(m) = map::map_message(
+        &mentioning("@99887766 hi", &["99887766@lid"]),
+        &env(group, &bob, Some(&bob), false),
+        &canon,
+        &polls,
+    ) else {
+        panic!("expected message")
+    };
+    assert_eq!(m.mentions, vec!["99887766@lid".to_string()]);
+
+    let Mapped::Message(r) = map::map_message(
+        &reply_quoting(mentioning("@15552220000 look", &["15552220000@s.whatsapp.net"])),
+        &env(group, &bob, Some(&bob), false),
+        &canon,
+        &polls,
+    ) else {
+        panic!("expected message")
+    };
+    assert!(r.mentions.is_empty());
+    assert_eq!(r.quoted.unwrap().mentions, vec!["15552220000@s.whatsapp.net".to_string()]);
+
+    let edit = wa::Message {
+        protocol_message: MessageField::some(wa::message::ProtocolMessage {
+            r#type: Some(wa::message::protocol_message::Type::MESSAGE_EDIT),
+            key: key(group, false, "M1", Some(&bob)),
+            edited_message: MessageField::some(mentioning("@99887766 edited", &["99887766@lid"])),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let Mapped::Update(BridgeMessageUpdate::Edit { mentions, .. }) =
+        map::map_message(&edit, &env(group, &bob, Some(&bob), false), &canon, &polls)
+    else {
+        panic!("expected edit")
+    };
+    assert_eq!(mentions, vec!["99887766@lid".to_string()]);
 }
 
 #[test]

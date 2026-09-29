@@ -172,6 +172,9 @@ pub struct BridgeQuoted {
     pub sender_jid: Option<String>,
     pub kind: MessageKind,
     pub snippet: String,
+    /// JIDs the quoted text mentions, as its sender wrote them (see `BridgeMessage::mentions`).
+    #[uniffi(default)]
+    pub mentions: Vec<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, uniffi::Record)]
@@ -216,6 +219,10 @@ pub struct BridgeMessage {
     pub kind: MessageKind,
     /// Body text for text messages, caption for media.
     pub text: Option<String>,
+    /// JIDs mentioned in `text` (each appears there as "@<user>"), LID or phone number as the sender
+    /// wrote them.
+    #[uniffi(default)]
+    pub mentions: Vec<String>,
     pub quoted: Option<BridgeQuoted>,
     pub media: Option<BridgeMedia>,
     pub location: Option<BridgeLocation>,
@@ -253,6 +260,8 @@ pub enum BridgeMessageUpdate {
     Edit {
         target: BridgeMessageKey,
         text: Option<String>,
+        /// JIDs mentioned in the new text.
+        mentions: Vec<String>,
         edited_at: i64,
     },
     Revoke {
