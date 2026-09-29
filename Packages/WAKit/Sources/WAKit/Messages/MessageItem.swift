@@ -23,8 +23,8 @@ public struct MessageItem: Hashable, Sendable, Identifiable {
     }
 
     /// The text with mentions shown by name. `message.text` keeps the wire form.
-    public var displayText: String? { message.text.map { Mentions.apply($0, mentions.mapValues(\.name)) } }
-    public var displayQuotedSnippet: String? { message.quotedSnippet.map { Mentions.apply($0, mentions.mapValues(\.name)) } }
+    public var displayText: String? { message.text.map { Mentions.apply($0, mentions) } }
+    public var displayQuotedSnippet: String? { message.quotedSnippet.map { Mentions.apply($0, mentions) } }
 
     public var id: String { message.id }
     public var sortKey: Int64 { message.sortKey }

@@ -24,13 +24,26 @@ public enum Mentions {
         tokens(in: text).map(\.user)
     }
 
+    /// Every "@<number>" in `text` as a UTF-16 range, with its user number.
+    public static func ranges(in text: String) -> [(range: NSRange, user: String)] {
+        tokens(in: text).map { (NSRange($0.range, in: text), String($0.user)) }
+    }
+
     /// Replaces every resolvable "@<number>" with "@<name>". `names` is keyed by user number.
     public static func apply(_ text: String, _ names: [String: String]) -> String {
-        guard !names.isEmpty else { return text }
+        apply(text) { names[$0] }
+    }
+
+    public static func apply(_ text: String, _ mentions: [String: Mention]) -> String {
+        apply(text) { mentions[$0]?.name }
+    }
+
+    private static func apply(_ text: String, name: (String) -> String?) -> String {
+        guard text.contains("@") else { return text }
         var out = ""
         var cursor = text.startIndex
         for t in tokens(in: text) {
-            guard let name = names[String(t.user)] else { continue }
+            guard let name = name(String(t.user)) else { continue }
             out += text[cursor..<t.range.lowerBound]
             out += "@" + name
             cursor = t.range.upperBound

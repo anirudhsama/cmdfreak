@@ -52,7 +52,9 @@ final class MessageTextView: NSTextView, NSTextViewDelegate {
 
     override func clicked(onLink link: Any, at charIndex: Int) {
         var range = NSRange()
-        if let mention = textStorage?.attribute(.mention, at: charIndex, effectiveRange: &range) as? Mention {
+        if let storage = textStorage,
+           let mention = storage.attribute(.mention, at: charIndex, longestEffectiveRange: &range,
+                                           in: NSRange(location: 0, length: storage.length)) as? Mention {
             showMenu(for: mention, range: range)
             return
         }
