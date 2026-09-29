@@ -95,7 +95,7 @@ enum LayoutPlanner {
         // Quoted reply
         if let qid = m.quotedId, !m.revoked, !isSticker {
             let qName = quoteName(m, ctx)
-            let snippet = quoteSnippet(m)
+            let snippet = quoteSnippet(m, item.displayQuotedSnippet)
             let nameAttr = NSAttributedString(string: qName, attributes: [.font: C.quoteName, .foregroundColor: C.senderColor(for: m.quotedSenderJid ?? "me")])
             let snipAttr = NSAttributedString(string: snippet, attributes: [.font: C.quoteBody, .foregroundColor: NSColor.secondaryLabelColor])
             let w = min(innerMax, max(180, TextMeasurer.width(snippet, font: C.quoteBody) + 24, TextMeasurer.width(qName, font: C.quoteName) + 24))
@@ -117,7 +117,7 @@ enum LayoutPlanner {
             case .unsupported:
                 bodyAttr = placeholder("Unsupported message (\(m.typeName ?? "unknown")) — open on phone.", symbolic: true)
             case .text:
-                let t = m.text ?? ""
+                let t = item.displayText ?? ""
                 if MarkdownLite.isEmojiOnly(t) {
                     bodyAttr = NSAttributedString(string: t, attributes: [.font: C.bigEmoji, .paragraphStyle: C.paragraph])
                 } else {
@@ -126,7 +126,7 @@ enum LayoutPlanner {
             case .poll:
                 break  // the question is part of the card
             default:
-                if let t = m.text, !t.isEmpty { bodyAttr = MarkdownLite.attributedString(t) }
+                if let t = item.displayText, !t.isEmpty { bodyAttr = MarkdownLite.attributedString(t) }
             }
         }
 
@@ -385,8 +385,8 @@ enum LayoutPlanner {
         return user.allSatisfy(\.isNumber) ? "+" + user : user
     }
 
-    private static func quoteSnippet(_ m: MessageRecord) -> String {
-        let s = m.quotedSnippet ?? ""
+    private static func quoteSnippet(_ m: MessageRecord, _ snippet: String?) -> String {
+        let s = snippet ?? ""
         if !s.isEmpty { return s.replacingOccurrences(of: "\n", with: " ") }
         switch m.quotedKind {
         case .image: return "Photo"

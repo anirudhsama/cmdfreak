@@ -58,6 +58,8 @@ public struct ContactRecord: Codable, Hashable, Sendable, FetchableRecord, Persi
     /// A WhatsApp Business account, as of `businessCheckedAt` (nil: never checked).
     public var isBusiness: Bool
     public var businessCheckedAt: Int64?
+    /// A business's verified display name, from its messages or the business check.
+    public var verifiedName: String?
 
     public var id: String { jid }
 
@@ -70,9 +72,9 @@ public struct ContactRecord: Codable, Hashable, Sendable, FetchableRecord, Persi
         isBusiness = false
     }
 
-    /// Saved name first, then the sender's push name, then the phone number.
+    /// Saved name first, then a business's verified name, then the sender's push name, then the phone number.
     public var displayName: String? {
-        fullName.nonEmpty ?? firstName.nonEmpty ?? pushName.nonEmpty ?? phone.nonEmpty.map { "+" + $0 }
+        fullName.nonEmpty ?? firstName.nonEmpty ?? verifiedName.nonEmpty ?? pushName.nonEmpty ?? phone.nonEmpty.map { "+" + $0 }
     }
 }
 

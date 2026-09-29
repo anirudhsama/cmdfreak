@@ -1043,7 +1043,7 @@ final class MessageListController: NSViewController {
         if let (item, e) = sender.representedObject as? (MessageItem, String) { actions?.toggleReaction(e, on: item) }
     }
     @objc private func menuCopy(_ sender: NSMenuItem) {
-        guard let item = sender.representedObject as? MessageItem, let t = item.message.text else { return }
+        guard let item = sender.representedObject as? MessageItem, let t = item.displayText else { return }
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(t, forType: .string)
     }

@@ -93,6 +93,8 @@ pub struct BridgeBusinessCheck {
     /// As passed to `check_business`.
     pub jid: String,
     pub is_business: bool,
+    /// The business's verified display name, when it has one.
+    pub verified_name: Option<String>,
 }
 
 // MARK: - Messages
@@ -221,6 +223,9 @@ pub struct BridgeMessage {
     /// For `System`: human-readable description. For `Unsupported`: the protobuf field name.
     pub type_name: Option<String>,
     pub push_name: Option<String>,
+    /// A business sender's verified display name.
+    #[uniffi(default)]
+    pub verified_name: Option<String>,
     /// Status known at ingest (history rows carry one); `None` for live incoming messages.
     pub status: Option<MessageStatus>,
     pub is_forwarded: bool,

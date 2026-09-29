@@ -382,6 +382,7 @@ pub async fn envelope(ctx: &MapCtx<'_>, info: &MessageInfo) -> Envelope {
         from_me: src.is_from_me,
         timestamp: info.timestamp.timestamp(),
         push_name: (!info.push_name.is_empty()).then(|| info.push_name.to_string()),
+        verified_name: info.verified_name.as_ref().and_then(|v| v.name.clone()),
         status: None,
     }
 }
