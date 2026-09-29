@@ -92,6 +92,7 @@ final class FakeBridge: WaBridgeProtocol, @unchecked Sendable {
         var sentTexts: [String] = []
         var nudges = 0
         var decryptParked: [[Data]] = []
+        var profilePictures: [(jid: String, commonGid: String?)] = []
     }
 
     let calls = Mutex(Calls())
@@ -138,7 +139,13 @@ final class FakeBridge: WaBridgeProtocol, @unchecked Sendable {
     func nudgeReconnect() { calls.withLock { $0.nudges += 1 } }
     func pairWithPhone(number: String) async throws -> String { "ABCD-EFGH" }
     func pinChat(chat: String, pinned: Bool) async throws {}
-    func profilePicture(jid: String, preview: Bool, destPath: String) async throws -> Bool {
+    /// What `profilePicture` answers: a picture, none, or this error.
+    var hasPicture = true
+    var pictureError: BridgeError?
+    func profilePicture(jid: String, commonGid: String?, preview: Bool, destPath: String) async throws -> Bool {
+        calls.withLock { $0.profilePictures.append((jid, commonGid)) }
+        if let pictureError { throw pictureError }
+        guard hasPicture else { return false }
         try Data([0xFF, 0xD8]).write(to: URL(filePath: destPath))
         return true
     }

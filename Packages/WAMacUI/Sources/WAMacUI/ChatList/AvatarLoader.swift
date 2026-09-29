@@ -2,21 +2,38 @@ import CoreGraphics
 import Foundation
 import WAKit
 
-/// Fills `ChatRowState.avatar` for rows as they are displayed. Cached decodes are synchronous;
-/// misses decode off the main thread through `ThumbnailCache`; chats with no cached file ask
-/// `AvatarService` once per session, and the resulting `hasAvatar` arrives through the list
-/// observation. A recorded file that fails to load (purged from Caches) is fetched again.
+/// Loads avatars for chat rows and group senders. Cached decodes are synchronous; misses decode off
+/// the main thread through `ThumbnailCache`, keyed by the file's modification time so a picture saved
+/// over an old one is decoded again. JIDs are sent to `AvatarService` in batches. Chat rows are asked
+/// about once per session, or again through `reload` when the list observation reports a change;
+/// group senders have no observation, so theirs are asked again after `senderRecheck` (answered from
+/// the service's record unless the picture changed) and reported through `onSenderAvatar`.
 @MainActor
 final class AvatarLoader {
-    static let pixelSize = Int(ChatRowMetrics.avatarSize) * 2
+    static let senderRecheck: Duration = .seconds(60)
+
+    private struct Sender {
+        /// Nil: none, or hidden from us.
+        var file: URL?
+        var resolvedAt: ContinuousClock.Instant
+    }
 
     private let avatars: AvatarService
+    private let pixelSize: Int
+    /// Chat rows asked about this session; senders queued or in flight.
     private var requested: Set<String> = []
-    private var pending: [String] = []
+    private var pending: [(jid: String, group: String?)] = []
     private var flushScheduled = false
+    /// The file `AvatarService` resolved per sender (a LID's is its phone number's).
+    private var senders: [String: Sender] = [:]
+    /// Decode key → senders waiting on it.
+    private var decoding: [String: Set<String>] = [:]
+    /// A group sender's picture loaded, changed or went away; ask `senderAvatar` again.
+    var onSenderAvatar: ((String) -> Void)?
 
-    init(avatars: AvatarService) {
+    init(avatars: AvatarService, pixelSize: Int) {
         self.avatars = avatars
+        self.pixelSize = pixelSize
     }
 
     func load(_ state: ChatRowState) {
@@ -25,24 +42,67 @@ final class AvatarLoader {
             request(state.jid)
             return
         }
-        if let hit = ThumbnailCache.shared.cached(key: url.path, maxPixelSize: Self.pixelSize) {
+        if let key = ThumbnailCache.fileKey(url), let hit = ThumbnailCache.shared.cached(key: key, maxPixelSize: pixelSize) {
             state.avatar = hit
             return
         }
-        let avatars = self.avatars
+        let avatars = self.avatars, pixelSize = self.pixelSize
         Task { [weak state] in
-            var image = await ThumbnailCache.shared.image(key: url.path, source: .file(url), maxPixelSize: Self.pixelSize)
-            if image == nil, let jid = state?.jid, await avatars.avatar(for: jid) != nil {
-                image = await ThumbnailCache.shared.image(key: url.path, source: .file(url), maxPixelSize: Self.pixelSize)
-            }
+            // A recorded file purged from Caches is fetched again first.
+            if ThumbnailCache.fileKey(url) == nil, let jid = state?.jid { _ = await avatars.avatar(for: jid) }
+            guard let key = ThumbnailCache.fileKey(url) else { return }
+            let image = await ThumbnailCache.shared.image(key: key, source: .file(url), maxPixelSize: pixelSize)
             guard let state, state.avatarURL == url else { return }
             state.avatar = image
         }
     }
 
-    private func request(_ jid: String) {
+    /// The row's picture was fetched, changed or removed: load it again, asking `AvatarService` even
+    /// if this session already has.
+    func reload(_ state: ChatRowState) {
+        requested.remove(state.jid)
+        load(state)
+    }
+
+    /// `jid`'s picture if decoded; otherwise nil, with `onSenderAvatar` to follow once it is. Until
+    /// `AvatarService` has answered, a file already on disk shows straight away.
+    func senderAvatar(_ jid: String, group: String) -> CGImage? {
+        let sender = senders[jid]
+        if sender.map({ ContinuousClock.now - $0.resolvedAt > Self.senderRecheck }) ?? true { request(jid, group: group) }
+        let url = if let sender { sender.file } else { AvatarService.fileURL(for: jid) }
+        guard let url, let key = ThumbnailCache.fileKey(url) else { return nil }
+        if let hit = ThumbnailCache.shared.cached(key: key, maxPixelSize: pixelSize) { return hit }
+        decode(jid, url, key)
+        return nil
+    }
+
+    private func decode(_ jid: String, _ url: URL, _ key: String) {
+        guard decoding[key] == nil else {
+            decoding[key]?.insert(jid)
+            return
+        }
+        decoding[key] = [jid]
+        let pixelSize = self.pixelSize
+        Task { [weak self] in
+            let image = await ThumbnailCache.shared.image(key: key, source: .file(url), maxPixelSize: pixelSize)
+            guard let self, let waiting = decoding.removeValue(forKey: key), image != nil else { return }
+            for jid in waiting { onSenderAvatar?(jid) }
+        }
+    }
+
+    private func senderResolved(_ jid: String, _ url: URL?) {
+        requested.remove(jid)
+        senders[jid] = Sender(file: url, resolvedAt: .now)
+        if let url, let key = ThumbnailCache.fileKey(url), ThumbnailCache.shared.cached(key: key, maxPixelSize: pixelSize) == nil {
+            decode(jid, url, key)
+        } else {
+            onSenderAvatar?(jid)
+        }
+    }
+
+    private func request(_ jid: String, group: String? = nil) {
         guard requested.insert(jid).inserted else { return }
-        pending.append(jid)
+        pending.append((jid, group))
         guard !flushScheduled else { return }
         flushScheduled = true
         Task { [weak self] in
@@ -56,8 +116,11 @@ final class AvatarLoader {
         let batch = pending
         pending.removeAll()
         let avatars = self.avatars
-        Task.detached(priority: .utility) {
-            for jid in batch { _ = await avatars.avatar(for: jid) }
+        Task.detached(priority: .utility) { [weak self] in
+            for (jid, group) in batch {
+                let url = await avatars.avatar(for: jid, commonGroup: group)
+                if group != nil { await self?.senderResolved(jid, url) }
+            }
         }
     }
 }

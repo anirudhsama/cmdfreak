@@ -66,8 +66,9 @@ public actor GroupService {
     }
 }
 
-/// Lazily downloads profile pictures into `~/Library/Caches/CmdFreak/avatars/` and records on the
-/// chat that one exists. Checks each JID at most once per `recheckInterval`.
+/// Lazily downloads profile pictures into `~/Library/Caches/CmdFreak/avatars/` and records that one
+/// exists on the chat and, for a person, on their contact row. Checks each JID at most once per
+/// `recheckInterval`.
 public actor AvatarService {
     public static var defaultRoot: URL {
         WAKit.cacheDirectory.appending(path: "avatars", directoryHint: .isDirectory)
@@ -83,6 +84,9 @@ public actor AvatarService {
     private let bridge: any WaBridgeProtocol
     private let ingest: IngestActor
     private var inFlight: [String: Task<URL?, Never>] = [:]
+    /// After the server rate-limits a lookup, none are made until then (the rest of a batch included).
+    private var backoffUntil: Int64 = 0
+    static let rateLimitBackoff: Int64 = 300
 
     public init(bridge: any WaBridgeProtocol, ingest: IngestActor, root: URL = AvatarService.defaultRoot, recheckInterval: Int64 = 86_400) {
         self.bridge = bridge
@@ -91,24 +95,52 @@ public actor AvatarService {
         self.recheckInterval = recheckInterval
     }
 
-    /// The cached avatar for `jid`, fetching it if it has not been checked recently.
-    public func avatar(for jid: String) async -> URL? {
+    /// The cached avatar for `jid`, fetching it if it has not been checked recently. A LID whose phone
+    /// number is known resolves to the phone number's file. `commonGroup`, a group shared with the
+    /// person, lets the server answer for people we hold no privacy token for; without one, any group
+    /// they are known to be in is used.
+    public func avatar(for jid: String, commonGroup: String? = nil) async -> URL? {
+        let jid = await ingest.canonicalJid(jid)
         if let task = inFlight[jid] { return await task.value }
-        let chat = try? await ingest.database.reader.read { db in try ChatRecord.fetchOne(db, key: jid) }
+        typealias Check = (hasAvatar: Bool, checkedAt: Int64?)
+        let read = try? await ingest.database.reader.read { db -> (chat: Check?, contact: Check?, group: String?) in
+            let check = { (table: String) throws -> Check? in
+                try Row.fetchOne(db, sql: "SELECT hasAvatar, avatarCheckedAt FROM \(table) WHERE jid = ?", arguments: [jid])
+                    .map { ($0["hasAvatar"], $0["avatarCheckedAt"]) }
+            }
+            let group = try commonGroup
+                ?? String.fetchOne(db, sql: "SELECT groupJid FROM group_participant WHERE jid = ? LIMIT 1", arguments: [jid])
+            return (try check("chat"), try check("contact"), group)
+        }
+        // The chat's record is what the chat list shows, so it decides when there is one; a chat never
+        // checked takes its contact's (checked through a group), copied over so the list shows it too.
+        var checked = read?.chat ?? read?.contact
+        if let chat = read?.chat, chat.checkedAt == nil, let contact = read?.contact, let at = contact.checkedAt {
+            checked = contact
+            try? await ingest.setAvatar(jid: jid, present: contact.hasAvatar, checkedAt: at)
+        }
         let dest = root.appending(path: Self.fileName(for: jid))
-        let hasAvatar = chat?.hasAvatar ?? false
+        let hasAvatar = checked?.hasAvatar ?? false
         if hasAvatar, FileManager.default.fileExists(atPath: dest.path) { return dest }
         // A recorded avatar whose file is gone (Caches purged) is fetched again right away.
         let now = Int64(Date().timeIntervalSince1970)
-        if !hasAvatar, let checkedAt = chat?.avatarCheckedAt, now - checkedAt < recheckInterval { return nil }
+        if !hasAvatar, let checkedAt = checked?.checkedAt, now - checkedAt < recheckInterval { return nil }
+        guard now >= backoffUntil else { return nil }
+        // Another call may have started the fetch while this one read the database.
+        if let task = inFlight[jid] { return await task.value }
 
-        let bridge = self.bridge, ingest = self.ingest, root = self.root
+        let bridge = self.bridge, ingest = self.ingest, root = self.root, group = read?.group
         let task = Task<URL?, Never> {
             do {
                 try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-                let has = try await bridge.profilePicture(jid: jid, preview: true, destPath: dest.path)
+                let has = try await bridge.profilePicture(jid: jid, commonGid: group, preview: true, destPath: dest.path)
+                // A removed or hidden picture must not keep showing from the old file.
+                if !has { try? FileManager.default.removeItem(at: dest) }
                 try await ingest.setAvatar(jid: jid, present: has, checkedAt: now)
                 return has ? dest : nil
+            } catch BridgeError.RateLimited {
+                backoffUntil = now + Self.rateLimitBackoff
+                return nil
             } catch {
                 WAKit.log.debug("avatar \(jid, privacy: .private) failed: \(error)")
                 return nil

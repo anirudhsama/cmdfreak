@@ -305,10 +305,17 @@ public actor IngestActor {
         try perform { db, _ in for g in groups { try self.handleGroup(g, db) } }
     }
 
+    /// Records the check on the chat and, for a person, on their contact row (group members often
+    /// have no chat).
     public func setAvatar(jid: String, present: Bool, checkedAt: Int64) throws {
         let jid = canon(jid)
         try perform { db, _ in
             try db.execute(sql: "UPDATE chat SET hasAvatar = ?, avatarCheckedAt = ? WHERE jid = ?", arguments: [present, checkedAt, jid])
+            guard JID.isPhoneNumber(jid) || JID.isLid(jid) else { return }
+            try db.execute(sql: """
+                INSERT INTO contact (jid, hasAvatar, avatarCheckedAt) VALUES (?, ?, ?)
+                ON CONFLICT(jid) DO UPDATE SET hasAvatar = excluded.hasAvatar, avatarCheckedAt = excluded.avatarCheckedAt
+                """, arguments: [jid, present, checkedAt])
         }
     }
 
@@ -484,6 +491,7 @@ public actor IngestActor {
             try handleGroup(group, db)
         case .pictureChanged(let jid):
             try db.execute(sql: "UPDATE chat SET hasAvatar = 0, avatarCheckedAt = NULL WHERE jid = ?", arguments: [canon(jid)])
+            try db.execute(sql: "UPDATE contact SET hasAvatar = 0, avatarCheckedAt = NULL WHERE jid = ?", arguments: [canon(jid)])
         case .historyChunk(let chunk):
             for a in chunk.aliases { try mergeAlias(lid: a.lid, pn: a.pn, db, &cs) }
             for c in chunk.contacts { try upsertContact(c, db) }
@@ -1124,6 +1132,12 @@ public actor IngestActor {
                     businessCheckedAt = COALESCE(businessCheckedAt, excluded.businessCheckedAt),
                     verifiedName = COALESCE(verifiedName, excluded.verifiedName)
                 """, arguments: [pn, lc.fullName, lc.firstName, lc.pushName, lc.phone, lc.isBusiness, lc.businessCheckedAt, lc.verifiedName])
+            // The LID's picture is in a file named after it; a phone number checked as having none
+            // (without the privacy token the LID was asked with) is asked again.
+            try db.execute(sql: """
+                UPDATE contact SET avatarCheckedAt = NULL
+                WHERE jid = ? AND hasAvatar = 0 AND EXISTS (SELECT 1 FROM contact WHERE jid = ? AND hasAvatar)
+                """, arguments: [pn, lid])
             try db.execute(sql: "DELETE FROM contact WHERE jid = ?", arguments: [lid])
         }
 

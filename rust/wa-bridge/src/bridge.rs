@@ -860,16 +860,31 @@ impl WaBridge {
         .await
     }
 
-    /// Downloads the picture to `dest_path`; returns false when the user has none.
-    pub async fn profile_picture(&self, jid: String, preview: bool, dest_path: String) -> R<bool> {
+    /// Downloads the picture to `dest_path`; returns false when the user has none or hides it.
+    /// `common_gid` is a group shared with the user; the server answers with it when we hold no
+    /// privacy token for them (people known only from groups).
+    pub async fn profile_picture(
+        &self,
+        jid: String,
+        common_gid: Option<String>,
+        preview: bool,
+        dest_path: String,
+    ) -> R<bool> {
         let shared = self.shared.clone();
         self.run(async move {
             let client = shared.require_client()?;
             let target = parse_jid(&jid)?;
-            let Some(pic) =
-                client.contacts().get_profile_picture(&target, preview).await.map_err(net)?
-            else {
-                return Ok(false);
+            let group = common_gid.as_deref().map(parse_jid).transpose()?;
+            let options = whatsapp_rust::ProfilePictureLookupOptions::new(&target)
+                .preview(preview)
+                .common_gid(group.as_ref());
+            let contacts = client.contacts();
+            let pic = match contacts.lookup_profile_picture_with_options(options).await.map_err(net)? {
+                whatsapp_rust::ProfilePictureLookup::Found(pic) => pic,
+                whatsapp_rust::ProfilePictureLookup::RateOverlimit => {
+                    return Err(BridgeError::RateLimited);
+                }
+                _ => return Ok(false),
             };
             crate::media::fetch_url_to(&pic.url, &dest_path).await?;
             Ok(true)

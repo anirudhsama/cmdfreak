@@ -283,6 +283,19 @@ extension AppDatabase {
             try db.execute(sql: "UPDATE contact SET businessCheckedAt = NULL WHERE isBusiness")
         }
 
+        // Avatar checks recorded per person, not only on chats, so group members with no chat of
+        // their own are not fetched again on every launch.
+        m.registerMigration("v9") { db in
+            try db.alter(table: "contact") { t in
+                t.add(column: "hasAvatar", .boolean).notNull().defaults(to: false)
+                t.add(column: "avatarCheckedAt", .integer)
+            }
+            try db.execute(sql: """
+                UPDATE contact SET (hasAvatar, avatarCheckedAt) = (SELECT hasAvatar, avatarCheckedAt FROM chat WHERE chat.jid = contact.jid)
+                WHERE EXISTS (SELECT 1 FROM chat WHERE chat.jid = contact.jid)
+                """)
+        }
+
         return m
     }
 
