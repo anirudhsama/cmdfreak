@@ -368,6 +368,19 @@ public actor IngestActor {
 
     public func canonicalJid(_ jid: String) -> String { canon(jid) }
 
+    public func canonicalJids(_ jids: Set<String>) -> [String: String] {
+        Dictionary(uniqueKeysWithValues: jids.map { ($0, canon($0)) })
+    }
+
+    /// Of `jids` (possibly LIDs since merged), those whose chat has no unread messages or no longer
+    /// exists: notifications delivered for them are stale.
+    public func readChats(among jids: Set<String>) throws -> Set<String> {
+        let unread = try database.pool.read { db in
+            try String.fetchSet(db, sql: "SELECT jid FROM chat WHERE unreadCount > 0")
+        }
+        return jids.filter { !unread.contains(canon($0)) }
+    }
+
     // MARK: - Transaction plumbing
 
     /// One write transaction. In-memory bookkeeping mutated inside it (aliases, sequence numbers,
@@ -625,6 +638,16 @@ public actor IngestActor {
                 // A placeholder alerts once its real content arrives (`upgradePlaceholder`).
                 if m.kind != .undecryptable { cs.alert(chatJid, m.id, m.timestamp) }
             }
+        } else if live, m.fromMe, ![.system, .undecryptable].contains(m.kind), !m.revoked,
+                  [.dm, .group].contains(ChatKind(jid: chatJid)),
+                  try Bool.fetchOne(db, sql: """
+                      SELECT EXISTS(SELECT 1 FROM message WHERE chatJid = ? AND fromMe = 0 AND kind != 'system' AND timestamp > ?)
+                      """, arguments: [chatJid, m.timestamp]) == false {
+            // Sent from another device: replying reads the chat, even without a read-self receipt,
+            // unless a delayed reply lands after newer incoming messages. Leaves `stateAt` alone so
+            // a pending history snapshot still brings the chat's pin/mute/archive.
+            try db.execute(sql: "UPDATE chat SET unreadCount = 0 WHERE jid = ?", arguments: [chatJid])
+            cs.chatRead(chatJid)
         }
         try applyPending(db, chatJid, m.id, &cs)
     }

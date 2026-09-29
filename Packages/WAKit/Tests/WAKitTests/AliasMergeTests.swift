@@ -57,12 +57,12 @@ import Testing
         let ingest = try IngestActor(database: db)
         let poll = BridgePoll(question: "Q", options: ["A", "B"], selectableCount: 1)
         try await ingest.apply([
-            F.live(F.message("R", chat: F.alicePN, kind: .image, media: F.media()), F.message("E", chat: F.alicePN),
-                   F.message("S", chat: F.alicePN, fromMe: true, status: .sent), F.message("P", chat: F.alicePN, kind: .poll, text: nil, poll: poll),
+            F.live(F.message("S", chat: F.alicePN, fromMe: true, status: .sent),
+                   F.message("R", chat: F.alicePN, kind: .image, media: F.media()), F.message("E", chat: F.alicePN), F.message("P", chat: F.alicePN, kind: .poll, text: nil, poll: poll),
                    updates: [.reaction(target: F.key("E", chat: F.alicePN),
                                        reaction: BridgeReaction(senderJid: F.alicePN, fromMe: false, emoji: "😀", timestamp: 1))]),
-            F.live(F.message("R", chat: F.aliceLID, kind: .image, media: F.media()), F.message("E", chat: F.aliceLID),
-                   F.message("S", chat: F.aliceLID, fromMe: true, status: .read), F.message("P", chat: F.aliceLID, kind: .poll, text: nil, poll: poll),
+            F.live(F.message("S", chat: F.aliceLID, fromMe: true, status: .read),
+                   F.message("R", chat: F.aliceLID, kind: .image, media: F.media()), F.message("E", chat: F.aliceLID), F.message("P", chat: F.aliceLID, kind: .poll, text: nil, poll: poll),
                    updates: [
                        .revoke(target: F.key("R", chat: F.aliceLID), revokedBy: F.aliceLID, timestamp: 5),
                        .edit(target: F.key("E", chat: F.aliceLID), text: "edited", editedAt: 9),

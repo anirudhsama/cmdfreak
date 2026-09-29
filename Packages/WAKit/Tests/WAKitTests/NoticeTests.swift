@@ -15,9 +15,9 @@ import Testing
         try await ingest.setAvatar(jid: F.bob, present: true, checkedAt: now)
         let result = try await ingest.applyBatch([
             .contacts(contacts: [BridgeContact(jid: F.alicePN, fullName: "Alice", firstName: nil, pushName: nil, phone: nil)]),
-            F.live(F.message("1", chat: F.bob, ts: now - 1, text: "first"), F.message("2", chat: F.bob, ts: now, text: "second"),
-                   F.message("3", chat: F.group, sender: F.alicePN, ts: now, kind: .image, text: nil),
-                   F.message("4", chat: F.bob, fromMe: true, ts: now)),
+            F.live(F.message("4", chat: F.bob, fromMe: true, ts: now - 2),
+                   F.message("1", chat: F.bob, ts: now - 1, text: "first"), F.message("2", chat: F.bob, ts: now, text: "second"),
+                   F.message("3", chat: F.group, sender: F.alicePN, ts: now, kind: .image, text: nil)),
         ])
         let notices = incoming(result.notices)
         #expect(notices.count == 2)
@@ -57,6 +57,40 @@ import Testing
         result = try await ingest.applyBatch([F.live(F.message("2", chat: F.bob, ts: now),
                                                      updates: [.revoke(target: F.key("2", chat: F.bob), revokedBy: F.bob, timestamp: now)])])
         #expect(result.notices == [.messageRemoved(chatJid: F.bob, messageId: "2")])
+    }
+
+    @Test func replyFromAnotherDeviceReadsChat() async throws {
+        let db = try F.tempDB()
+        let ingest = try IngestActor(database: db)
+        // Incoming then the reply in one batch: read, and the incoming never alerts.
+        var result = try await ingest.applyBatch([F.live(F.message("1", chat: F.bob, ts: now),
+                                                         F.message("2", chat: F.bob, fromMe: true, ts: now))])
+        #expect(result.notices == [.chatRead(F.bob)])
+        #expect(try db.chat(F.bob)?.unreadCount == 0)
+
+        // A delayed reply older than an unread incoming message leaves it unread.
+        try await ingest.apply([F.live(F.message("3", chat: F.bob, ts: now))])
+        result = try await ingest.applyBatch([F.live(F.message("4", chat: F.bob, fromMe: true, ts: now - 10))])
+        #expect(result.notices.isEmpty)
+        #expect(try db.chat(F.bob)?.unreadCount == 1)
+
+        // Status posts and undecrypted own messages do not read anything.
+        result = try await ingest.applyBatch([F.live(F.message("5", chat: "status@broadcast", fromMe: true, ts: now),
+                                                     F.message("6", chat: F.bob, fromMe: true, ts: now, kind: .undecryptable))])
+        #expect(result.notices.isEmpty)
+
+        // The reply does not block the phone's snapshot state for the chat.
+        try await ingest.apply([F.history(chats: [F.chat(F.bob, archived: true)])])
+        #expect(try db.chat(F.bob)?.archived == true)
+    }
+
+    @Test func readChatsResolvesMergedLids() async throws {
+        let ingest = try IngestActor(database: F.tempDB())
+        try await ingest.apply([F.live(F.message("1", chat: F.aliceLID, ts: now), F.message("2", chat: F.bob, ts: now))])
+        try await ingest.apply([.jidAliases(aliases: [BridgeJidAlias(lid: F.aliceLID, pn: F.alicePN)])])
+        #expect(try await ingest.readChats(among: [F.aliceLID, F.bob, "gone@s.whatsapp.net"]) == ["gone@s.whatsapp.net"])
+        try await ingest.apply([F.receipt(["1"], chat: F.alicePN, kind: .readSelf, from: F.me)])
+        #expect(try await ingest.readChats(among: [F.aliceLID, F.bob]) == [F.aliceLID])
     }
 
     @Test func streamCarriesNoticesAndOpenedChat() async throws {
