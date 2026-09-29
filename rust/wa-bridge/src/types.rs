@@ -310,6 +310,15 @@ pub struct BridgeReceipt {
     pub timestamp: i64,
 }
 
+#[derive(Debug, Clone, serde::Serialize, uniffi::Record)]
+pub struct BridgeServerAck {
+    /// None when the server omitted it.
+    pub chat_jid: Option<String>,
+    pub message_id: String,
+    /// Nack code, e.g. "479".
+    pub error: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, uniffi::Enum)]
 pub enum ChatState {
     Composing,
@@ -414,6 +423,9 @@ pub enum BridgeEvent {
         updates: Vec<BridgeMessageUpdate>,
     },
     Receipt { receipt: BridgeReceipt },
+    /// The server accepted (`error == None`) or rejected one of our messages. Until then a sent
+    /// message was only written to the socket, which a dying connection can swallow.
+    ServerAck { ack: BridgeServerAck },
     ChatPresence { presence: BridgeChatPresence },
     Presence { presence: BridgePresence },
     Contacts { contacts: Vec<BridgeContact> },

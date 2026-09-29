@@ -90,6 +90,9 @@ final class FakeBridge: WaBridgeProtocol, @unchecked Sendable {
         var downloads = 0
         var overviews: [[String]] = []
         var sentTexts: [String] = []
+        /// Every text send: the id it was asked to reuse and the quoted key.
+        var textSends: [(messageId: String?, replyTo: BridgeMessageKey?)] = []
+        var mediaSends: [(path: String, messageId: String?)] = []
         var nudges = 0
         var decryptParked: [[Data]] = []
         var profilePictures: [(jid: String, commonGid: String?)] = []
@@ -151,14 +154,18 @@ final class FakeBridge: WaBridgeProtocol, @unchecked Sendable {
     }
     func revokeMessage(target: BridgeMessageKey) async throws {}
     func sendChatState(chat: String, state: ChatState) async throws {}
-    func sendMedia(chat: String, media: BridgeOutgoingMedia, replyTo: BridgeMessageKey?, progress: (any ProgressSink)?) async throws -> BridgeSendResult {
+    func sendMedia(chat: String, media: BridgeOutgoingMedia, replyTo: BridgeMessageKey?, messageId: String?, progress: (any ProgressSink)?) async throws -> BridgeSendResult {
+        calls.withLock { $0.mediaSends.append((media.filePath, messageId)) }
         throw BridgeError.NotImplemented("sendMedia")
     }
     func sendReaction(target: BridgeMessageKey, emoji: String) async throws {}
-    func sendText(chat: String, text: String, replyTo: BridgeMessageKey?) async throws -> BridgeSendResult {
-        calls.withLock { $0.sentTexts.append(text) }
+    func sendText(chat: String, text: String, replyTo: BridgeMessageKey?, messageId: String?) async throws -> BridgeSendResult {
+        calls.withLock {
+            $0.sentTexts.append(text)
+            $0.textSends.append((messageId, replyTo))
+        }
         if sendFails { throw BridgeError.Network("offline") }
-        let id = "SRV-\(text.hashValue.magnitude)"
+        let id = messageId ?? "SRV-\(text.hashValue.magnitude)"
         return BridgeSendResult(messageId: id, timestamp: 1_700_000_500,
                                 message: F.message(id, chat: chat, fromMe: true, ts: 1_700_000_500, text: text))
     }

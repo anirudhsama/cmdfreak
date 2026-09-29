@@ -267,6 +267,7 @@ pub async fn send_media(
     chat: String,
     m: BridgeOutgoingMedia,
     reply_to: Option<BridgeMessageKey>,
+    message_id: Option<String>,
     progress: Option<Arc<dyn ProgressSink>>,
 ) -> R<BridgeSendResult> {
     let client = require_client(&shared)?;
@@ -355,8 +356,9 @@ pub async fn send_media(
         }
     };
 
+    crate::bridge::keep_original_secret(&shared, &client, &to, message_id.as_deref(), &mut msg).await;
     let sent = client
-        .send_message(to.clone(), msg)
+        .send_message_with_options(to.clone(), msg, crate::bridge::send_options(message_id))
         .await
         .map_err(|e| BridgeError::Network(e.to_string()))?;
     let media = BridgeMedia {

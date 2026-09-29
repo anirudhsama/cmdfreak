@@ -81,12 +81,12 @@ final class DemoBridge: WaBridgeProtocol, @unchecked Sendable {
 
     // MARK: Sending
 
-    func sendText(chat: String, text: String, replyTo: BridgeMessageKey?) async throws -> BridgeSendResult {
+    func sendText(chat: String, text: String, replyTo: BridgeMessageKey?, messageId: String?) async throws -> BridgeSendResult {
         try await Task.sleep(for: .milliseconds(300))
         return sent(chat: chat, kind: .text, text: text, media: nil)
     }
 
-    func sendMedia(chat: String, media: BridgeOutgoingMedia, replyTo: BridgeMessageKey?, progress: (any ProgressSink)?) async throws -> BridgeSendResult {
+    func sendMedia(chat: String, media: BridgeOutgoingMedia, replyTo: BridgeMessageKey?, messageId: String?, progress: (any ProgressSink)?) async throws -> BridgeSendResult {
         let data = try Data(contentsOf: URL(filePath: media.filePath))
         let total = UInt64(data.count)
         for step in 1...10 {
@@ -115,6 +115,7 @@ final class DemoBridge: WaBridgeProtocol, @unchecked Sendable {
             id: id, chatJid: chat, senderJid: ownJid, participant: chat.hasSuffix("@g.us") ? ownJid : nil, fromMe: true,
             timestamp: now, kind: kind, text: text, quoted: nil, media: media, location: nil, contact: nil, poll: nil,
             reactions: [], typeName: nil, pushName: nil, status: .sent, isForwarded: false, revoked: false, editedAt: nil)
+        deliver([.serverAck(ack: BridgeServerAck(chatJid: chat, messageId: id, error: nil))], after: 0.2)
         for (delay, receipt) in [(1.0, ReceiptKind.delivered), (3.0, .read)] {
             deliver([.receipt(receipt: BridgeReceipt(chatJid: chat, senderJid: chat, messageIds: [id], kind: receipt,
                                                      timestamp: now + Int64(delay)))], after: delay)

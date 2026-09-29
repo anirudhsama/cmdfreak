@@ -32,6 +32,7 @@ pub const INTEREST: &[EventKind] = &[
     EventKind::ClientOutdated,
     EventKind::Messages,
     EventKind::Receipt,
+    EventKind::ServerAck,
     EventKind::UndecryptableMessage,
     EventKind::ChatPresence,
     EventKind::Presence,
@@ -148,8 +149,21 @@ pub async fn map_event(ctx: &MapCtx<'_>, event: &Event) -> Vec<BridgeEvent> {
             }
         }
         Event::Receipt(r) => {
-            out.push(BridgeEvent::Receipt { receipt: receipt(ctx, r).await });
+            // Aliases first, so a reader seen before under their LID is folded before this receipt counts.
+            let receipt = receipt(ctx, r).await;
             push_aliases(canon, &mut out);
+            out.push(BridgeEvent::Receipt { receipt });
+        }
+        // Acks also cover receipts, notifications and calls; only message acks mark a send.
+        Event::ServerAck(a) if a.class.as_deref() == Some("message") => {
+            let chat_jid = match &a.from {
+                Some(from) => Some(ctx.canon.resolve(client, from).await.to_string()),
+                None => None,
+            };
+            push_aliases(canon, &mut out);
+            out.push(BridgeEvent::ServerAck {
+                ack: BridgeServerAck { chat_jid, message_id: a.id.clone(), error: a.error.clone() },
+            });
         }
         Event::ChatPresence(p) => {
             out.push(BridgeEvent::ChatPresence { presence: chat_presence(ctx, p).await });
@@ -499,7 +513,7 @@ pub async fn decrypt_parked(ctx: &MapCtx<'_>, bytes: &[u8]) -> Option<BridgeMess
 
 /// Secret lookups try every combination of the chat's and the author's PN/LID spellings, since the
 /// library stores the secret under whichever form the parent arrived with.
-async fn lookup_secret(
+pub(crate) async fn lookup_secret(
     client: &Client,
     canon: &Canon,
     chat: &Jid,

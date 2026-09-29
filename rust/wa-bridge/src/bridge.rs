@@ -624,16 +624,18 @@ impl WaBridge {
         chat: String,
         text: String,
         reply_to: Option<BridgeMessageKey>,
+        message_id: Option<String>,
     ) -> R<BridgeSendResult> {
         let shared = self.shared.clone();
         self.run(async move {
             let client = shared.require_client()?;
             let to = parse_jid(&chat)?;
-            let msg = match &reply_to {
+            let mut msg = match &reply_to {
                 Some(key) => wa::Message::text_with_context(text.clone(), quote_context(&shared, key)),
                 None => wa::Message::text(text.clone()),
             };
-            let sent = client.send_message(to.clone(), msg).await.map_err(net)?;
+            keep_original_secret(&shared, &client, &to, message_id.as_deref(), &mut msg).await;
+            let sent = client.send_message_with_options(to.clone(), msg, send_options(message_id)).await.map_err(net)?;
             let mut result = sent_result(&shared, &to, sent.message_id, MessageKind::Text, Some(text), None, reply_to);
             result.message.participant = own_participant(&shared, &client, &to).await;
             Ok(result)
@@ -646,10 +648,11 @@ impl WaBridge {
         chat: String,
         media: BridgeOutgoingMedia,
         reply_to: Option<BridgeMessageKey>,
+        message_id: Option<String>,
         progress: Option<Arc<dyn ProgressSink>>,
     ) -> R<BridgeSendResult> {
         let shared = self.shared.clone();
-        self.run(async move { crate::media::send_media(shared, chat, media, reply_to, progress).await })
+        self.run(async move { crate::media::send_media(shared, chat, media, reply_to, message_id, progress).await })
             .await
     }
 
@@ -1056,6 +1059,32 @@ fn quote_context(shared: &Shared, key: &BridgeMessageKey) -> wa::ContextInfo {
             ..Default::default()
         }),
         ..Default::default()
+    }
+}
+
+/// A resend carries the original's message secret (else the library mints a new one): recipients
+/// who got the first copy hold that secret, and later edits and poll votes are sealed with it.
+pub(crate) async fn keep_original_secret(
+    shared: &Shared,
+    client: &Client,
+    chat: &Jid,
+    message_id: Option<&str>,
+    msg: &mut wa::Message,
+) {
+    let Some(id) = message_id else { return };
+    let Some(own) = shared.canon.own_pn().or_else(|| client.pn()) else { return };
+    if let Some(secret) = crate::live::lookup_secret(client, &shared.canon, chat, &own, id).await {
+        msg.message_context_info =
+            MessageField::some(wa::MessageContextInfo { message_secret: Some(secret), ..Default::default() });
+    }
+}
+
+/// A resend passes the original id, so the server and recipients treat it as the same message.
+pub(crate) fn send_options(message_id: Option<String>) -> whatsapp_rust::send::SendOptions {
+    let options = whatsapp_rust::send::SendOptions::default();
+    match message_id {
+        Some(id) => options.with_message_id(id),
+        None => options,
     }
 }
 
