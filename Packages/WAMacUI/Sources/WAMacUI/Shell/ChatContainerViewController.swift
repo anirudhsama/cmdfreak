@@ -58,16 +58,17 @@ public final class ChatContainerViewController: NSViewController {
         headerView.isHidden = true
         view = root
 
-        // The header follows the open chat's row state; the typing bubble follows the same state.
         typingObservation = WAMacUI.observe { [weak self] in
             guard let self else { return }
-            chatView.setTyping(header.state?.typing)
+            chatView.setTyping(header.typing)
         }
     }
 
     /// Shows `chatJid`, or the empty state for `nil`.
     public func show(chatJid: String?) {
         self.chatJid = chatJid
+        // Before the switch, so the previous chat's typing bubble never renders in the new one.
+        chatView.setTyping(chatJid == nil ? nil : header.typing)
         chatView.show(chatJid: chatJid)
         chatView.view.isHidden = chatJid == nil
         headerView.isHidden = chatJid == nil

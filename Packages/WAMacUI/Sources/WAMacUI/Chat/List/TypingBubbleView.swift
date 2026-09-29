@@ -56,7 +56,12 @@ final class TypingBubbleView: NSView {
         setAccessibilityElement(true)
         setAccessibilityRole(.staticText)
         applyColors()
+        NotificationCenter.default.addObserver(self, selector: #selector(displayOptionsChanged),
+                                               name: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification,
+                                               object: NSWorkspace.shared)
     }
+
+    @objc private func displayOptionsChanged() { animateDots() }
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { fatalError() }
@@ -121,6 +126,7 @@ final class TypingBubbleView: NSView {
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
         applyColors()
+        needsDisplay = true
     }
 
     override func viewDidMoveToWindow() {

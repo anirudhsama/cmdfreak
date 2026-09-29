@@ -482,8 +482,7 @@ final class MessageListController: NSViewController {
                 }
             }
         }
-        // Paging can load or drop the newest page, which shows or hides the typing row.
-        if typing != nil { tableView.noteHeightOfRows(withIndexesChanged: IndexSet(integer: rows.count)) }
+        refreshTypingRow()
         if atBottom { scrollToBottom() }
         scheduleWarmup()
         refreshSelectionHighlight()
@@ -505,6 +504,17 @@ final class MessageListController: NSViewController {
             }
         }
         if atBottom { scrollToBottom() }
+    }
+
+    /// Paging can load or drop the newest page, which shows or hides the typing row: re-measure it
+    /// and ask for its view again (it had none while hidden).
+    private func refreshTypingRow() {
+        guard typing != nil else { return }
+        let index = IndexSet(integer: rows.count)
+        withoutAnimation {
+            tableView.noteHeightOfRows(withIndexesChanged: index)
+            tableView.reloadData(forRowIndexes: index, columnIndexes: IndexSet(integer: 0))
+        }
     }
 
     /// Only after the newest message: hidden while the loaded window is paged away from it.
@@ -627,6 +637,7 @@ final class MessageListController: NSViewController {
         let update = mutate(&next)
         guard !update.isEmpty else {
             rows = next  // hasOlder / hasNewer flags
+            refreshTypingRow()
             return
         }
         var ids = Set<String>()

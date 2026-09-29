@@ -172,7 +172,6 @@ public final class ChatViewController: NSViewController {
         compose.setBar(nil)
         compose.text = chatJid.flatMap { drafts[$0] } ?? ""
         pausedTimer?.invalidate()
-        setTyping(nil)
         displayedChatJid = nil
         reportFocus()
 

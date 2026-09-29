@@ -50,6 +50,9 @@ final class ChatListViewController: NSViewController, NSCollectionViewDelegate {
     private var hasAppliedSnapshot = false
     /// Chat → sender → who is typing or recording there.
     private var typists: [String: [String: Typist]] = [:]
+    /// Every typing change, for the open chat's header and message list: the chat may be open while
+    /// the current filter has no row for it.
+    var onTypingChange: ((_ chatJid: String, ChatTyping?) -> Void)?
 
     init(client: WAClient, filter: ChatFilter) {
         self.client = client
@@ -126,7 +129,7 @@ final class ChatListViewController: NSViewController, NSCollectionViewDelegate {
                 live[item.id] = state
             } else {
                 let state = ChatRowState(item: item)
-                state.typing = typing(in: item.id, isGroup: state.isGroup)
+                state.typing = typing(in: item.id)
                 live[item.id] = state
             }
         }
@@ -285,15 +288,16 @@ final class ChatListViewController: NSViewController, NSCollectionViewDelegate {
             let name = senderName ?? JID.phoneDisplay(senderJid) ?? "Someone"
             typists[chatJid, default: [:]][senderJid] = Typist(name: name, recording: chatState == .recording, expiry: expiry)
         }
-        if let state = states[chatJid] {
-            state.typing = typing(in: chatJid, isGroup: state.isGroup)
-        }
+        let typing = typing(in: chatJid)
+        states[chatJid]?.typing = typing
+        onTypingChange?(chatJid, typing)
     }
 
-    private func typing(in chatJid: String, isGroup: Bool) -> ChatTyping? {
+    func typing(in chatJid: String) -> ChatTyping? {
         guard let typists = typists[chatJid], !typists.isEmpty else { return nil }
-        let senders = isGroup
-            ? typists.map { ChatTyping.Sender(jid: $0.key, name: $0.value.name) }.sorted { $0.name < $1.name }
+        // A sender equal to the chat (a DM, or the debug hook) needs no name.
+        let senders = ChatKind(jid: chatJid) == .group
+            ? typists.filter { $0.key != chatJid }.map { ChatTyping.Sender(jid: $0.key, name: $0.value.name) }.sorted { $0.name < $1.name }
             : []
         return ChatTyping(senders: senders, recording: typists.values.allSatisfy(\.recording))
     }

@@ -101,6 +101,10 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, N
             self?.updateTitle()
         }
         chatList.onSelect = { [weak self] jid in self?.showChat(jid) }
+        chatList.onTypingChange = { [weak self] jid, typing in
+            guard let self, jid == selectedChatJid else { return }
+            chatHeader.typing = typing
+        }
         chatListColumn.onFocusCompose = { [weak self] in _ = self?.chatContainer.focusCompose() }
 
         presenceTask = Task { [weak self, client] in
@@ -142,6 +146,7 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, N
     /// chat unless search ↑/↓ are driving.
     private func showChat(_ jid: String?) {
         selectedChatJid = jid
+        chatHeader.typing = jid.flatMap { chatList.typing(in: $0) }
         chatContainer.show(chatJid: jid)
         updateTitle()
         if !chatListColumn.isMovingFromSearch { _ = chatContainer.focusCompose() }

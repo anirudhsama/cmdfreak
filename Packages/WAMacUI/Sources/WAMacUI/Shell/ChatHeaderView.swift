@@ -7,6 +7,9 @@ import SwiftUI
 final class ChatHeaderModel {
     var state: ChatRowState?
     var subtitle = ""
+    /// Who is typing in the open chat; kept apart from `state`, which is nil or stale when the
+    /// current filter has no row for the chat.
+    var typing: ChatTyping?
 }
 
 /// Avatar, then the name with the subtitle (phone, participant count, or who is typing) under it,
@@ -62,7 +65,7 @@ final class ChatHeaderView: NSView {
         token = WAMacUI.observe { [weak self] in
             guard let self else { return }
             nameField.stringValue = model.state?.title ?? ""
-            let activity = model.state?.activity
+            let activity = model.typing?.text
             let subtitle = activity ?? model.subtitle
             subtitleField.stringValue = subtitle
             subtitleField.textColor = activity == nil ? .secondaryLabelColor : Palette.green
