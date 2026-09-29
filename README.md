@@ -5,6 +5,11 @@ A native macOS WhatsApp client built for the keyboard, backed by
 
 > **Status:** early and unofficial. Not affiliated with WhatsApp or Meta. See the [disclaimer](#disclaimer).
 
+<p align="center">
+  <img src="docs/screenshot-chats.png" alt="CmdFreak's chat list and a group conversation" width="49%">
+  <img src="docs/screenshot-command-bar.png" alt="CmdFreak's ⌘K command bar" width="49%">
+</p>
+
 ## Features
 
 - Links to your account as a companion device, by QR code or phone-number pairing code
