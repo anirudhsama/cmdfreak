@@ -160,7 +160,7 @@ final class DemoBridge: WaBridgeProtocol, @unchecked Sendable {
 
     func fetchGroupOverviews(jids: [String]) async throws -> [BridgeGroup] { [] }
     func checkBusiness(jids: [String]) async throws -> [BridgeBusinessCheck] {
-        jids.map { BridgeBusinessCheck(jid: $0, isBusiness: false) }
+        jids.map { BridgeBusinessCheck(jid: $0, isBusiness: false, verifiedName: nil) }
     }
 
     // MARK: No-ops
