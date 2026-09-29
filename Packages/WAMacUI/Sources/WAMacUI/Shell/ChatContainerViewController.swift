@@ -15,6 +15,7 @@ public final class ChatContainerViewController: NSViewController {
     /// aligned with the message bubbles' leading edge.
     let header = ChatHeaderModel()
     private lazy var headerView = ChatHeaderView(model: header)
+    private var typingObservation: ObservationToken?
 
     public init(client: WAClient) {
         self.client = client
@@ -56,11 +57,18 @@ public final class ChatContainerViewController: NSViewController {
         ])
         headerView.isHidden = true
         view = root
+
+        typingObservation = WAMacUI.observe { [weak self] in
+            guard let self else { return }
+            chatView.setTyping(header.typing)
+        }
     }
 
     /// Shows `chatJid`, or the empty state for `nil`.
     public func show(chatJid: String?) {
         self.chatJid = chatJid
+        // Before the switch, so the previous chat's typing bubble never renders in the new one.
+        chatView.setTyping(chatJid == nil ? nil : header.typing)
         chatView.show(chatJid: chatJid)
         chatView.view.isHidden = chatJid == nil
         headerView.isHidden = chatJid == nil

@@ -101,12 +101,22 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, N
             self?.updateTitle()
         }
         chatList.onSelect = { [weak self] jid in self?.showChat(jid) }
+        chatList.onTypingChange = { [weak self] jid, typing in
+            guard let self, jid == selectedChatJid else { return }
+            chatHeader.typing = typing
+        }
         chatListColumn.onFocusCompose = { [weak self] in _ = self?.chatContainer.focusCompose() }
 
         presenceTask = Task { [weak self, client] in
             for await presence in client.chatPresence {
+                var name: String?
+                if presence.state != .paused, presence.senderJid != presence.chatJid {
+                    name = try? await client.database.reader.read { db in
+                        try ContactRecord.fetchOne(db, key: presence.senderJid)?.displayName
+                    }
+                }
                 guard let self else { return }
-                chatList.setTyping(chatJid: presence.chatJid, presence.state == .composing || presence.state == .recording)
+                chatList.setChatState(chatJid: presence.chatJid, senderJid: presence.senderJid, senderName: name, presence.state)
             }
         }
     }
@@ -136,10 +146,15 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, N
     /// chat unless search ↑/↓ are driving.
     private func showChat(_ jid: String?) {
         selectedChatJid = jid
+        chatHeader.typing = jid.flatMap { chatList.typing(in: $0) }
         chatContainer.show(chatJid: jid)
         updateTitle()
         if !chatListColumn.isMovingFromSearch { _ = chatContainer.focusCompose() }
-        if let jid { usage.recordVisit(of: jid) }
+        if let jid {
+            usage.recordVisit(of: jid)
+            // DM typing notifications need a presence subscription; the library renews it on reconnect.
+            if ChatKind(jid: jid) == .dm { Task { [client] in await client.subscribePresence(jid) } }
+        }
     }
 
     /// The window title names the current filter (shown centered over the chat list); the chat's
@@ -222,7 +237,7 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, N
 
     /// Shows or clears the typing indicator on a row (normally driven by `client.chatPresence`).
     public func setTyping(chatJid: String, _ typing: Bool) {
-        chatList.setTyping(chatJid: chatJid, typing)
+        chatList.setChatState(chatJid: chatJid, senderJid: chatJid, senderName: nil, typing ? .composing : .paused)
     }
 
     /// Selects the chat at `index` in the current list, as a click would.

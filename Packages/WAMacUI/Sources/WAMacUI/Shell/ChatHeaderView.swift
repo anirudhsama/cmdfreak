@@ -7,10 +7,13 @@ import SwiftUI
 final class ChatHeaderModel {
     var state: ChatRowState?
     var subtitle = ""
+    /// Who is typing in the open chat; kept apart from `state`, which is nil or stale when the
+    /// current filter has no row for the chat.
+    var typing: ChatTyping?
 }
 
-/// Avatar, then the name with the subtitle (phone or participant count) under it, leading-aligned
-/// in the toolbar strip over the conversation.
+/// Avatar, then the name with the subtitle (phone, participant count, or who is typing) under it,
+/// leading-aligned in the toolbar strip over the conversation.
 @MainActor
 final class ChatHeaderView: NSView {
     static let avatarSize: CGFloat = 28
@@ -62,8 +65,11 @@ final class ChatHeaderView: NSView {
         token = WAMacUI.observe { [weak self] in
             guard let self else { return }
             nameField.stringValue = model.state?.title ?? ""
-            subtitleField.stringValue = model.subtitle
-            let twoLine = !model.subtitle.isEmpty
+            let activity = model.typing?.text
+            let subtitle = activity ?? model.subtitle
+            subtitleField.stringValue = subtitle
+            subtitleField.textColor = activity == nil ? .secondaryLabelColor : Palette.green
+            let twoLine = !subtitle.isEmpty
             subtitleField.isHidden = !twoLine
             nameCentered.isActive = !twoLine
             nameAbove.isActive = twoLine

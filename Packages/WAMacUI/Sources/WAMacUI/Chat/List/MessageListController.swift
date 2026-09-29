@@ -53,6 +53,8 @@ final class MessageListController: NSViewController {
     private var recomputeTask: Task<Void, Never>?
     private var progressTask: Task<Void, Never>?
     private var bottomInset: CGFloat = 0
+    /// Who is typing: a trailing row after the last message, at index `rows.count`.
+    private var typing: ChatTyping?
     private var needsInitialScroll = false
     private var wasAtBottom = true
     private var previewItems: [PreviewItem] = []
@@ -480,9 +482,45 @@ final class MessageListController: NSViewController {
                 }
             }
         }
+        refreshTypingRow()
         if atBottom { scrollToBottom() }
         scheduleWarmup()
         refreshSelectionHighlight()
+    }
+
+    func setTyping(_ new: ChatTyping?) {
+        let old = typing
+        guard new != old else { return }
+        typing = new
+        let atBottom = isAtBottom
+        let index = IndexSet(integer: rows.count)
+        withoutAnimation {
+            switch (old, new) {
+            case (nil, _): tableView.insertRows(at: index, withAnimation: [])
+            case (_, nil): tableView.removeRows(at: index, withAnimation: [])
+            default:
+                tableView.noteHeightOfRows(withIndexesChanged: index)
+                tableView.reloadData(forRowIndexes: index, columnIndexes: IndexSet(integer: 0))
+            }
+        }
+        if atBottom { scrollToBottom() }
+    }
+
+    /// Paging can load or drop the newest page, which shows or hides the typing row: re-measure it
+    /// and ask for its view again (it had none while hidden).
+    private func refreshTypingRow() {
+        guard typing != nil else { return }
+        let index = IndexSet(integer: rows.count)
+        withoutAnimation {
+            tableView.noteHeightOfRows(withIndexesChanged: index)
+            tableView.reloadData(forRowIndexes: index, columnIndexes: IndexSet(integer: 0))
+        }
+    }
+
+    /// Only after the newest message: hidden while the loaded window is paged away from it.
+    private var typingRowHeight: CGFloat {
+        guard let typing, !rows.hasNewer else { return 1 }
+        return M.messageGap + TypingBubbleView.size(for: typing).height
     }
 
     // MARK: - Scroll geometry
@@ -599,6 +637,7 @@ final class MessageListController: NSViewController {
         let update = mutate(&next)
         guard !update.isEmpty else {
             rows = next  // hasOlder / hasNewer flags
+            refreshTypingRow()
             return
         }
         var ids = Set<String>()
@@ -1081,14 +1120,14 @@ final class MessageListController: NSViewController {
 // MARK: - Data source / delegate
 
 extension MessageListController: NSTableViewDataSource, NSTableViewDelegate {
-    func numberOfRows(in tableView: NSTableView) -> Int { rows.count }
+    func numberOfRows(in tableView: NSTableView) -> Int { rows.count + (typing == nil ? 0 : 1) }
 
     func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
         switch rows.row(at: row) {
         case .day: return M.daySeparatorHeight
         case .unread: return M.unreadSeparatorHeight
         case .message(let id): return plan(for: id).rowHeight
-        case nil: return 1
+        case nil: return row == rows.count ? typingRowHeight : 1
         }
     }
 
@@ -1125,7 +1164,15 @@ extension MessageListController: NSTableViewDataSource, NSTableViewDelegate {
             cell.setDownloadFraction(item.media.flatMap { client.media.progress.fraction(for: $0) })
             return cell
         case nil:
-            return nil
+            guard row == rows.count, let typing, !rows.hasNewer else { return nil }
+            let id = NSUserInterfaceItemIdentifier("typing")
+            let cell = tableView.makeView(withIdentifier: id, owner: nil) as? TypingCell ?? {
+                let c = TypingCell()
+                c.identifier = id
+                return c
+            }()
+            cell.bubble.update(typing)
+            return cell
         }
     }
 

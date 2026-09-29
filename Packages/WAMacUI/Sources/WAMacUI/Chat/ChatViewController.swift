@@ -68,6 +68,7 @@ public final class ChatViewController: NSViewController {
 
         root.addSubview(compose)
         NSLayoutConstraint.activate([
+
             list.view.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             list.view.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             list.view.topAnchor.constraint(equalTo: root.topAnchor),
@@ -144,10 +145,14 @@ public final class ChatViewController: NSViewController {
     }
 
     private func setChatVisible(_ visible: Bool) {
+        if !visible { setTyping(nil) }
         list.view.isHidden = !visible
         compose.isHidden = !visible
         emptyLabel.isHidden = visible
     }
+
+    /// Shows who is typing in the open chat as a bubble under the newest message; nil hides it.
+    func setTyping(_ typing: ChatTyping?) { list.setTyping(typing) }
 
     // MARK: - Public API
 
