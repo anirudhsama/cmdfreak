@@ -582,6 +582,7 @@ public actor IngestActor {
             for c in chunk.chats { try upsertHistoryChat(c, db) }
             for m in chunk.messages { try upsertMessage(m, live: false, db, &cs) }
             for u in chunk.updates { try applyUpdate(u, db, &cs) }
+            for c in chunk.chats { try attributeSnapshotUnread(c, db) }
         case .ownJid(let pn, let lid):
             if let pn { try db.execute(sql: "INSERT OR REPLACE INTO meta (key, value) VALUES ('ownPn', ?)", arguments: [pn]) }
             if let lid { try db.execute(sql: "INSERT OR REPLACE INTO meta (key, value) VALUES ('ownLid', ?)", arguments: [lid]) }
@@ -732,8 +733,9 @@ public actor IngestActor {
             } else if try readElsewhere(db, chatJid, m) {
                 // Read on another device before it reached us.
             } else {
+                // One more flag, one more in the count: no recount on this hot path.
                 try db.execute(sql: "UPDATE message SET unread = 1 WHERE chatJid = ? AND id = ?", arguments: [chatJid, m.id])
-                try Self.recountUnread(db, chatJid)
+                try db.execute(sql: "UPDATE chat SET unreadCount = unreadCount + 1 WHERE jid = ?", arguments: [chatJid])
                 // A placeholder alerts once its real content arrives (`upgradePlaceholder`).
                 if m.kind != .undecryptable { cs.alert(chatJid, m.id, m.timestamp) }
             }
@@ -742,7 +744,7 @@ public actor IngestActor {
             // Sent from another device: replying reads what came before it, even without a read-self
             // receipt; a delayed reply leaves newer incoming messages unread. Leaves `stateAt` alone
             // so a pending history snapshot still brings the chat's pin/mute/archive.
-            try readMessages(db, chatJid, where: "timestamp <= ?", [m.timestamp], &cs)
+            try readMessages(db, chatJid, where: "timestamp <= ?", [m.timestamp], readAt: m.timestamp, &cs)
         }
         try applyPending(db, chatJid, m.id, &cs)
     }
@@ -870,16 +872,18 @@ public actor IngestActor {
     }
 
     /// A read from another device, or implied by a reply: the unread messages `filter` selects,
-    /// and (unless `attributedOnly`) a snapshot's unattributed count, which predates any read now.
-    /// Withdraws the chat's notifications when nothing stays unread, else only the read messages'.
+    /// and a snapshot's unattributed count when the read, done at `readAt` (nil: covers everything),
+    /// is no older than the snapshot. Withdraws the chat's notifications when nothing stays
+    /// unread, else only the read messages'.
     private func readMessages(_ db: Database, _ jid: String, where filter: String, _ args: StatementArguments,
-                              _ cs: inout ChangeSet, attributedOnly: Bool = false) throws {
+                              readAt: Int64?, _ cs: inout ChangeSet) throws {
         let ids = try String.fetchAll(db, sql: """
             UPDATE message SET unread = 0 WHERE chatJid = ? AND unread AND (\(filter)) RETURNING id
             """, arguments: [jid] + args)
-        if !attributedOnly {
-            try db.execute(sql: "UPDATE chat SET unreadUnattributed = 0 WHERE jid = ?", arguments: [jid])
-        }
+        try db.execute(sql: """
+            UPDATE chat SET unreadUnattributed = 0
+            WHERE jid = ? AND (? IS NULL OR unreadUnattributedAt IS NULL OR unreadUnattributedAt <= ?)
+            """, arguments: [jid, readAt, readAt])
         try Self.recountUnread(db, jid)
         if try Int.fetchOne(db, sql: "SELECT unreadCount FROM chat WHERE jid = ?", arguments: [jid]) ?? 0 == 0 {
             cs.chatRead(jid)
@@ -1065,11 +1069,12 @@ public actor IngestActor {
         case .encrypted:
             return false
         case .readElsewhere:
-            // Here already (e.g. its marker followed an alias merge): read it now.
-            try db.execute(sql: "UPDATE message SET unread = 0 WHERE chatJid = ? AND id = ? AND unread", arguments: key)
-            if db.changesCount > 0 {
-                try Self.recountUnread(db, chatJid)
-                cs.removed(chatJid, id)
+            // Stored now (just arrived, or its marker followed an alias merge): read like the receipt
+            // that parked it, this message and everything before it.
+            let at = try Row.fetchOne(db, sql: "SELECT sortKey, timestamp FROM message WHERE chatJid = ? AND id = ?", arguments: key)
+            if let at {
+                let sortKey: Int64 = at["sortKey"], timestamp: Int64 = at["timestamp"]
+                try readMessages(db, chatJid, where: "sortKey <= ?", [sortKey], readAt: timestamp, &cs)
             }
             return true
         }
@@ -1098,7 +1103,7 @@ public actor IngestActor {
                     try park(db, chatJid, id, .readElsewhere)
                 }
             }
-            try readMessages(db, chatJid, where: "sortKey <= ?", [newest], &cs)
+            try readMessages(db, chatJid, where: "sortKey <= ?", [newest], readAt: r.timestamp, &cs)
             try db.execute(sql: "UPDATE chat SET stateAt = ? WHERE jid = ?", arguments: [Self.now, chatJid])
             return
         case .retry, .other:
@@ -1316,14 +1321,35 @@ public actor IngestActor {
                 readOnly = excluded.readOnly
             """, arguments: [jid, c.kind, c.name, c.lastActivityAt, c.markedUnread,
                              c.pinnedAt, c.mutedUntil, c.archived, c.readOnly])
-        // The snapshot counts unread without naming the messages: what the flagged ones don't cover.
-        try db.execute(sql: """
-            UPDATE chat SET unreadUnattributed = MAX(unreadUnattributed,
-                ? - (SELECT COUNT(*) FROM message WHERE chatJid = ? AND unread))
-            WHERE jid = ? AND stateAt IS NULL
-            """, arguments: [Int(c.unreadCount), jid, jid])
-        try Self.recountUnread(db, jid)
         if c.kind == .dm { try ensureContact(db, jid) }
+    }
+
+    /// A snapshot counts the chat's unread without naming them: they were its newest incoming
+    /// messages then. Runs after the chunk's messages are stored; flags those, and keeps the rest
+    /// as unattributed, dated by the snapshot's newest activity. Only while no read or chat action
+    /// here has superseded the snapshot (`stateAt`), like the rest of its state.
+    private func attributeSnapshotUnread(_ c: BridgeChat, _ db: Database) throws {
+        let jid = canon(c.jid)
+        guard c.unreadCount > 0,
+              try Bool.fetchOne(db, sql: "SELECT stateAt IS NULL FROM chat WHERE jid = ?", arguments: [jid]) == true
+        else { return }
+        let window: StatementArguments = [jid, c.lastActivityAt, c.lastActivityAt, Int(c.unreadCount)]
+        let windowSQL = """
+            SELECT localId FROM message WHERE chatJid = ? AND fromMe = 0 AND kind != 'system'
+              AND (? IS NULL OR timestamp <= ?)
+            ORDER BY sortKey DESC LIMIT ?
+            """
+        try db.execute(sql: "UPDATE message SET unread = 1 WHERE localId IN (\(windowSQL))", arguments: window)
+        let stored = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM (\(windowSQL))", arguments: window) ?? 0
+        let missing = Int(c.unreadCount) - stored
+        if missing > 0 {
+            try db.execute(sql: """
+                UPDATE chat SET unreadUnattributed = MAX(unreadUnattributed, ?),
+                    unreadUnattributedAt = MAX(COALESCE(unreadUnattributedAt, 0), COALESCE(?, 0))
+                WHERE jid = ?
+                """, arguments: [missing, c.lastActivityAt, jid])
+        }
+        try Self.recountUnread(db, jid)
     }
 
     private func handleChatAction(_ action: BridgeChatAction, _ db: Database, _ cs: inout ChangeSet) throws {
@@ -1348,7 +1374,7 @@ public actor IngestActor {
                 // Up to the synced range, else to when it was done (an echo of ours then spares
                 // what arrived since); our own read, with neither, covers everything.
                 let upTo = readThrough ?? readAt
-                try readMessages(db, jid, where: "? IS NULL OR timestamp <= ?", [upTo, upTo], &cs)
+                try readMessages(db, jid, where: "? IS NULL OR timestamp <= ?", [upTo, upTo], readAt: upTo, &cs)
                 try db.execute(sql: """
                     UPDATE chat SET markedUnread = 0, stateAt = ?,
                         readThrough = CASE WHEN ? IS NULL THEN readThrough ELSE MAX(COALESCE(readThrough, 0), ?) END
@@ -1399,11 +1425,11 @@ public actor IngestActor {
             cs.chatRead(jid)
         }
         try db.execute(sql: "DELETE FROM message WHERE chatJid = ? AND (? IS NULL OR timestamp <= ?)", arguments: [jid, cutoff, cutoff])
+        // The unattributed messages are not stored: gone only if the clear reaches the snapshot.
         try db.execute(sql: """
-            UPDATE chat SET unreadUnattributed = MIN(unreadUnattributed,
-                (SELECT COUNT(*) FROM message WHERE chatJid = ? AND fromMe = 0 AND kind != 'system' AND NOT unread))
-            WHERE jid = ?
-            """, arguments: [jid, jid])
+            UPDATE chat SET unreadUnattributed = 0
+            WHERE jid = ? AND (? IS NULL OR unreadUnattributedAt IS NULL OR unreadUnattributedAt <= ?)
+            """, arguments: [jid, cutoff, cutoff])
         try Self.recountUnread(db, jid)
         cs.reload.insert(jid)
         cs.dirty.insert(jid)
@@ -1541,7 +1567,9 @@ public actor IngestActor {
         if let lidChat = try ChatRecord.fetchOne(db, key: lid) {
             if let pnChat = try ChatRecord.fetchOne(db, key: pn) {
                 let boundary = try Int64.fetchOne(db, sql: "SELECT MAX(readThrough) FROM chat WHERE jid IN (?, ?)", arguments: [lid, pn])
-                let lidUnattributed = try Int.fetchOne(db, sql: "SELECT unreadUnattributed FROM chat WHERE jid = ?", arguments: [lid]) ?? 0
+                let lidDebt = try Row.fetchOne(db, sql: "SELECT unreadUnattributed, unreadUnattributedAt FROM chat WHERE jid = ?", arguments: [lid])
+                let lidUnattributed: Int = lidDebt?["unreadUnattributed"] ?? 0
+                let lidUnattributedAt: Int64? = lidDebt?["unreadUnattributedAt"]
                 // A message under both JIDs is unread if either copy is; the PN copy is kept.
                 try db.execute(sql: """
                     UPDATE message SET unread = 1 WHERE chatJid = ? AND NOT unread
@@ -1557,7 +1585,10 @@ public actor IngestActor {
                         name = COALESCE(name, ?),
                         stateAt = CASE WHEN ? IS NULL THEN stateAt ELSE MAX(COALESCE(stateAt, 0), ?) END,
                         readThrough = ?,
-                        unreadUnattributed = unreadUnattributed + ?,
+                        -- Two snapshots of one chat: their unattributed counts likely name the same messages.
+                        unreadUnattributed = MAX(unreadUnattributed, ?),
+                        unreadUnattributedAt = CASE WHEN ? IS NULL THEN unreadUnattributedAt
+                            ELSE MAX(COALESCE(unreadUnattributedAt, 0), ?) END,
                         markedUnread = markedUnread OR ?,
                         pinnedAt = COALESCE(pinnedAt, ?),
                         mutedUntil = COALESCE(mutedUntil, ?),
@@ -1565,7 +1596,7 @@ public actor IngestActor {
                         avatarCheckedAt = CASE WHEN hasAvatar THEN avatarCheckedAt ELSE NULL END,
                         lastActivityAt = MAX(COALESCE(lastActivityAt, 0), COALESCE(?, 0))
                     WHERE jid = ?
-                    """, arguments: [lidChat.name, lidStateAt, lidStateAt, boundary, lidUnattributed, lidChat.markedUnread, lidChat.pinnedAt,
+                    """, arguments: [lidChat.name, lidStateAt, lidStateAt, boundary, lidUnattributed, lidUnattributedAt, lidUnattributedAt, lidChat.markedUnread, lidChat.pinnedAt,
                                      lidChat.mutedUntil, pnChat.archived && lidChat.archived,
                                      lidChat.lastActivityAt, pn])
                 // Duplicates (same id under both JIDs), now reconciled into the PN copy, stay behind
@@ -1575,7 +1606,7 @@ public actor IngestActor {
                 try db.execute(sql: "DELETE FROM chat WHERE jid = ?", arguments: [lid])
                 // What either side's read boundary covers is read in the merged chat.
                 if let boundary {
-                    try readMessages(db, pn, where: "timestamp <= ?", [boundary], &cs, attributedOnly: true)
+                    try readMessages(db, pn, where: "timestamp <= ?", [boundary], readAt: boundary, &cs)
                 } else {
                     try Self.recountUnread(db, pn)
                 }

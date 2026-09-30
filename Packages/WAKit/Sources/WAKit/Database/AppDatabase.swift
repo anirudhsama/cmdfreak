@@ -346,11 +346,15 @@ extension AppDatabase {
 
         // Unread per message, so a read can cover some messages and not others. `unreadCount` stays
         // as the chat's total: flagged messages plus `unreadUnattributed`, the part of a phone
-        // snapshot's count no stored message accounts for. Existing counts carry over as the
-        // newest `unreadCount` incoming messages, the rule they were counted by.
+        // snapshot's count no stored message accounts for, dated by `unreadUnattributedAt` (the
+        // snapshot's newest activity) so only a read after it clears it. Existing counts carry over
+        // as the newest `unreadCount` incoming messages, the rule they were counted by.
         m.registerMigration("v13") { db in
             try db.alter(table: "message") { t in t.add(column: "unread", .boolean).notNull().defaults(to: false) }
-            try db.alter(table: "chat") { t in t.add(column: "unreadUnattributed", .integer).notNull().defaults(to: 0) }
+            try db.alter(table: "chat") { t in
+                t.add(column: "unreadUnattributed", .integer).notNull().defaults(to: 0)
+                t.add(column: "unreadUnattributedAt", .integer)
+            }
             try db.execute(sql: "CREATE INDEX message_unread ON message(chatJid) WHERE unread")
             try db.execute(sql: """
                 UPDATE message SET unread = 1 WHERE localId IN (
@@ -362,7 +366,8 @@ extension AppDatabase {
                     WHERE rn <= n)
                 """)
             try db.execute(sql: """
-                UPDATE chat SET unreadUnattributed = unreadCount - (SELECT COUNT(*) FROM message WHERE chatJid = chat.jid AND unread)
+                UPDATE chat SET unreadUnattributed = unreadCount - (SELECT COUNT(*) FROM message WHERE chatJid = chat.jid AND unread),
+                    unreadUnattributedAt = lastActivityAt
                 WHERE unreadCount > 0
                 """)
         }

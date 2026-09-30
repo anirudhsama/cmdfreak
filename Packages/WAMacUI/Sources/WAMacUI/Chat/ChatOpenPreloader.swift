@@ -60,13 +60,18 @@ public actor ChatOpenPreloader {
         defer { Signposts.poi.endInterval("ChatPreload", state) }
 
         let loader = client.windowLoader(for: chatJid)
-        let (chat, contact) = try client.database.reader.read { db in
-            (try ChatRecord.fetchOne(db, key: chatJid), try ContactRecord.fetchOne(db, key: chatJid))
+        let (chat, contact, firstUnread) = try client.database.reader.read { db in
+            (try ChatRecord.fetchOne(db, key: chatJid), try ContactRecord.fetchOne(db, key: chatJid),
+             // Only when every unread message is stored and flagged.
+             try String.fetchOne(db, sql: """
+                SELECT (SELECT id FROM message WHERE chatJid = chat.jid AND unread ORDER BY sortKey LIMIT 1)
+                FROM chat WHERE jid = ? AND unreadUnattributed = 0
+                """, arguments: [chatJid]))
         }
         let page = try loader.initialSync(limit: initialPageSize)
         var rows = ChatRows(chatJid: chatJid, isGroupChat: ChatKind(jid: chatJid) == .group)
         rows.replace(with: page)
-        rows.setUnread(count: chat?.unreadCount ?? 0)
+        rows.setUnread(firstId: firstUnread, count: chat?.unreadCount ?? 0)
 
         let ownJid = client.ownJid
         let peerName = chat.map { ChatListQuery.title($0, contact, ownJid: ownJid) }

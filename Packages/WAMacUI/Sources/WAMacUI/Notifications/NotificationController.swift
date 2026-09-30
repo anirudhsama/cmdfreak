@@ -66,11 +66,22 @@ public final class NotificationController: NSObject, UNUserNotificationCenterDel
         case .chatRead(let jid):
             await withdraw(chat: jid)
         case .messageRemoved(let chatJid, let messageId):
-            // Under a LID since merged, it is left to `withdrawStale`.
-            let id = Self.identifier(chatJid, messageId)
-            posted[chatJid]?.remove(id)
-            center.removeDeliveredNotifications(withIdentifiers: [id])
+            await withdraw(message: messageId, chat: chatJid)
         }
+    }
+
+    /// Withdraws one message's notification, posted under `jid` or a LID it has since merged from.
+    private func withdraw(message messageId: String, chat jid: String) async {
+        let delivered = await center.deliveredNotifications()
+        let threads = Set(delivered.map(\.request.content.threadIdentifier)).union(posted.keys).union([jid])
+        let canonical = await client.ingest.canonicalJids(threads)
+        var ids: [String] = []
+        for thread in threads where thread == jid || canonical[thread] == jid {
+            let id = Self.identifier(thread, messageId)
+            posted[thread]?.remove(id)
+            ids.append(id)
+        }
+        center.removeDeliveredNotifications(withIdentifiers: ids)
     }
 
     /// Withdraws `jid`'s notifications, including ones posted under a LID it has since merged from.
