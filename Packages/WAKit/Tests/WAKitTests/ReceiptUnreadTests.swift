@@ -161,6 +161,40 @@ import Testing
         #expect(try db.chat(F.bob)?.unreadCount == 0)
     }
 
+    @Test func readOnAnotherDeviceCoversMessagesDeliveredLater() async throws {
+        let db = try F.tempDB()
+        let ingest = try IngestActor(database: db)
+        // Offline delivery: the phone's read-self receipt lands before a message it lists.
+        try await ingest.apply([F.live(F.message("1", chat: F.bob))])
+        try await ingest.apply([F.receipt(["1", "2"], chat: F.bob, kind: .readSelf, from: F.me)])
+        var result = try await ingest.applyBatch([F.live(F.message("2", chat: F.bob, ts: 1_700_000_050))])
+        #expect(try db.chat(F.bob)?.unreadCount == 0)
+        #expect(result.notices.isEmpty)
+        #expect(try db.count("SELECT COUNT(*) FROM pending_mutation") == 0)
+        // Older than the receipt but not listed: the phone had not seen it.
+        try await ingest.apply([F.live(F.message("3", chat: F.bob, ts: 1_700_000_040))])
+        #expect(try db.chat(F.bob)?.unreadCount == 1)
+
+        // The mark-read action covers its synced range, even before the chat exists here.
+        try await ingest.apply([.chatAction(action: .markRead(chatJid: F.alicePN, read: true, readThrough: 1_700_000_300))])
+        try await ingest.apply([F.live(F.message("4", chat: F.alicePN, ts: 1_700_000_250))])
+        #expect(try db.chat(F.alicePN)?.unreadCount == 0)
+        try await ingest.apply([F.live(F.message("5", chat: F.alicePN, ts: 1_700_000_400))])
+        #expect(try db.chat(F.alicePN)?.unreadCount == 1)
+        // Without a range (e.g. the echo of our own mark-read) nothing later is covered.
+        try await ingest.apply([.chatAction(action: .markRead(chatJid: F.bob, read: true, readThrough: nil))])
+        try await ingest.apply([F.live(F.message("6", chat: F.bob, ts: 1_700_000_010))])
+        #expect(try db.chat(F.bob)?.unreadCount == 1)
+
+        // A placeholder read elsewhere stays silent when its content lands after newer unread.
+        try await ingest.apply([F.receipt(["7"], chat: F.bob, kind: .readSelf, from: F.me)])
+        try await ingest.apply([F.live(F.message("7", chat: F.bob, ts: 1_700_000_500, kind: .undecryptable, text: nil))])
+        try await ingest.apply([F.live(F.message("8", chat: F.bob, ts: 1_700_000_600))])
+        result = try await ingest.applyBatch([F.live(F.message("7", chat: F.bob, ts: 1_700_000_500))])
+        #expect(!result.notices.contains { if case .incoming(let n) = $0 { n.messageId == "7" } else { false } })
+        #expect(try db.chat(F.bob)?.unreadCount == 1)
+    }
+
     @Test func markedUnreadSurvivesIncomingAndClearsOnOpen() async throws {
         let db = try F.tempDB()
         let ingest = try IngestActor(database: db)

@@ -121,13 +121,17 @@ final class FakeBridge: WaBridgeProtocol, @unchecked Sendable {
         progress?.onProgress(done: 100, total: 100)
     }
     func editMessage(target: BridgeMessageKey, text: String) async throws {}
+    var metadataJoinedAt: Int64?
+    var communities: Set<String> = []
     func fetchGroupMetadata(jid: String) async throws -> BridgeGroup {
         BridgeGroup(jid: jid, subject: "Meta \(jid)", participantCount: 2, participants: [
             BridgeGroupParticipant(jid: F.alicePN, isAdmin: true, isSuperAdmin: false),
             BridgeGroupParticipant(jid: F.bob, isAdmin: false, isSuperAdmin: false),
-        ])
+        ], joinedAt: metadataJoinedAt, isCommunity: communities.contains(jid))
     }
     func checkBusiness(jids: [String]) async throws -> [BridgeBusinessCheck] { [] }
+    var participating: [String] = []
+    func listParticipatingGroups() async throws -> [String] { participating }
     var overviewsFail = false
     func fetchGroupOverviews(jids: [String]) async throws -> [BridgeGroup] {
         calls.withLock { $0.overviews.append(jids) }

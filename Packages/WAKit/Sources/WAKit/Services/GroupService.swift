@@ -14,6 +14,11 @@ public actor GroupService {
     private var filling = false
     private var rerun = false
     private var attempted: Set<String> = []
+    private var joinsDone = false
+    private var joinsRunning = false
+    /// Loaded this session: one without a join or creation time stays unlisted, and is not
+    /// fetched again on every retry.
+    private var joinsLoaded: Set<String> = []
 
     public init(bridge: any WaBridgeProtocol, ingest: IngestActor, batchInterval: Duration = .seconds(2)) {
         self.bridge = bridge
@@ -56,6 +61,37 @@ public actor GroupService {
             }
         } catch {
             WAKit.log.error("group overviews failed: \(error)")
+        }
+    }
+
+    /// Lists the groups we are in that the chat list does not show (no row, or a row that some
+    /// other event created without activity): a join whose notification was lost, or predates
+    /// handling it, is otherwise invisible until someone writes. Each is listed at our join time,
+    /// so an old, quiet group sorts into history rather than on top. Runs until every group has
+    /// loaded once per session; a failed list or group is retried after the next offline sync.
+    public func addMissingJoinedGroups() async {
+        guard !joinsDone, !joinsRunning else { return }
+        joinsRunning = true
+        defer { joinsRunning = false }
+        do {
+            let joined = try await bridge.listParticipatingGroups()
+            let listed = try await ingest.database.reader.read { db in
+                try Set(String.fetchAll(db, sql: "SELECT jid FROM chat WHERE kind = 'group' AND lastActivityAt IS NOT NULL"))
+            }
+            var failed = false
+            for (i, jid) in joined.filter({ !listed.contains($0) && !joinsLoaded.contains($0) }).enumerated() {
+                if i > 0 { try await Task.sleep(for: batchInterval) }
+                do {
+                    try await loadMetadata(jid: jid)
+                    joinsLoaded.insert(jid)
+                } catch {
+                    failed = true
+                    WAKit.log.error("joined group \(jid, privacy: .private) failed: \(error)")
+                }
+            }
+            joinsDone = !failed
+        } catch {
+            WAKit.log.error("joined groups check failed: \(error)")
         }
     }
 

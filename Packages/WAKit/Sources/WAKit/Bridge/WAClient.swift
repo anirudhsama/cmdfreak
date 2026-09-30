@@ -428,7 +428,7 @@ public final class WAClient: Sendable {
         // Single consumer: batches are applied one at a time, in bridge order.
         Task.detached(priority: .userInitiated) {
             let now = Int64(Date().timeIntervalSince1970)
-            try? await ingest.prunePendingMutations(olderThan: now - 14 * 86_400)
+            try? await ingest.prunePendingMutations(olderThan: now - 14 * 86_400, readMarkersOlderThan: now - 60 * 86_400)
             try? await ingest.pruneTombstones(olderThan: now - 90 * 86_400)
             try? await ingest.pruneReadOutbox(olderThan: now - 14 * 86_400)
             for await batch in ingestStream {
@@ -459,6 +459,9 @@ public final class WAClient: Sendable {
                 }
                 if !staleGroups.isEmpty || batch.events.contains(where: \.completesSyncPhase) {
                     Task { await groups.fillMissing(stale: staleGroups) }
+                }
+                if batch.events.contains(where: { if case .offlineSyncCompleted = $0 { true } else { false } }) {
+                    Task { await groups.addMissingJoinedGroups() }
                 }
                 if batch.events.contains(where: { if case .messages = $0 { true } else { $0.completesSyncPhase } }) {
                     Task { await businesses.checkPending() }

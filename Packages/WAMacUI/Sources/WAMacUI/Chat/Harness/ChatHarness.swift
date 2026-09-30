@@ -129,6 +129,7 @@ final class HarnessBridge: WaBridgeProtocol, @unchecked Sendable {
         try FileManager.default.copyItem(at: src, to: URL(filePath: destPath))
     }
     func editMessage(target: BridgeMessageKey, text: String) async throws {}
+    func listParticipatingGroups() async throws -> [String] { [] }
     func fetchGroupMetadata(jid: String) async throws -> BridgeGroup { BridgeGroup(jid: jid, subject: "Design Team", participantCount: 4, participants: []) }
     func fetchGroupOverviews(jids: [String]) async throws -> [BridgeGroup] { [] }
     func checkBusiness(jids: [String]) async throws -> [BridgeBusinessCheck] { [] }

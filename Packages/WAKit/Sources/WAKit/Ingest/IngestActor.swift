@@ -18,6 +18,8 @@ enum MessageMutation: Codable, Hashable, Sendable {
     /// An encrypted edit or poll vote whose parent secret the bridge lacked; retried through
     /// `WaBridge.decryptParked` once the target is stored.
     case encrypted(envelope: Data)
+    /// Another of our devices read this incoming message before it reached us: it arrives read.
+    case readElsewhere
 }
 
 /// A parked encrypted add-on whose target has been stored; `retryParked` decrypts and applies it.
@@ -396,10 +398,15 @@ public actor IngestActor {
         }
     }
 
-    /// Drops parked mutations whose target never arrived.
-    public func prunePendingMutations(olderThan cutoff: Int64) throws {
+    /// Drops parked mutations whose target never arrived. Read markers are the only record of a
+    /// read on another device, and their message can still come after a long offline spell, so
+    /// they have their own, longer cutoff.
+    public func prunePendingMutations(olderThan cutoff: Int64, readMarkersOlderThan markerCutoff: Int64) throws {
         try perform { db, _ in
-            try db.execute(sql: "DELETE FROM pending_mutation WHERE createdAt < ?", arguments: [cutoff])
+            try db.execute(sql: """
+                DELETE FROM pending_mutation
+                WHERE createdAt < CASE WHEN payload LIKE '{"readElsewhere"%' THEN ? ELSE ? END
+                """, arguments: [markerCutoff, cutoff])
             self.pendingCount = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM pending_mutation") ?? 0
         }
     }
@@ -716,6 +723,8 @@ public actor IngestActor {
             if focus.isReading(chatJid) {
                 cs.readWhileFocused[chatJid, default: []].append(rec.key)
                 try Self.queueReads(db, [rec.key])
+            } else if try readElsewhere(db, chatJid, m) {
+                // Read on another device before it reached us.
             } else {
                 try db.execute(sql: "UPDATE chat SET unreadCount = unreadCount + 1 WHERE jid = ?", arguments: [chatJid])
                 // A placeholder alerts once its real content arrives (`upgradePlaceholder`).
@@ -792,9 +801,12 @@ public actor IngestActor {
             old.editedAt = m.editedAt ?? old.editedAt
         }
         try old.update(db)
-        // Alerts only while the chat is still unread (not read since the placeholder arrived).
+        // Alerts only while the message itself is still unread: among the chat's newest `unreadCount`.
         if live, !old.fromMe, !old.revoked, old.kind != .system, !focus.isReading(old.chatJid),
-           try Bool.fetchOne(db, sql: "SELECT unreadCount > 0 FROM chat WHERE jid = ?", arguments: [old.chatJid]) == true {
+           try Bool.fetchOne(db, sql: """
+               SELECT ? IN (SELECT id FROM message WHERE chatJid = ? AND fromMe = 0 AND kind != 'system'
+                            ORDER BY sortKey DESC LIMIT (SELECT unreadCount FROM chat WHERE jid = ?))
+               """, arguments: [old.id, old.chatJid, old.chatJid]) == true {
             cs.alert(old.chatJid, old.id, Self.now)  // the retry may land minutes after the send
         }
         try db.execute(sql: "DELETE FROM media WHERE chatJid = ? AND messageId = ?", arguments: [old.chatJid, old.id])
@@ -847,6 +859,16 @@ public actor IngestActor {
         pendingCount += 1
     }
 
+    /// A read-self receipt listed it, or the phone marked the chat read through its timestamp.
+    private func readElsewhere(_ db: Database, _ chatJid: String, _ m: BridgeMessage) throws -> Bool {
+        if pendingCount > 0, try Bool.fetchOne(db, sql: """
+            SELECT 1 FROM pending_mutation WHERE chatJid = ? AND messageId = ? AND payload LIKE '{"readElsewhere"%'
+            """, arguments: [chatJid, m.id]) == true {
+            return true
+        }
+        return try Bool.fetchOne(db, sql: "SELECT readThrough >= ? FROM chat WHERE jid = ?", arguments: [m.timestamp, chatJid]) == true
+    }
+
     private func applyPending(_ db: Database, _ chatJid: String, _ messageId: String, _ cs: inout ChangeSet) throws {
         guard pendingCount > 0 else { return }
         let rows = try Row.fetchAll(db, sql: "SELECT id, payload FROM pending_mutation WHERE chatJid = ? AND messageId = ? ORDER BY id",
@@ -885,7 +907,7 @@ public actor IngestActor {
         case .reaction(let sender, let fromMe, let emoji, let ts): .reaction(senderJid: canon(sender), fromMe: fromMe, emoji: emoji, timestamp: ts)
         case .pollVote(let voter, let selected, let ts): .pollVote(voterJid: canon(voter), selected: selected, timestamp: ts)
         case .receipt(let reader, let rank): .receipt(readerJid: canon(reader), rank: rank)
-        case .edit, .revoke, .status, .rejected, .encrypted: mutation
+        case .edit, .revoke, .status, .rejected, .encrypted, .readElsewhere: mutation
         }
     }
 
@@ -1013,6 +1035,8 @@ public actor IngestActor {
             guard db.changesCount > 0 else { return true }
         case .encrypted:
             return false
+        case .readElsewhere:
+            return true
         }
         cs.update(chatJid, id)
         return true
@@ -1030,6 +1054,10 @@ public actor IngestActor {
         case .readSelf, .playedSelf:
             try db.execute(sql: "UPDATE chat SET unreadCount = 0, stateAt = ? WHERE jid = ?", arguments: [Self.now, chatJid])
             cs.chatRead(chatJid)
+            // Listed messages not here yet (offline delivery can bring the read first) arrive read.
+            for id in r.messageIds where try !applyMutation(db, chatJid, id, .readElsewhere, &cs) {
+                try park(db, chatJid, id, .readElsewhere)
+            }
             return
         case .retry, .other:
             return
@@ -1264,10 +1292,16 @@ public actor IngestActor {
             let jid = canon(jid)
             try ensureChat(db, jid)
             try db.execute(sql: "UPDATE chat SET archived = ?, stateAt = ? WHERE jid = ?", arguments: [archived, Self.now, jid])
-        case .markRead(let jid, let read):
+        case .markRead(let jid, let read, let readThrough):
             let jid = canon(jid)
+            // The boundary must outlive a chat whose first message has not arrived yet.
+            if read, readThrough != nil { try ensureChat(db, jid) }
             if read {
-                try db.execute(sql: "UPDATE chat SET unreadCount = 0, markedUnread = 0, stateAt = ? WHERE jid = ?", arguments: [Self.now, jid])
+                try db.execute(sql: """
+                    UPDATE chat SET unreadCount = 0, markedUnread = 0, stateAt = ?,
+                        readThrough = CASE WHEN ? IS NULL THEN readThrough ELSE MAX(COALESCE(readThrough, 0), ?) END
+                    WHERE jid = ?
+                    """, arguments: [Self.now, readThrough, readThrough, jid])
                 cs.chatRead(jid)
             } else {
                 try db.execute(sql: "UPDATE chat SET markedUnread = 1, stateAt = ? WHERE jid = ?", arguments: [Self.now, jid])
@@ -1334,6 +1368,16 @@ public actor IngestActor {
                 participantCount = CASE WHEN ? IS NOT NULL THEN ? WHEN ? THEN NULL ELSE participantCount END
             WHERE jid = ?
             """, arguments: [g.subject.nonEmpty, count, count, stale, g.jid])
+        if g.isCommunity {
+            // A community itself is not a chat: unlisted, even if a join listed it first.
+            try db.execute(sql: """
+                UPDATE chat SET lastActivityAt = NULL WHERE jid = ? AND NOT EXISTS (SELECT 1 FROM message WHERE chatJid = ?)
+                """, arguments: [g.jid, g.jid])
+        } else if let joinedAt = g.joinedAt {
+            // Listed from the join on, before anyone writes in it.
+            try db.execute(sql: "UPDATE chat SET lastActivityAt = MAX(COALESCE(lastActivityAt, 0), ?) WHERE jid = ?",
+                           arguments: [joinedAt, g.jid])
+        }
         if count != nil, sizeWasUnknown {
             // Our messages that were waiting on the group's size.
             let waiting = try String.fetchAll(db, sql: """
@@ -1443,14 +1487,18 @@ public actor IngestActor {
         // Chat and its messages
         if let lidChat = try ChatRecord.fetchOne(db, key: lid) {
             if let pnChat = try ChatRecord.fetchOne(db, key: pn) {
-                // Messages present under both JIDs are counted in both unread windows; count once.
-                let overlap = try Int.fetchOne(db, sql: """
-                    SELECT COUNT(*) FROM
-                        (SELECT id FROM message WHERE chatJid = ? AND fromMe = 0 AND kind != 'system' ORDER BY sortKey DESC LIMIT ?) l
-                    JOIN
-                        (SELECT id FROM message WHERE chatJid = ? AND fromMe = 0 AND kind != 'system' ORDER BY sortKey DESC LIMIT ?) p
-                    USING (id)
-                    """, arguments: [lid, lidChat.unreadCount, pn, pnChat.unreadCount]) ?? 0
+                // Unread after the merge: both unread windows, a message under both JIDs counted once,
+                // less what the merged read boundary covers.
+                let boundary = try Int64.fetchOne(db, sql: "SELECT MAX(readThrough) FROM chat WHERE jid IN (?, ?)", arguments: [lid, pn])
+                let merged = try Int.fetchOne(db, sql: """
+                    SELECT COUNT(DISTINCT id) FROM (
+                        SELECT * FROM (SELECT id, timestamp FROM message WHERE chatJid = ? AND fromMe = 0 AND kind != 'system'
+                                       ORDER BY sortKey DESC LIMIT ?)
+                        UNION ALL
+                        SELECT * FROM (SELECT id, timestamp FROM message WHERE chatJid = ? AND fromMe = 0 AND kind != 'system'
+                                       ORDER BY sortKey DESC LIMIT ?))
+                    WHERE ? IS NULL OR timestamp > ?
+                    """, arguments: [lid, lidChat.unreadCount, pn, pnChat.unreadCount, boundary, boundary]) ?? 0
                 let dupIds = try String.fetchAll(db, sql: """
                     SELECT l.id FROM message l JOIN message p ON p.chatJid = ? AND p.id = l.id WHERE l.chatJid = ?
                     """, arguments: [pn, lid])
@@ -1460,7 +1508,8 @@ public actor IngestActor {
                     UPDATE chat SET
                         name = COALESCE(name, ?),
                         stateAt = CASE WHEN ? IS NULL THEN stateAt ELSE MAX(COALESCE(stateAt, 0), ?) END,
-                        unreadCount = unreadCount + ?,
+                        readThrough = ?,
+                        unreadCount = ?,
                         markedUnread = markedUnread OR ?,
                         pinnedAt = COALESCE(pinnedAt, ?),
                         mutedUntil = COALESCE(mutedUntil, ?),
@@ -1468,7 +1517,7 @@ public actor IngestActor {
                         avatarCheckedAt = CASE WHEN hasAvatar THEN avatarCheckedAt ELSE NULL END,
                         lastActivityAt = MAX(COALESCE(lastActivityAt, 0), COALESCE(?, 0))
                     WHERE jid = ?
-                    """, arguments: [lidChat.name, lidStateAt, lidStateAt, max(0, lidChat.unreadCount - overlap), lidChat.markedUnread, lidChat.pinnedAt,
+                    """, arguments: [lidChat.name, lidStateAt, lidStateAt, boundary, merged, lidChat.markedUnread, lidChat.pinnedAt,
                                      lidChat.mutedUntil, pnChat.archived && lidChat.archived,
                                      lidChat.lastActivityAt, pn])
                 // Duplicates (same id under both JIDs), now reconciled into the PN copy, stay behind

@@ -88,6 +88,13 @@ pub struct BridgeGroup {
     /// Members were added or removed: a stored participant count is stale (re-fetch it).
     #[uniffi(default = false)]
     pub membership_changed: bool,
+    /// We joined (the group was created with us, or we were added) at this time: the chat
+    /// shows in the list before its first message.
+    #[uniffi(default)]
+    pub joined_at: Option<i64>,
+    /// A community itself (its parent group): not a chat, never listed.
+    #[uniffi(default = false)]
+    pub is_community: bool,
 }
 
 /// Whether a user is a WhatsApp Business account, from `check_business`.
@@ -356,8 +363,14 @@ pub enum BridgeChatAction {
     Pin { chat_jid: String, pinned_at: Option<i64> },
     Mute { chat_jid: String, muted_until: Option<i64> },
     Archive { chat_jid: String, archived: bool },
-    /// `read == false` means "marked unread".
-    MarkRead { chat_jid: String, read: bool },
+    /// `read == false` means "marked unread". A read covers messages up to `read_through` (unix
+    /// seconds, from the synced message range; None without one), including ones not here yet.
+    MarkRead {
+        chat_jid: String,
+        read: bool,
+        #[uniffi(default)]
+        read_through: Option<i64>,
+    },
     /// Deletes messages at or before `cutoff` (unix seconds; the synced message range, else the
     /// action time) and the chat itself when nothing newer remains. `None`: everything.
     Delete {

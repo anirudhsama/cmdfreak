@@ -246,6 +246,59 @@ import Testing
         #expect(try db.chat(F.group)?.participantCount == 3)
     }
 
+    @Test func joinedGroupIsListedBeforeItsFirstMessage() async throws {
+        let db = try F.tempDB()
+        let ingest = try IngestActor(database: db)
+        let bridge = FakeBridge()
+        let jid = "120363000000000077@g.us"
+        try await ingest.apply([.group(group: BridgeGroup(jid: jid, subject: nil, participantCount: 0, participants: [],
+                                                          membershipChanged: true, joinedAt: 1_700_000_500))])
+        #expect(try db.chat(jid)?.lastActivityAt == 1_700_000_500)
+        await GroupService(bridge: bridge, ingest: ingest, batchInterval: .zero).fillMissing(stale: [jid])
+        #expect(try db.chat(jid)?.name == "Group 1203")
+        // Someone else's add changes nothing about when we joined.
+        try await ingest.apply([.group(group: BridgeGroup(jid: jid, subject: nil, participantCount: 0, participants: [],
+                                                          membershipChanged: true))])
+        #expect(try db.chat(jid)?.lastActivityAt == 1_700_000_500)
+    }
+
+    @Test func joinedGroupsWithoutAChatAreAddedOnce() async throws {
+        let db = try F.tempDB()
+        let ingest = try IngestActor(database: db)
+        let bridge = FakeBridge()
+        let missing = "120363000000000078@g.us"
+        try await ingest.apply([F.history(chats: [F.chat(F.group, name: "Named", lastActivity: 1_700_000_000)])])
+        bridge.participating = [F.group, missing]
+        bridge.metadataJoinedAt = 1_700_000_900
+        let groups = GroupService(bridge: bridge, ingest: ingest, batchInterval: .zero)
+        await groups.addMissingJoinedGroups()
+        #expect(try db.chat(missing)?.name == "Meta \(missing)")
+        #expect(try db.chat(missing)?.lastActivityAt == 1_700_000_900)
+        // Known groups are left as they are.
+        #expect(try db.chat(F.group)?.lastActivityAt == 1_700_000_000)
+
+        bridge.participating.append("120363000000000079@g.us")
+        await groups.addMissingJoinedGroups()
+        #expect(try db.chat("120363000000000079@g.us") == nil)
+    }
+
+    @Test func joinedGroupsCheckListsHiddenRowsButNotCommunities() async throws {
+        let db = try F.tempDB()
+        let ingest = try IngestActor(database: db)
+        let bridge = FakeBridge()
+        let hidden = "120363000000000080@g.us", community = "120363000000000081@g.us"
+        // Someone else's add created the row without activity.
+        try await ingest.apply([.group(group: BridgeGroup(jid: hidden, subject: nil, participantCount: 0, participants: [],
+                                                          membershipChanged: true))])
+        #expect(try db.chat(hidden)?.lastActivityAt == nil)
+        bridge.participating = [hidden, community]
+        bridge.communities = [community]
+        bridge.metadataJoinedAt = 1_700_000_900
+        await GroupService(bridge: bridge, ingest: ingest, batchInterval: .zero).addMissingJoinedGroups()
+        #expect(try db.chat(hidden)?.lastActivityAt == 1_700_000_900)
+        #expect(try db.chat(community)?.lastActivityAt == nil)
+    }
+
     @Test func ownGroupSendsCarryOurParticipantAndOldRowsAreBackfilled() async throws {
         let db = try F.tempDB()
         let ingest = try IngestActor(database: db)

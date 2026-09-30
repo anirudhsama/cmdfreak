@@ -47,16 +47,26 @@ fn parse_name(name: &str) -> (i32, u32) {
     (num_after("-type").map_or(-1, |t| t as i32), num_after("-chunk").unwrap_or(0))
 }
 
-/// `range_cutoff` over a serialized `ClearChatAction`/`DeleteChatAction`.
-fn json_cutoff(action: &Value, timestamp: &Value) -> i64 {
-    let range = action.get("message_range").or_else(|| action.get("messageRange"));
-    let field = |k: &str| range.and_then(|r| r.get(k)).and_then(Value::as_i64);
-    let parsed = range.map(|_| wa::sync_action_value::SyncActionMessageRange {
+/// A serialized action's synced message range.
+fn json_range(action: &Value) -> Option<wa::sync_action_value::SyncActionMessageRange> {
+    let range = action.get("message_range").or_else(|| action.get("messageRange"))?;
+    let field = |k: &str| range.get(k).and_then(Value::as_i64);
+    let messages = range.get("messages").and_then(Value::as_array).into_iter().flatten();
+    Some(wa::sync_action_value::SyncActionMessageRange {
         last_message_timestamp: field("last_message_timestamp"),
         last_system_message_timestamp: field("last_system_message_timestamp"),
-        ..Default::default()
-    });
-    crate::live::range_cutoff(parsed.as_ref(), ts_of(timestamp))
+        messages: messages
+            .map(|m| wa::sync_action_value::SyncActionMessage {
+                timestamp: m.get("timestamp").and_then(Value::as_i64),
+                ..Default::default()
+            })
+            .collect(),
+    })
+}
+
+/// `range_cutoff` over a serialized `ClearChatAction`/`DeleteChatAction`.
+fn json_cutoff(action: &Value, timestamp: &Value) -> i64 {
+    crate::live::range_cutoff(json_range(action).as_ref(), ts_of(timestamp))
 }
 
 pub fn import_capture(shared: &Shared, dir: &str) -> R<()> {
@@ -154,9 +164,13 @@ pub fn import_capture(shared: &Shared, dir: &str) -> R<()> {
                 chat_jid,
                 archived: action.get("archived").and_then(Value::as_bool).unwrap_or(false),
             }),
-            "MarkChatAsReadUpdate" => chat().map(|chat_jid| BridgeChatAction::MarkRead {
-                chat_jid,
-                read: action.get("read").and_then(Value::as_bool).unwrap_or(true),
+            "MarkChatAsReadUpdate" => chat().map(|chat_jid| {
+                let read = action.get("read").and_then(Value::as_bool).unwrap_or(true);
+                BridgeChatAction::MarkRead {
+                    chat_jid,
+                    read,
+                    read_through: if read { crate::live::range_last(json_range(action).as_ref()) } else { None },
+                }
             }),
             "DeleteChatUpdate" => chat().map(|chat_jid| BridgeChatAction::Delete {
                 chat_jid,

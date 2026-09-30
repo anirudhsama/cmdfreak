@@ -338,6 +338,12 @@ extension AppDatabase {
             }
         }
 
+        // Newest message timestamp another device read the chat through. A message that reaches us
+        // after that read (offline delivery) but is no newer than it doesn't count as unread.
+        m.registerMigration("v12") { db in
+            try db.alter(table: "chat") { t in t.add(column: "readThrough", .integer) }
+        }
+
         return m
     }
 

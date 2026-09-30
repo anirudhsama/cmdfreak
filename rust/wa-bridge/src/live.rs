@@ -192,12 +192,27 @@ pub async fn map_event(ctx: &MapCtx<'_>, event: &Event) -> Vec<BridgeEvent> {
             // Subject changes carry the new name. Membership changes only mark the stored count
             // stale (subject `None`, count 0); the app re-fetches it with the batched overviews.
             // The participant list itself is fetched lazily when the group is opened.
+            // A group created with us, or our own add, is a join: until then we knew nothing of it,
+            // and its name and size come from the same re-fetch.
+            let joined = Some(g.timestamp.timestamp());
             let change = match &*g.action {
-                GroupNotificationAction::Subject { subject, .. } => Some((Some(subject.clone()), false)),
-                GroupNotificationAction::Add { .. } | GroupNotificationAction::Remove { .. } => Some((None, true)),
+                GroupNotificationAction::Subject { subject, .. } => Some((Some(subject.clone()), false, None)),
+                // A community's own `<group>` carries `<parent>`: not a chat to list.
+                GroupNotificationAction::Create { raw } => {
+                    let community =
+                        raw.get_optional_child("group").is_some_and(|g| g.get_optional_child("parent").is_some());
+                    Some((None, true, if community { None } else { joined }))
+                }
+                GroupNotificationAction::Add { participants, .. } => {
+                    let ours = participants
+                        .iter()
+                        .any(|p| canon.is_own(&p.jid) || p.phone_number.as_ref().is_some_and(|pn| canon.is_own(pn)));
+                    Some((None, true, if ours { joined } else { None }))
+                }
+                GroupNotificationAction::Remove { .. } => Some((None, true, None)),
                 _ => None,
             };
-            if let Some((subject, membership_changed)) = change {
+            if let Some((subject, membership_changed, joined_at)) = change {
                 out.push(BridgeEvent::Group {
                     group: BridgeGroup {
                         jid: g.group_jid.to_string(),
@@ -205,6 +220,8 @@ pub async fn map_event(ctx: &MapCtx<'_>, event: &Event) -> Vec<BridgeEvent> {
                         participant_count: 0,
                         participants: vec![],
                         membership_changed,
+                        joined_at,
+                        is_community: false,
                     },
                 });
             }
@@ -240,10 +257,16 @@ pub async fn map_event(ctx: &MapCtx<'_>, event: &Event) -> Vec<BridgeEvent> {
             chat_jid: canon.resolve(client, &a.jid).await.to_string(),
             archived: a.action.archived.unwrap_or(false),
         })),
-        Event::MarkChatAsReadUpdate(m) => out.push(action(BridgeChatAction::MarkRead {
-            chat_jid: canon.resolve(client, &m.jid).await.to_string(),
-            read: m.action.read.unwrap_or(true),
-        })),
+        Event::MarkChatAsReadUpdate(m) => {
+            let read = m.action.read.unwrap_or(true);
+            out.push(action(BridgeChatAction::MarkRead {
+                chat_jid: canon.resolve(client, &m.jid).await.to_string(),
+                read,
+                // Only a range the sender synced: our own mark-read carries none, and the action
+                // time would also cover messages still on their way to the phone.
+                read_through: if read { range_last(m.action.message_range.as_option()) } else { None },
+            }))
+        }
         Event::DeleteChatUpdate(d) => out.push(action(BridgeChatAction::Delete {
             chat_jid: canon.resolve(client, &d.jid).await.to_string(),
             cutoff: Some(range_cutoff(d.action.message_range.as_option(), d.timestamp.timestamp())),
@@ -275,6 +298,11 @@ fn action(a: BridgeChatAction) -> BridgeEvent {
 /// Newest message time a clear/delete covers: the synced message range when present (its
 /// timestamps are seconds, but tolerate milliseconds), else the action's own time.
 pub fn range_cutoff(range: Option<&wa::sync_action_value::SyncActionMessageRange>, action_ts: i64) -> i64 {
+    range_last(range).unwrap_or(action_ts)
+}
+
+/// Newest message time in a synced message range; None when it names none.
+pub fn range_last(range: Option<&wa::sync_action_value::SyncActionMessageRange>) -> Option<i64> {
     let secs = |t: i64| if t > 100_000_000_000 { t / 1000 } else { t };
     range
         .into_iter()
@@ -287,7 +315,6 @@ pub fn range_cutoff(range: Option<&wa::sync_action_value::SyncActionMessageRange
         .filter(|t| *t > 0)
         .map(secs)
         .max()
-        .unwrap_or(action_ts)
 }
 
 pub fn push_aliases(canon: &Canon, out: &mut Vec<BridgeEvent>) {

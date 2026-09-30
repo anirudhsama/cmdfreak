@@ -146,6 +146,8 @@ final class DemoBridge: WaBridgeProtocol, @unchecked Sendable {
         return true
     }
 
+    func listParticipatingGroups() async throws -> [String] { [] }
+
     func fetchGroupMetadata(jid: String) async throws -> BridgeGroup {
         try await database.reader.read { db in
             let subject = try String.fetchOne(db, sql: "SELECT name FROM chat WHERE jid = ?", arguments: [jid])
