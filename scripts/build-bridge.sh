@@ -10,7 +10,8 @@ XCF="$PKG/WACoreFFI.xcframework"
 TARGET=aarch64-apple-darwin
 PROFILE="${BRIDGE_PROFILE:-release}"
 
-export PATH="$HOME/.cargo/bin:$HOME/.rustup/toolchains/stable-aarch64-apple-darwin/bin:$PATH"
+# Xcode runs this without the login shell PATH: Homebrew first, rustup installs as a fallback.
+export PATH="/opt/homebrew/bin:$HOME/.cargo/bin:$PATH"
 
 if [[ "${1:-}" == "--if-stale" && -f "$XCF/Info.plist" ]]; then
   if [[ -z "$(find "$RUST" -path "$RUST/target" -prune -o \( -name '*.rs' -o -name 'Cargo.toml' -o -name 'Cargo.lock' \) -newer "$XCF/Info.plist" -print -quit)" ]]; then
