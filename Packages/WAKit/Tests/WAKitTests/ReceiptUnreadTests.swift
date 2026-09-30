@@ -192,7 +192,58 @@ import Testing
         try await ingest.apply([F.live(F.message("8", chat: F.bob, ts: 1_700_000_600))])
         result = try await ingest.applyBatch([F.live(F.message("7", chat: F.bob, ts: 1_700_000_500))])
         #expect(!result.notices.contains { if case .incoming(let n) = $0 { n.messageId == "7" } else { false } })
+        #expect(try db.chat(F.bob)?.unreadCount == 2)  // 6 (not listed) and 8
+    }
+
+    @Test func remoteReadsCoverOnlyWhatTheyRead() async throws {
+        let db = try F.tempDB()
+        let ingest = try IngestActor(database: db)
+        func unread() throws -> Set<String> {
+            try db.pool.read { try Set(String.fetchAll($0, sql: "SELECT id FROM message WHERE chatJid = ? AND unread", arguments: [F.bob])) }
+        }
+        // A newer message that lands before a delayed read-self receipt stays unread.
+        try await ingest.apply([F.live(F.message("1", chat: F.bob, ts: 100), F.message("2", chat: F.bob, ts: 200))])
+        var result = try await ingest.applyBatch([F.receipt(["1"], chat: F.bob, kind: .readSelf, from: F.me)])
+        #expect(try unread() == ["2"])
         #expect(try db.chat(F.bob)?.unreadCount == 1)
+        #expect(result.notices == [.messageRemoved(chatJid: F.bob, messageId: "1")])
+
+        // A placeholder read elsewhere, then an older unlisted message: only the latter is unread,
+        // the placeholder's content does not alert, and opening sends a receipt for the latter.
+        try await ingest.apply([F.receipt(["P"], chat: F.bob, kind: .readSelf, from: F.me)])
+        try await ingest.apply([F.live(F.message("P", chat: F.bob, ts: 400, kind: .undecryptable, text: nil),
+                                       F.message("U", chat: F.bob, ts: 350))])
+        result = try await ingest.applyBatch([F.live(F.message("P", chat: F.bob, ts: 400))])
+        #expect(!result.notices.contains { if case .incoming = $0 { true } else { false } })
+        #expect(try unread() == ["2", "U"])
+        let opened = try await ingest.chatOpened(F.bob)
+        #expect(Set(opened.unreadKeys.map(\.id)) == ["2", "U"])
+        #expect(try db.chat(F.bob)?.unreadCount == 0)
+
+        // The echo of a mark-read spares what arrived after it was done.
+        try await ingest.apply([F.live(F.message("3", chat: F.bob, ts: 500), F.message("4", chat: F.bob, ts: 700))])
+        try await ingest.apply([.chatAction(action: .markRead(chatJid: F.bob, read: true, readThrough: nil, readAt: 600))])
+        #expect(try unread() == ["4"])
+
+        // A read-self receipt addressed to the LID reads the message stored under the PN once the
+        // alias is known.
+        try await ingest.apply([F.live(F.message("A", chat: F.alicePN, ts: 100))])
+        try await ingest.apply([F.receipt(["A"], chat: F.aliceLID, kind: .readSelf, from: F.me)])
+        #expect(try db.chat(F.alicePN)?.unreadCount == 1)
+        try await ingest.apply([.jidAliases(aliases: [BridgeJidAlias(lid: F.aliceLID, pn: F.alicePN)])])
+        #expect(try db.chat(F.alicePN)?.unreadCount == 0)
+    }
+
+    @Test func snapshotCountWithoutMessagesStaysUntilRead() async throws {
+        let db = try F.tempDB()
+        let ingest = try IngestActor(database: db)
+        try await ingest.apply([F.history(chats: [F.chat(F.bob, unread: 3)], messages: [F.message("1", chat: F.bob, ts: 100)])])
+        #expect(try db.chat(F.bob)?.unreadCount == 3)
+        try await ingest.apply([F.live(F.message("2", chat: F.bob, ts: 200))])
+        #expect(try db.chat(F.bob)?.unreadCount == 4)
+        // The phone read the chat through 2: the snapshot's unread predate it.
+        try await ingest.apply([F.receipt(["2"], chat: F.bob, kind: .readSelf, from: F.me)])
+        #expect(try db.chat(F.bob)?.unreadCount == 0)
     }
 
     @Test func markedUnreadSurvivesIncomingAndClearsOnOpen() async throws {

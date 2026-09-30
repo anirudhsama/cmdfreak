@@ -218,14 +218,20 @@ public actor IngestActor {
             }
             var keys: [BridgeMessageKey] = []
             if chat.unreadCount > 0 {
+                // The unread messages, and for a snapshot's unattributed count the newest others.
                 keys = try MessageRecord.fetchAll(db, sql: """
                     SELECT * FROM message WHERE chatJid = ? AND fromMe = 0 AND kind != 'system'
-                    ORDER BY sortKey DESC LIMIT ?
-                    """, arguments: [jid, min(chat.unreadCount, 1000)]).map(\.key)
+                      AND (unread OR localId IN (
+                          SELECT localId FROM message WHERE chatJid = ? AND fromMe = 0 AND kind != 'system' AND NOT unread
+                          ORDER BY sortKey DESC LIMIT (SELECT unreadUnattributed FROM chat WHERE jid = ?)))
+                    ORDER BY sortKey DESC LIMIT 1000
+                    """, arguments: [jid, jid, jid]).map(\.key)
             }
             if chat.unreadCount > 0 || chat.markedUnread {
-                try db.execute(sql: "UPDATE chat SET unreadCount = 0, markedUnread = 0, stateAt = ? WHERE jid = ?",
-                               arguments: [Self.now, jid])
+                try db.execute(sql: "UPDATE message SET unread = 0 WHERE chatJid = ? AND unread", arguments: [jid])
+                try db.execute(sql: """
+                    UPDATE chat SET unreadCount = 0, unreadUnattributed = 0, markedUnread = 0, stateAt = ? WHERE jid = ?
+                    """, arguments: [Self.now, jid])
             }
             try Self.queueReads(db, keys)
             cs.chatRead(jid)
@@ -726,20 +732,17 @@ public actor IngestActor {
             } else if try readElsewhere(db, chatJid, m) {
                 // Read on another device before it reached us.
             } else {
-                try db.execute(sql: "UPDATE chat SET unreadCount = unreadCount + 1 WHERE jid = ?", arguments: [chatJid])
+                try db.execute(sql: "UPDATE message SET unread = 1 WHERE chatJid = ? AND id = ?", arguments: [chatJid, m.id])
+                try Self.recountUnread(db, chatJid)
                 // A placeholder alerts once its real content arrives (`upgradePlaceholder`).
                 if m.kind != .undecryptable { cs.alert(chatJid, m.id, m.timestamp) }
             }
         } else if live, m.fromMe, ![.system, .undecryptable].contains(m.kind), !m.revoked,
-                  [.dm, .group].contains(ChatKind(jid: chatJid)),
-                  try Bool.fetchOne(db, sql: """
-                      SELECT EXISTS(SELECT 1 FROM message WHERE chatJid = ? AND fromMe = 0 AND kind != 'system' AND timestamp > ?)
-                      """, arguments: [chatJid, m.timestamp]) == false {
-            // Sent from another device: replying reads the chat, even without a read-self receipt,
-            // unless a delayed reply lands after newer incoming messages. Leaves `stateAt` alone so
-            // a pending history snapshot still brings the chat's pin/mute/archive.
-            try db.execute(sql: "UPDATE chat SET unreadCount = 0 WHERE jid = ?", arguments: [chatJid])
-            cs.chatRead(chatJid)
+                  [.dm, .group].contains(ChatKind(jid: chatJid)) {
+            // Sent from another device: replying reads what came before it, even without a read-self
+            // receipt; a delayed reply leaves newer incoming messages unread. Leaves `stateAt` alone
+            // so a pending history snapshot still brings the chat's pin/mute/archive.
+            try readMessages(db, chatJid, where: "timestamp <= ?", [m.timestamp], &cs)
         }
         try applyPending(db, chatJid, m.id, &cs)
     }
@@ -801,12 +804,10 @@ public actor IngestActor {
             old.editedAt = m.editedAt ?? old.editedAt
         }
         try old.update(db)
-        // Alerts only while the message itself is still unread: among the chat's newest `unreadCount`.
+        // Alerts only while the message itself is still unread.
         if live, !old.fromMe, !old.revoked, old.kind != .system, !focus.isReading(old.chatJid),
-           try Bool.fetchOne(db, sql: """
-               SELECT ? IN (SELECT id FROM message WHERE chatJid = ? AND fromMe = 0 AND kind != 'system'
-                            ORDER BY sortKey DESC LIMIT (SELECT unreadCount FROM chat WHERE jid = ?))
-               """, arguments: [old.id, old.chatJid, old.chatJid]) == true {
+           try Bool.fetchOne(db, sql: "SELECT unread FROM message WHERE chatJid = ? AND id = ?",
+                             arguments: [old.chatJid, old.id]) == true {
             cs.alert(old.chatJid, old.id, Self.now)  // the retry may land minutes after the send
         }
         try db.execute(sql: "DELETE FROM media WHERE chatJid = ? AND messageId = ?", arguments: [old.chatJid, old.id])
@@ -857,6 +858,34 @@ public actor IngestActor {
         try db.execute(sql: "INSERT INTO pending_mutation (chatJid, messageId, payload, createdAt) VALUES (?, ?, ?, ?)",
                        arguments: [chatJid, messageId, payload, Int64(Date().timeIntervalSince1970)])
         pendingCount += 1
+    }
+
+    /// Keeps `unreadCount` equal to the unread-flagged messages plus the unattributed count.
+    private static func recountUnread(_ db: Database, _ jid: String) throws {
+        try db.execute(sql: """
+            UPDATE chat SET unreadCount = unreadUnattributed
+                + (SELECT COUNT(*) FROM message WHERE chatJid = chat.jid AND unread)
+            WHERE jid = ?
+            """, arguments: [jid])
+    }
+
+    /// A read from another device, or implied by a reply: the unread messages `filter` selects,
+    /// and (unless `attributedOnly`) a snapshot's unattributed count, which predates any read now.
+    /// Withdraws the chat's notifications when nothing stays unread, else only the read messages'.
+    private func readMessages(_ db: Database, _ jid: String, where filter: String, _ args: StatementArguments,
+                              _ cs: inout ChangeSet, attributedOnly: Bool = false) throws {
+        let ids = try String.fetchAll(db, sql: """
+            UPDATE message SET unread = 0 WHERE chatJid = ? AND unread AND (\(filter)) RETURNING id
+            """, arguments: [jid] + args)
+        if !attributedOnly {
+            try db.execute(sql: "UPDATE chat SET unreadUnattributed = 0 WHERE jid = ?", arguments: [jid])
+        }
+        try Self.recountUnread(db, jid)
+        if try Int.fetchOne(db, sql: "SELECT unreadCount FROM chat WHERE jid = ?", arguments: [jid]) ?? 0 == 0 {
+            cs.chatRead(jid)
+        } else {
+            for id in ids { cs.removed(jid, id) }
+        }
     }
 
     /// A read-self receipt listed it, or the phone marked the chat read through its timestamp.
@@ -1036,6 +1065,12 @@ public actor IngestActor {
         case .encrypted:
             return false
         case .readElsewhere:
+            // Here already (e.g. its marker followed an alias merge): read it now.
+            try db.execute(sql: "UPDATE message SET unread = 0 WHERE chatJid = ? AND id = ? AND unread", arguments: key)
+            if db.changesCount > 0 {
+                try Self.recountUnread(db, chatJid)
+                cs.removed(chatJid, id)
+            }
             return true
         }
         cs.update(chatJid, id)
@@ -1052,12 +1087,19 @@ public actor IngestActor {
         case .delivered: status = .delivered
         case .read, .played: status = .read
         case .readSelf, .playedSelf:
-            try db.execute(sql: "UPDATE chat SET unreadCount = 0, stateAt = ? WHERE jid = ?", arguments: [Self.now, chatJid])
-            cs.chatRead(chatJid)
-            // Listed messages not here yet (offline delivery can bring the read first) arrive read.
-            for id in r.messageIds where try !applyMutation(db, chatJid, id, .readElsewhere, &cs) {
-                try park(db, chatJid, id, .readElsewhere)
+            // Reading the listed messages read the chat up to them; newer ones stay unread. Listed
+            // messages not here yet (offline delivery can bring the read first) arrive read.
+            var newest = Int64.min
+            for id in r.messageIds {
+                if let key = try Int64.fetchOne(db, sql: "SELECT sortKey FROM message WHERE chatJid = ? AND id = ?",
+                                                arguments: [chatJid, id]) {
+                    newest = max(newest, key)
+                } else {
+                    try park(db, chatJid, id, .readElsewhere)
+                }
             }
+            try readMessages(db, chatJid, where: "sortKey <= ?", [newest], &cs)
+            try db.execute(sql: "UPDATE chat SET stateAt = ? WHERE jid = ?", arguments: [Self.now, chatJid])
             return
         case .retry, .other:
             return
@@ -1259,22 +1301,28 @@ public actor IngestActor {
         // NULL`). Once a chat action or read has set that state here (`stateAt`), a later, possibly
         // stale snapshot never re-applies it.
         try db.execute(sql: """
-            INSERT INTO chat (jid, kind, name, lastActivityAt, unreadCount, markedUnread, pinnedAt, mutedUntil, archived, readOnly)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO chat (jid, kind, name, lastActivityAt, markedUnread, pinnedAt, mutedUntil, archived, readOnly)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(jid) DO UPDATE SET
                 name = COALESCE(excluded.name, name),
                 lastActivityAt = CASE
                     WHEN excluded.lastActivityAt IS NULL THEN lastActivityAt
                     WHEN lastActivityAt IS NULL THEN excluded.lastActivityAt
                     ELSE MAX(lastActivityAt, excluded.lastActivityAt) END,
-                unreadCount = CASE WHEN stateAt IS NULL THEN MAX(unreadCount, excluded.unreadCount) ELSE unreadCount END,
                 markedUnread = CASE WHEN stateAt IS NULL THEN excluded.markedUnread ELSE markedUnread END,
                 pinnedAt = CASE WHEN stateAt IS NULL THEN excluded.pinnedAt ELSE pinnedAt END,
                 mutedUntil = CASE WHEN stateAt IS NULL THEN excluded.mutedUntil ELSE mutedUntil END,
                 archived = CASE WHEN stateAt IS NULL THEN excluded.archived ELSE archived END,
                 readOnly = excluded.readOnly
-            """, arguments: [jid, c.kind, c.name, c.lastActivityAt, Int(c.unreadCount), c.markedUnread,
+            """, arguments: [jid, c.kind, c.name, c.lastActivityAt, c.markedUnread,
                              c.pinnedAt, c.mutedUntil, c.archived, c.readOnly])
+        // The snapshot counts unread without naming the messages: what the flagged ones don't cover.
+        try db.execute(sql: """
+            UPDATE chat SET unreadUnattributed = MAX(unreadUnattributed,
+                ? - (SELECT COUNT(*) FROM message WHERE chatJid = ? AND unread))
+            WHERE jid = ? AND stateAt IS NULL
+            """, arguments: [Int(c.unreadCount), jid, jid])
+        try Self.recountUnread(db, jid)
         if c.kind == .dm { try ensureContact(db, jid) }
     }
 
@@ -1292,17 +1340,20 @@ public actor IngestActor {
             let jid = canon(jid)
             try ensureChat(db, jid)
             try db.execute(sql: "UPDATE chat SET archived = ?, stateAt = ? WHERE jid = ?", arguments: [archived, Self.now, jid])
-        case .markRead(let jid, let read, let readThrough):
+        case .markRead(let jid, let read, let readThrough, let readAt):
             let jid = canon(jid)
             // The boundary must outlive a chat whose first message has not arrived yet.
             if read, readThrough != nil { try ensureChat(db, jid) }
             if read {
+                // Up to the synced range, else to when it was done (an echo of ours then spares
+                // what arrived since); our own read, with neither, covers everything.
+                let upTo = readThrough ?? readAt
+                try readMessages(db, jid, where: "? IS NULL OR timestamp <= ?", [upTo, upTo], &cs)
                 try db.execute(sql: """
-                    UPDATE chat SET unreadCount = 0, markedUnread = 0, stateAt = ?,
+                    UPDATE chat SET markedUnread = 0, stateAt = ?,
                         readThrough = CASE WHEN ? IS NULL THEN readThrough ELSE MAX(COALESCE(readThrough, 0), ?) END
                     WHERE jid = ?
                     """, arguments: [Self.now, readThrough, readThrough, jid])
-                cs.chatRead(jid)
             } else {
                 try db.execute(sql: "UPDATE chat SET markedUnread = 1, stateAt = ? WHERE jid = ?", arguments: [Self.now, jid])
             }
@@ -1329,6 +1380,7 @@ public actor IngestActor {
             hasMessageTombstones = true
             try db.execute(sql: "DELETE FROM message WHERE chatJid = ? AND id = ?", arguments: [jid, target.id])
             if db.changesCount > 0 { cs.delete(jid, target.id) }
+            try Self.recountUnread(db, jid)
             cs.removed(jid, target.id)
             try dropPending(db, jid, target.id)
         }
@@ -1348,10 +1400,11 @@ public actor IngestActor {
         }
         try db.execute(sql: "DELETE FROM message WHERE chatJid = ? AND (? IS NULL OR timestamp <= ?)", arguments: [jid, cutoff, cutoff])
         try db.execute(sql: """
-            UPDATE chat SET unreadCount = MIN(unreadCount,
-                (SELECT COUNT(*) FROM message WHERE chatJid = ? AND fromMe = 0 AND kind != 'system'))
+            UPDATE chat SET unreadUnattributed = MIN(unreadUnattributed,
+                (SELECT COUNT(*) FROM message WHERE chatJid = ? AND fromMe = 0 AND kind != 'system' AND NOT unread))
             WHERE jid = ?
             """, arguments: [jid, jid])
+        try Self.recountUnread(db, jid)
         cs.reload.insert(jid)
         cs.dirty.insert(jid)
     }
@@ -1487,18 +1540,13 @@ public actor IngestActor {
         // Chat and its messages
         if let lidChat = try ChatRecord.fetchOne(db, key: lid) {
             if let pnChat = try ChatRecord.fetchOne(db, key: pn) {
-                // Unread after the merge: both unread windows, a message under both JIDs counted once,
-                // less what the merged read boundary covers.
                 let boundary = try Int64.fetchOne(db, sql: "SELECT MAX(readThrough) FROM chat WHERE jid IN (?, ?)", arguments: [lid, pn])
-                let merged = try Int.fetchOne(db, sql: """
-                    SELECT COUNT(DISTINCT id) FROM (
-                        SELECT * FROM (SELECT id, timestamp FROM message WHERE chatJid = ? AND fromMe = 0 AND kind != 'system'
-                                       ORDER BY sortKey DESC LIMIT ?)
-                        UNION ALL
-                        SELECT * FROM (SELECT id, timestamp FROM message WHERE chatJid = ? AND fromMe = 0 AND kind != 'system'
-                                       ORDER BY sortKey DESC LIMIT ?))
-                    WHERE ? IS NULL OR timestamp > ?
-                    """, arguments: [lid, lidChat.unreadCount, pn, pnChat.unreadCount, boundary, boundary]) ?? 0
+                let lidUnattributed = try Int.fetchOne(db, sql: "SELECT unreadUnattributed FROM chat WHERE jid = ?", arguments: [lid]) ?? 0
+                // A message under both JIDs is unread if either copy is; the PN copy is kept.
+                try db.execute(sql: """
+                    UPDATE message SET unread = 1 WHERE chatJid = ? AND NOT unread
+                      AND id IN (SELECT id FROM message WHERE chatJid = ? AND unread)
+                    """, arguments: [pn, lid])
                 let dupIds = try String.fetchAll(db, sql: """
                     SELECT l.id FROM message l JOIN message p ON p.chatJid = ? AND p.id = l.id WHERE l.chatJid = ?
                     """, arguments: [pn, lid])
@@ -1509,7 +1557,7 @@ public actor IngestActor {
                         name = COALESCE(name, ?),
                         stateAt = CASE WHEN ? IS NULL THEN stateAt ELSE MAX(COALESCE(stateAt, 0), ?) END,
                         readThrough = ?,
-                        unreadCount = ?,
+                        unreadUnattributed = unreadUnattributed + ?,
                         markedUnread = markedUnread OR ?,
                         pinnedAt = COALESCE(pinnedAt, ?),
                         mutedUntil = COALESCE(mutedUntil, ?),
@@ -1517,7 +1565,7 @@ public actor IngestActor {
                         avatarCheckedAt = CASE WHEN hasAvatar THEN avatarCheckedAt ELSE NULL END,
                         lastActivityAt = MAX(COALESCE(lastActivityAt, 0), COALESCE(?, 0))
                     WHERE jid = ?
-                    """, arguments: [lidChat.name, lidStateAt, lidStateAt, boundary, merged, lidChat.markedUnread, lidChat.pinnedAt,
+                    """, arguments: [lidChat.name, lidStateAt, lidStateAt, boundary, lidUnattributed, lidChat.markedUnread, lidChat.pinnedAt,
                                      lidChat.mutedUntil, pnChat.archived && lidChat.archived,
                                      lidChat.lastActivityAt, pn])
                 // Duplicates (same id under both JIDs), now reconciled into the PN copy, stay behind
@@ -1525,6 +1573,12 @@ public actor IngestActor {
                 try db.execute(sql: "UPDATE OR IGNORE message SET chatJid = ? WHERE chatJid = ?", arguments: [pn, lid])
                 try db.execute(sql: "UPDATE OR IGNORE chat_tag SET chatJid = ? WHERE chatJid = ?", arguments: [pn, lid])
                 try db.execute(sql: "DELETE FROM chat WHERE jid = ?", arguments: [lid])
+                // What either side's read boundary covers is read in the merged chat.
+                if let boundary {
+                    try readMessages(db, pn, where: "timestamp <= ?", [boundary], &cs, attributedOnly: true)
+                } else {
+                    try Self.recountUnread(db, pn)
+                }
             } else {
                 // ON UPDATE CASCADE carries messages, media, reactions, votes and tags along.
                 try db.execute(sql: "UPDATE chat SET jid = ? WHERE jid = ?", arguments: [pn, lid])
