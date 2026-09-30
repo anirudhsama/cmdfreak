@@ -245,7 +245,9 @@ pub async fn map_event(ctx: &MapCtx<'_>, event: &Event) -> Vec<BridgeEvent> {
             out.push(action(BridgeChatAction::MarkRead {
                 chat_jid: canon.resolve(client, &m.jid).await.to_string(),
                 read,
-                read_through: read.then(|| range_cutoff(m.action.message_range.as_option(), m.timestamp.timestamp())),
+                // Only a range the sender synced: our own mark-read carries none, and the action
+                // time would also cover messages still on their way to the phone.
+                read_through: if read { range_last(m.action.message_range.as_option()) } else { None },
             }))
         }
         Event::DeleteChatUpdate(d) => out.push(action(BridgeChatAction::Delete {
@@ -279,6 +281,11 @@ fn action(a: BridgeChatAction) -> BridgeEvent {
 /// Newest message time a clear/delete covers: the synced message range when present (its
 /// timestamps are seconds, but tolerate milliseconds), else the action's own time.
 pub fn range_cutoff(range: Option<&wa::sync_action_value::SyncActionMessageRange>, action_ts: i64) -> i64 {
+    range_last(range).unwrap_or(action_ts)
+}
+
+/// Newest message time in a synced message range; None when it names none.
+pub fn range_last(range: Option<&wa::sync_action_value::SyncActionMessageRange>) -> Option<i64> {
     let secs = |t: i64| if t > 100_000_000_000 { t / 1000 } else { t };
     range
         .into_iter()
@@ -291,7 +298,6 @@ pub fn range_cutoff(range: Option<&wa::sync_action_value::SyncActionMessageRange
         .filter(|t| *t > 0)
         .map(secs)
         .max()
-        .unwrap_or(action_ts)
 }
 
 pub fn push_aliases(canon: &Canon, out: &mut Vec<BridgeEvent>) {

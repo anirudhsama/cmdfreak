@@ -18,6 +18,8 @@ enum MessageMutation: Codable, Hashable, Sendable {
     /// An encrypted edit or poll vote whose parent secret the bridge lacked; retried through
     /// `WaBridge.decryptParked` once the target is stored.
     case encrypted(envelope: Data)
+    /// Another of our devices read this incoming message before it reached us: it arrives read.
+    case readElsewhere
 }
 
 /// A parked encrypted add-on whose target has been stored; `retryParked` decrypts and applies it.
@@ -716,9 +718,8 @@ public actor IngestActor {
             if focus.isReading(chatJid) {
                 cs.readWhileFocused[chatJid, default: []].append(rec.key)
                 try Self.queueReads(db, [rec.key])
-            } else if try Bool.fetchOne(db, sql: "SELECT readThrough >= ? FROM chat WHERE jid = ?",
-                                        arguments: [m.timestamp, chatJid]) == true {
-                // Already read on another device before it reached us.
+            } else if try readElsewhere(db, chatJid, m) {
+                // Read on another device before it reached us.
             } else {
                 try db.execute(sql: "UPDATE chat SET unreadCount = unreadCount + 1 WHERE jid = ?", arguments: [chatJid])
                 // A placeholder alerts once its real content arrives (`upgradePlaceholder`).
@@ -795,9 +796,12 @@ public actor IngestActor {
             old.editedAt = m.editedAt ?? old.editedAt
         }
         try old.update(db)
-        // Alerts only while the chat is still unread (not read since the placeholder arrived).
+        // Alerts only while the message itself is still unread: among the chat's newest `unreadCount`.
         if live, !old.fromMe, !old.revoked, old.kind != .system, !focus.isReading(old.chatJid),
-           try Bool.fetchOne(db, sql: "SELECT unreadCount > 0 FROM chat WHERE jid = ?", arguments: [old.chatJid]) == true {
+           try Bool.fetchOne(db, sql: """
+               SELECT ? IN (SELECT id FROM message WHERE chatJid = ? AND fromMe = 0 AND kind != 'system'
+                            ORDER BY sortKey DESC LIMIT (SELECT unreadCount FROM chat WHERE jid = ?))
+               """, arguments: [old.id, old.chatJid, old.chatJid]) == true {
             cs.alert(old.chatJid, old.id, Self.now)  // the retry may land minutes after the send
         }
         try db.execute(sql: "DELETE FROM media WHERE chatJid = ? AND messageId = ?", arguments: [old.chatJid, old.id])
@@ -850,6 +854,16 @@ public actor IngestActor {
         pendingCount += 1
     }
 
+    /// A read-self receipt listed it, or the phone marked the chat read through its timestamp.
+    private func readElsewhere(_ db: Database, _ chatJid: String, _ m: BridgeMessage) throws -> Bool {
+        if pendingCount > 0, try Bool.fetchOne(db, sql: """
+            SELECT 1 FROM pending_mutation WHERE chatJid = ? AND messageId = ? AND payload LIKE '{"readElsewhere"%'
+            """, arguments: [chatJid, m.id]) == true {
+            return true
+        }
+        return try Bool.fetchOne(db, sql: "SELECT readThrough >= ? FROM chat WHERE jid = ?", arguments: [m.timestamp, chatJid]) == true
+    }
+
     private func applyPending(_ db: Database, _ chatJid: String, _ messageId: String, _ cs: inout ChangeSet) throws {
         guard pendingCount > 0 else { return }
         let rows = try Row.fetchAll(db, sql: "SELECT id, payload FROM pending_mutation WHERE chatJid = ? AND messageId = ? ORDER BY id",
@@ -888,7 +902,7 @@ public actor IngestActor {
         case .reaction(let sender, let fromMe, let emoji, let ts): .reaction(senderJid: canon(sender), fromMe: fromMe, emoji: emoji, timestamp: ts)
         case .pollVote(let voter, let selected, let ts): .pollVote(voterJid: canon(voter), selected: selected, timestamp: ts)
         case .receipt(let reader, let rank): .receipt(readerJid: canon(reader), rank: rank)
-        case .edit, .revoke, .status, .rejected, .encrypted: mutation
+        case .edit, .revoke, .status, .rejected, .encrypted, .readElsewhere: mutation
         }
     }
 
@@ -1016,6 +1030,8 @@ public actor IngestActor {
             guard db.changesCount > 0 else { return true }
         case .encrypted:
             return false
+        case .readElsewhere:
+            return true
         }
         cs.update(chatJid, id)
         return true
@@ -1031,10 +1047,12 @@ public actor IngestActor {
         case .delivered: status = .delivered
         case .read, .played: status = .read
         case .readSelf, .playedSelf:
-            try db.execute(sql: """
-                UPDATE chat SET unreadCount = 0, stateAt = ?, readThrough = MAX(COALESCE(readThrough, 0), ?) WHERE jid = ?
-                """, arguments: [Self.now, r.timestamp, chatJid])
+            try db.execute(sql: "UPDATE chat SET unreadCount = 0, stateAt = ? WHERE jid = ?", arguments: [Self.now, chatJid])
             cs.chatRead(chatJid)
+            // Listed messages not here yet (offline delivery can bring the read first) arrive read.
+            for id in r.messageIds where try !applyMutation(db, chatJid, id, .readElsewhere, &cs) {
+                try park(db, chatJid, id, .readElsewhere)
+            }
             return
         case .retry, .other:
             return
@@ -1271,6 +1289,8 @@ public actor IngestActor {
             try db.execute(sql: "UPDATE chat SET archived = ?, stateAt = ? WHERE jid = ?", arguments: [archived, Self.now, jid])
         case .markRead(let jid, let read, let readThrough):
             let jid = canon(jid)
+            // The boundary must outlive a chat whose first message has not arrived yet.
+            if read, readThrough != nil { try ensureChat(db, jid) }
             if read {
                 try db.execute(sql: """
                     UPDATE chat SET unreadCount = 0, markedUnread = 0, stateAt = ?,
@@ -1487,6 +1507,12 @@ public actor IngestActor {
                 try db.execute(sql: "UPDATE OR IGNORE message SET chatJid = ? WHERE chatJid = ?", arguments: [pn, lid])
                 try db.execute(sql: "UPDATE OR IGNORE chat_tag SET chatJid = ? WHERE chatJid = ?", arguments: [pn, lid])
                 try db.execute(sql: "DELETE FROM chat WHERE jid = ?", arguments: [lid])
+                // Messages the LID side counted may fall under the merged read boundary.
+                try db.execute(sql: """
+                    UPDATE chat SET unreadCount = MIN(unreadCount, (SELECT COUNT(*) FROM message
+                        WHERE chatJid = chat.jid AND fromMe = 0 AND kind != 'system' AND timestamp > chat.readThrough))
+                    WHERE jid = ? AND readThrough IS NOT NULL
+                    """, arguments: [pn])
             } else {
                 // ON UPDATE CASCADE carries messages, media, reactions, votes and tags along.
                 try db.execute(sql: "UPDATE chat SET jid = ? WHERE jid = ?", arguments: [pn, lid])

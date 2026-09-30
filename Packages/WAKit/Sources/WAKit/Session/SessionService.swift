@@ -88,15 +88,20 @@ public final class SessionService {
         // A new network (e.g. hotspot to Wi-Fi) can strand the socket on an address that no longer
         // exists without the socket erroring for a long while: redial on the new one.
         // Compared with the last connected route, so an offline gap between networks still counts.
+        // Not while pairing: the redial would void a code the user is typing on the phone.
         let lastRoute = Mutex<PathRoute?>(nil)
-        pathMonitor.pathUpdateHandler = { [bridge] path in
+        pathMonitor.pathUpdateHandler = { [weak self] path in
             guard path.status == .satisfied else { return }
             let route = PathRoute(path)
             let changed = lastRoute.withLock { last in
                 defer { last = route }
                 return last != nil && last != route
             }
-            if changed { bridge?.nudgeReconnect() }
+            guard changed else { return }
+            Task { @MainActor in
+                guard let self, self.ownJid != nil else { return }
+                self.bridge?.nudgeReconnect()
+            }
         }
         pathMonitor.start(queue: DispatchQueue(label: "SessionService.path"))
     }

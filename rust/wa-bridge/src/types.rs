@@ -357,7 +357,7 @@ pub enum BridgeChatAction {
     Mute { chat_jid: String, muted_until: Option<i64> },
     Archive { chat_jid: String, archived: bool },
     /// `read == false` means "marked unread". A read covers messages up to `read_through` (unix
-    /// seconds; the synced message range, else the action time), including ones not here yet.
+    /// seconds, from the synced message range; None without one), including ones not here yet.
     MarkRead {
         chat_jid: String,
         read: bool,
