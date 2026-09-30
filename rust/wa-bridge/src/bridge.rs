@@ -773,6 +773,7 @@ impl WaBridge {
                             participant_count: o.participant_count.unwrap_or(0),
                             participants: vec![],
                             membership_changed: false,
+                            joined_at: None,
                         }),
                         GroupOverviewResult::Truncated { id, participant_count } => {
                             out.push(BridgeGroup {
@@ -781,6 +782,7 @@ impl WaBridge {
                                 participant_count,
                                 participants: vec![],
                                 membership_changed: false,
+                                joined_at: None,
                             })
                         }
                         _ => {}
@@ -824,6 +826,7 @@ impl WaBridge {
                 participant_count: participants.len() as u32,
                 participants,
                 membership_changed: false,
+                joined_at: None,
             })
         })
         .await

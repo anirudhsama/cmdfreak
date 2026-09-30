@@ -246,6 +246,22 @@ import Testing
         #expect(try db.chat(F.group)?.participantCount == 3)
     }
 
+    @Test func joinedGroupIsListedBeforeItsFirstMessage() async throws {
+        let db = try F.tempDB()
+        let ingest = try IngestActor(database: db)
+        let bridge = FakeBridge()
+        let jid = "120363000000000077@g.us"
+        try await ingest.apply([.group(group: BridgeGroup(jid: jid, subject: nil, participantCount: 0, participants: [],
+                                                          membershipChanged: true, joinedAt: 1_700_000_500))])
+        #expect(try db.chat(jid)?.lastActivityAt == 1_700_000_500)
+        await GroupService(bridge: bridge, ingest: ingest, batchInterval: .zero).fillMissing(stale: [jid])
+        #expect(try db.chat(jid)?.name == "Group 1203")
+        // Someone else's add changes nothing about when we joined.
+        try await ingest.apply([.group(group: BridgeGroup(jid: jid, subject: nil, participantCount: 0, participants: [],
+                                                          membershipChanged: true))])
+        #expect(try db.chat(jid)?.lastActivityAt == 1_700_000_500)
+    }
+
     @Test func ownGroupSendsCarryOurParticipantAndOldRowsAreBackfilled() async throws {
         let db = try F.tempDB()
         let ingest = try IngestActor(database: db)

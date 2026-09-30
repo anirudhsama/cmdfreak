@@ -88,6 +88,10 @@ pub struct BridgeGroup {
     /// Members were added or removed: a stored participant count is stale (re-fetch it).
     #[uniffi(default = false)]
     pub membership_changed: bool,
+    /// We joined (the group was created with us, or we were added) at this time: the chat
+    /// shows in the list before its first message.
+    #[uniffi(default)]
+    pub joined_at: Option<i64>,
 }
 
 /// Whether a user is a WhatsApp Business account, from `check_business`.

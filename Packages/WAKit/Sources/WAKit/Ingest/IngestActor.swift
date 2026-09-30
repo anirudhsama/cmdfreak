@@ -1363,6 +1363,11 @@ public actor IngestActor {
                 participantCount = CASE WHEN ? IS NOT NULL THEN ? WHEN ? THEN NULL ELSE participantCount END
             WHERE jid = ?
             """, arguments: [g.subject.nonEmpty, count, count, stale, g.jid])
+        if let joinedAt = g.joinedAt {
+            // Listed from the join on, before anyone writes in it.
+            try db.execute(sql: "UPDATE chat SET lastActivityAt = MAX(COALESCE(lastActivityAt, 0), ?) WHERE jid = ?",
+                           arguments: [joinedAt, g.jid])
+        }
         if count != nil, sizeWasUnknown {
             // Our messages that were waiting on the group's size.
             let waiting = try String.fetchAll(db, sql: """

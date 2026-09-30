@@ -192,12 +192,22 @@ pub async fn map_event(ctx: &MapCtx<'_>, event: &Event) -> Vec<BridgeEvent> {
             // Subject changes carry the new name. Membership changes only mark the stored count
             // stale (subject `None`, count 0); the app re-fetches it with the batched overviews.
             // The participant list itself is fetched lazily when the group is opened.
+            // A group created with us, or our own add, is a join: until then we knew nothing of it,
+            // and its name and size come from the same re-fetch.
+            let joined = Some(g.timestamp.timestamp());
             let change = match &*g.action {
-                GroupNotificationAction::Subject { subject, .. } => Some((Some(subject.clone()), false)),
-                GroupNotificationAction::Add { .. } | GroupNotificationAction::Remove { .. } => Some((None, true)),
+                GroupNotificationAction::Subject { subject, .. } => Some((Some(subject.clone()), false, None)),
+                GroupNotificationAction::Create { .. } => Some((None, true, joined)),
+                GroupNotificationAction::Add { participants, .. } => {
+                    let ours = participants
+                        .iter()
+                        .any(|p| canon.is_own(&p.jid) || p.phone_number.as_ref().is_some_and(|pn| canon.is_own(pn)));
+                    Some((None, true, if ours { joined } else { None }))
+                }
+                GroupNotificationAction::Remove { .. } => Some((None, true, None)),
                 _ => None,
             };
-            if let Some((subject, membership_changed)) = change {
+            if let Some((subject, membership_changed, joined_at)) = change {
                 out.push(BridgeEvent::Group {
                     group: BridgeGroup {
                         jid: g.group_jid.to_string(),
@@ -205,6 +215,7 @@ pub async fn map_event(ctx: &MapCtx<'_>, event: &Event) -> Vec<BridgeEvent> {
                         participant_count: 0,
                         participants: vec![],
                         membership_changed,
+                        joined_at,
                     },
                 });
             }

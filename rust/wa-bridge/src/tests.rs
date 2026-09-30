@@ -776,3 +776,40 @@ fn real_capture_quotes() {
         println!("{n:6}  {s}");
     }
 }
+
+#[test]
+fn group_create_and_own_add_are_joins() {
+    use whatsapp_rust::NodeBuilder;
+    use whatsapp_rust::wacore::stanza::groups::{GroupNotificationAction, GroupParticipantInfo};
+    use whatsapp_rust::wacore::types::events::{Event, GroupUpdate};
+    let canon = canon();
+    let polls = PollCache::default();
+    let ctx = crate::live::MapCtx { canon: &canon, polls: &polls, client: None };
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let member = |jid: Jid| GroupParticipantInfo {
+        jid,
+        phone_number: None,
+        display_name: None,
+        r#type: None,
+        lid: None,
+        username: None,
+        join_time: None,
+        group_history_sent_state: None,
+    };
+    let joined = |action: GroupNotificationAction| {
+        let update = GroupUpdate::builder()
+            .group_jid("120363000000000077@g.us".parse().unwrap())
+            .timestamp(whatsapp_rust::chrono::DateTime::from_timestamp(1_700_000_500, 0).unwrap())
+            .is_lid_addressing_mode(true)
+            .action(Box::new(action))
+            .build();
+        let out = rt.block_on(crate::live::map_event(&ctx, &Event::GroupUpdate(update)));
+        let [BridgeEvent::Group { group }] = out.as_slice() else { panic!("{out:?}") };
+        assert!(group.membership_changed);
+        group.joined_at
+    };
+    assert_eq!(joined(GroupNotificationAction::Create { raw: NodeBuilder::new("create").build() }), Some(1_700_000_500));
+    let add = |who: Jid| GroupNotificationAction::Add { participants: vec![member(who)], reason: None };
+    assert_eq!(joined(add(Jid::lid(ME_LID))), Some(1_700_000_500));
+    assert_eq!(joined(add(Jid::lid("99999999999999"))), None);
+}
