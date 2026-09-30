@@ -161,6 +161,24 @@ import Testing
         #expect(try db.chat(F.bob)?.unreadCount == 0)
     }
 
+    @Test func readOnAnotherDeviceCoversMessagesDeliveredLater() async throws {
+        let db = try F.tempDB()
+        let ingest = try IngestActor(database: db)
+        // Offline delivery: the phone's read (receipt time 1_700_000_100) lands before the message it read.
+        try await ingest.apply([F.live(F.message("1", chat: F.bob))])
+        try await ingest.apply([F.receipt(["2"], chat: F.bob, kind: .readSelf, from: F.me)])
+        let result = try await ingest.applyBatch([F.live(F.message("2", chat: F.bob, ts: 1_700_000_050))])
+        #expect(try db.chat(F.bob)?.unreadCount == 0)
+        #expect(result.notices.isEmpty)
+        try await ingest.apply([F.live(F.message("3", chat: F.bob, ts: 1_700_000_200))])
+        #expect(try db.chat(F.bob)?.unreadCount == 1)
+
+        // The same through the mark-read chat action, up to its message range.
+        try await ingest.apply([.chatAction(action: .markRead(chatJid: F.bob, read: true, readThrough: 1_700_000_300))])
+        try await ingest.apply([F.live(F.message("4", chat: F.bob, ts: 1_700_000_250))])
+        #expect(try db.chat(F.bob)?.unreadCount == 0)
+    }
+
     @Test func markedUnreadSurvivesIncomingAndClearsOnOpen() async throws {
         let db = try F.tempDB()
         let ingest = try IngestActor(database: db)
@@ -174,7 +192,7 @@ import Testing
         chat = try #require(try db.chat(F.group))
         #expect(chat.markedUnread && chat.unreadCount == 0)
 
-        try await ingest.apply([F.live(F.message("3", chat: F.group, sender: F.alicePN, ts: 1_700_000_002))])
+        try await ingest.apply([F.live(F.message("3", chat: F.group, sender: F.alicePN, ts: 1_700_000_200))])
         let result = try await ingest.chatOpened(F.group)
         #expect(result.wasMarkedUnread)
         #expect(result.unreadKeys == [F.key("3", chat: F.group, participant: F.alicePN)])

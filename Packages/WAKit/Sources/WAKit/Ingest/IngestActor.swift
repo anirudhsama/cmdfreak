@@ -716,6 +716,9 @@ public actor IngestActor {
             if focus.isReading(chatJid) {
                 cs.readWhileFocused[chatJid, default: []].append(rec.key)
                 try Self.queueReads(db, [rec.key])
+            } else if try Bool.fetchOne(db, sql: "SELECT readThrough >= ? FROM chat WHERE jid = ?",
+                                        arguments: [m.timestamp, chatJid]) == true {
+                // Already read on another device before it reached us.
             } else {
                 try db.execute(sql: "UPDATE chat SET unreadCount = unreadCount + 1 WHERE jid = ?", arguments: [chatJid])
                 // A placeholder alerts once its real content arrives (`upgradePlaceholder`).
@@ -1028,7 +1031,9 @@ public actor IngestActor {
         case .delivered: status = .delivered
         case .read, .played: status = .read
         case .readSelf, .playedSelf:
-            try db.execute(sql: "UPDATE chat SET unreadCount = 0, stateAt = ? WHERE jid = ?", arguments: [Self.now, chatJid])
+            try db.execute(sql: """
+                UPDATE chat SET unreadCount = 0, stateAt = ?, readThrough = MAX(COALESCE(readThrough, 0), ?) WHERE jid = ?
+                """, arguments: [Self.now, r.timestamp, chatJid])
             cs.chatRead(chatJid)
             return
         case .retry, .other:
@@ -1264,10 +1269,14 @@ public actor IngestActor {
             let jid = canon(jid)
             try ensureChat(db, jid)
             try db.execute(sql: "UPDATE chat SET archived = ?, stateAt = ? WHERE jid = ?", arguments: [archived, Self.now, jid])
-        case .markRead(let jid, let read):
+        case .markRead(let jid, let read, let readThrough):
             let jid = canon(jid)
             if read {
-                try db.execute(sql: "UPDATE chat SET unreadCount = 0, markedUnread = 0, stateAt = ? WHERE jid = ?", arguments: [Self.now, jid])
+                try db.execute(sql: """
+                    UPDATE chat SET unreadCount = 0, markedUnread = 0, stateAt = ?,
+                        readThrough = CASE WHEN ? IS NULL THEN readThrough ELSE MAX(COALESCE(readThrough, 0), ?) END
+                    WHERE jid = ?
+                    """, arguments: [Self.now, readThrough, readThrough, jid])
                 cs.chatRead(jid)
             } else {
                 try db.execute(sql: "UPDATE chat SET markedUnread = 1, stateAt = ? WHERE jid = ?", arguments: [Self.now, jid])
@@ -1456,10 +1465,12 @@ public actor IngestActor {
                     """, arguments: [pn, lid])
                 for id in dupIds { try reconcileDuplicate(id, from: lid, into: pn, db) }
                 let lidStateAt = try Int64.fetchOne(db, sql: "SELECT stateAt FROM chat WHERE jid = ?", arguments: [lid])
+                let lidReadThrough = try Int64.fetchOne(db, sql: "SELECT readThrough FROM chat WHERE jid = ?", arguments: [lid])
                 try db.execute(sql: """
                     UPDATE chat SET
                         name = COALESCE(name, ?),
                         stateAt = CASE WHEN ? IS NULL THEN stateAt ELSE MAX(COALESCE(stateAt, 0), ?) END,
+                        readThrough = CASE WHEN ? IS NULL THEN readThrough ELSE MAX(COALESCE(readThrough, 0), ?) END,
                         unreadCount = unreadCount + ?,
                         markedUnread = markedUnread OR ?,
                         pinnedAt = COALESCE(pinnedAt, ?),
@@ -1468,7 +1479,7 @@ public actor IngestActor {
                         avatarCheckedAt = CASE WHEN hasAvatar THEN avatarCheckedAt ELSE NULL END,
                         lastActivityAt = MAX(COALESCE(lastActivityAt, 0), COALESCE(?, 0))
                     WHERE jid = ?
-                    """, arguments: [lidChat.name, lidStateAt, lidStateAt, max(0, lidChat.unreadCount - overlap), lidChat.markedUnread, lidChat.pinnedAt,
+                    """, arguments: [lidChat.name, lidStateAt, lidStateAt, lidReadThrough, lidReadThrough, max(0, lidChat.unreadCount - overlap), lidChat.markedUnread, lidChat.pinnedAt,
                                      lidChat.mutedUntil, pnChat.archived && lidChat.archived,
                                      lidChat.lastActivityAt, pn])
                 // Duplicates (same id under both JIDs), now reconciled into the PN copy, stay behind

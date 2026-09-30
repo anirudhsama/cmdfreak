@@ -356,8 +356,14 @@ pub enum BridgeChatAction {
     Pin { chat_jid: String, pinned_at: Option<i64> },
     Mute { chat_jid: String, muted_until: Option<i64> },
     Archive { chat_jid: String, archived: bool },
-    /// `read == false` means "marked unread".
-    MarkRead { chat_jid: String, read: bool },
+    /// `read == false` means "marked unread". A read covers messages up to `read_through` (unix
+    /// seconds; the synced message range, else the action time), including ones not here yet.
+    MarkRead {
+        chat_jid: String,
+        read: bool,
+        #[uniffi(default)]
+        read_through: Option<i64>,
+    },
     /// Deletes messages at or before `cutoff` (unix seconds; the synced message range, else the
     /// action time) and the chat itself when nothing newer remains. `None`: everything.
     Delete {

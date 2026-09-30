@@ -154,9 +154,13 @@ pub fn import_capture(shared: &Shared, dir: &str) -> R<()> {
                 chat_jid,
                 archived: action.get("archived").and_then(Value::as_bool).unwrap_or(false),
             }),
-            "MarkChatAsReadUpdate" => chat().map(|chat_jid| BridgeChatAction::MarkRead {
-                chat_jid,
-                read: action.get("read").and_then(Value::as_bool).unwrap_or(true),
+            "MarkChatAsReadUpdate" => chat().map(|chat_jid| {
+                let read = action.get("read").and_then(Value::as_bool).unwrap_or(true);
+                BridgeChatAction::MarkRead {
+                    chat_jid,
+                    read,
+                    read_through: read.then(|| json_cutoff(action, &body["timestamp"])),
+                }
             }),
             "DeleteChatUpdate" => chat().map(|chat_jid| BridgeChatAction::Delete {
                 chat_jid,

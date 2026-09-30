@@ -240,10 +240,14 @@ pub async fn map_event(ctx: &MapCtx<'_>, event: &Event) -> Vec<BridgeEvent> {
             chat_jid: canon.resolve(client, &a.jid).await.to_string(),
             archived: a.action.archived.unwrap_or(false),
         })),
-        Event::MarkChatAsReadUpdate(m) => out.push(action(BridgeChatAction::MarkRead {
-            chat_jid: canon.resolve(client, &m.jid).await.to_string(),
-            read: m.action.read.unwrap_or(true),
-        })),
+        Event::MarkChatAsReadUpdate(m) => {
+            let read = m.action.read.unwrap_or(true);
+            out.push(action(BridgeChatAction::MarkRead {
+                chat_jid: canon.resolve(client, &m.jid).await.to_string(),
+                read,
+                read_through: read.then(|| range_cutoff(m.action.message_range.as_option(), m.timestamp.timestamp())),
+            }))
+        }
         Event::DeleteChatUpdate(d) => out.push(action(BridgeChatAction::Delete {
             chat_jid: canon.resolve(client, &d.jid).await.to_string(),
             cutoff: Some(range_cutoff(d.action.message_range.as_option(), d.timestamp.timestamp())),
