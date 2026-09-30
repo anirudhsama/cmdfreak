@@ -197,7 +197,12 @@ pub async fn map_event(ctx: &MapCtx<'_>, event: &Event) -> Vec<BridgeEvent> {
             let joined = Some(g.timestamp.timestamp());
             let change = match &*g.action {
                 GroupNotificationAction::Subject { subject, .. } => Some((Some(subject.clone()), false, None)),
-                GroupNotificationAction::Create { .. } => Some((None, true, joined)),
+                // A community's own `<group>` carries `<parent>`: not a chat to list.
+                GroupNotificationAction::Create { raw } => {
+                    let community =
+                        raw.get_optional_child("group").is_some_and(|g| g.get_optional_child("parent").is_some());
+                    Some((None, true, if community { None } else { joined }))
+                }
                 GroupNotificationAction::Add { participants, .. } => {
                     let ours = participants
                         .iter()
@@ -216,6 +221,7 @@ pub async fn map_event(ctx: &MapCtx<'_>, event: &Event) -> Vec<BridgeEvent> {
                         participants: vec![],
                         membership_changed,
                         joined_at,
+                        is_community: false,
                     },
                 });
             }

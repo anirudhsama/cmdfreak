@@ -398,10 +398,15 @@ public actor IngestActor {
         }
     }
 
-    /// Drops parked mutations whose target never arrived.
-    public func prunePendingMutations(olderThan cutoff: Int64) throws {
+    /// Drops parked mutations whose target never arrived. Read markers are the only record of a
+    /// read on another device, and their message can still come after a long offline spell, so
+    /// they have their own, longer cutoff.
+    public func prunePendingMutations(olderThan cutoff: Int64, readMarkersOlderThan markerCutoff: Int64) throws {
         try perform { db, _ in
-            try db.execute(sql: "DELETE FROM pending_mutation WHERE createdAt < ?", arguments: [cutoff])
+            try db.execute(sql: """
+                DELETE FROM pending_mutation
+                WHERE createdAt < CASE WHEN payload LIKE '{"readElsewhere"%' THEN ? ELSE ? END
+                """, arguments: [markerCutoff, cutoff])
             self.pendingCount = try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM pending_mutation") ?? 0
         }
     }
@@ -1363,7 +1368,12 @@ public actor IngestActor {
                 participantCount = CASE WHEN ? IS NOT NULL THEN ? WHEN ? THEN NULL ELSE participantCount END
             WHERE jid = ?
             """, arguments: [g.subject.nonEmpty, count, count, stale, g.jid])
-        if let joinedAt = g.joinedAt {
+        if g.isCommunity {
+            // A community itself is not a chat: unlisted, even if a join listed it first.
+            try db.execute(sql: """
+                UPDATE chat SET lastActivityAt = NULL WHERE jid = ? AND NOT EXISTS (SELECT 1 FROM message WHERE chatJid = ?)
+                """, arguments: [g.jid, g.jid])
+        } else if let joinedAt = g.joinedAt {
             // Listed from the join on, before anyone writes in it.
             try db.execute(sql: "UPDATE chat SET lastActivityAt = MAX(COALESCE(lastActivityAt, 0), ?) WHERE jid = ?",
                            arguments: [joinedAt, g.jid])
@@ -1477,26 +1487,29 @@ public actor IngestActor {
         // Chat and its messages
         if let lidChat = try ChatRecord.fetchOne(db, key: lid) {
             if let pnChat = try ChatRecord.fetchOne(db, key: pn) {
-                // Messages present under both JIDs are counted in both unread windows; count once.
-                let overlap = try Int.fetchOne(db, sql: """
-                    SELECT COUNT(*) FROM
-                        (SELECT id FROM message WHERE chatJid = ? AND fromMe = 0 AND kind != 'system' ORDER BY sortKey DESC LIMIT ?) l
-                    JOIN
-                        (SELECT id FROM message WHERE chatJid = ? AND fromMe = 0 AND kind != 'system' ORDER BY sortKey DESC LIMIT ?) p
-                    USING (id)
-                    """, arguments: [lid, lidChat.unreadCount, pn, pnChat.unreadCount]) ?? 0
+                // Unread after the merge: both unread windows, a message under both JIDs counted once,
+                // less what the merged read boundary covers.
+                let boundary = try Int64.fetchOne(db, sql: "SELECT MAX(readThrough) FROM chat WHERE jid IN (?, ?)", arguments: [lid, pn])
+                let merged = try Int.fetchOne(db, sql: """
+                    SELECT COUNT(DISTINCT id) FROM (
+                        SELECT * FROM (SELECT id, timestamp FROM message WHERE chatJid = ? AND fromMe = 0 AND kind != 'system'
+                                       ORDER BY sortKey DESC LIMIT ?)
+                        UNION ALL
+                        SELECT * FROM (SELECT id, timestamp FROM message WHERE chatJid = ? AND fromMe = 0 AND kind != 'system'
+                                       ORDER BY sortKey DESC LIMIT ?))
+                    WHERE ? IS NULL OR timestamp > ?
+                    """, arguments: [lid, lidChat.unreadCount, pn, pnChat.unreadCount, boundary, boundary]) ?? 0
                 let dupIds = try String.fetchAll(db, sql: """
                     SELECT l.id FROM message l JOIN message p ON p.chatJid = ? AND p.id = l.id WHERE l.chatJid = ?
                     """, arguments: [pn, lid])
                 for id in dupIds { try reconcileDuplicate(id, from: lid, into: pn, db) }
                 let lidStateAt = try Int64.fetchOne(db, sql: "SELECT stateAt FROM chat WHERE jid = ?", arguments: [lid])
-                let lidReadThrough = try Int64.fetchOne(db, sql: "SELECT readThrough FROM chat WHERE jid = ?", arguments: [lid])
                 try db.execute(sql: """
                     UPDATE chat SET
                         name = COALESCE(name, ?),
                         stateAt = CASE WHEN ? IS NULL THEN stateAt ELSE MAX(COALESCE(stateAt, 0), ?) END,
-                        readThrough = CASE WHEN ? IS NULL THEN readThrough ELSE MAX(COALESCE(readThrough, 0), ?) END,
-                        unreadCount = unreadCount + ?,
+                        readThrough = ?,
+                        unreadCount = ?,
                         markedUnread = markedUnread OR ?,
                         pinnedAt = COALESCE(pinnedAt, ?),
                         mutedUntil = COALESCE(mutedUntil, ?),
@@ -1504,7 +1517,7 @@ public actor IngestActor {
                         avatarCheckedAt = CASE WHEN hasAvatar THEN avatarCheckedAt ELSE NULL END,
                         lastActivityAt = MAX(COALESCE(lastActivityAt, 0), COALESCE(?, 0))
                     WHERE jid = ?
-                    """, arguments: [lidChat.name, lidStateAt, lidStateAt, lidReadThrough, lidReadThrough, max(0, lidChat.unreadCount - overlap), lidChat.markedUnread, lidChat.pinnedAt,
+                    """, arguments: [lidChat.name, lidStateAt, lidStateAt, boundary, merged, lidChat.markedUnread, lidChat.pinnedAt,
                                      lidChat.mutedUntil, pnChat.archived && lidChat.archived,
                                      lidChat.lastActivityAt, pn])
                 // Duplicates (same id under both JIDs), now reconciled into the PN copy, stay behind
@@ -1512,12 +1525,6 @@ public actor IngestActor {
                 try db.execute(sql: "UPDATE OR IGNORE message SET chatJid = ? WHERE chatJid = ?", arguments: [pn, lid])
                 try db.execute(sql: "UPDATE OR IGNORE chat_tag SET chatJid = ? WHERE chatJid = ?", arguments: [pn, lid])
                 try db.execute(sql: "DELETE FROM chat WHERE jid = ?", arguments: [lid])
-                // Messages the LID side counted may fall under the merged read boundary.
-                try db.execute(sql: """
-                    UPDATE chat SET unreadCount = MIN(unreadCount, (SELECT COUNT(*) FROM message
-                        WHERE chatJid = chat.jid AND fromMe = 0 AND kind != 'system' AND timestamp > chat.readThrough))
-                    WHERE jid = ? AND readThrough IS NOT NULL
-                    """, arguments: [pn])
             } else {
                 // ON UPDATE CASCADE carries messages, media, reactions, votes and tags along.
                 try db.execute(sql: "UPDATE chat SET jid = ? WHERE jid = ?", arguments: [pn, lid])

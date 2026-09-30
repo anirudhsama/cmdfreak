@@ -769,6 +769,7 @@ impl WaBridge {
                     match r {
                         GroupOverviewResult::Found(o) => out.push(BridgeGroup {
                             jid: o.id.to_string(),
+                            is_community: matches!(o.hierarchy, whatsapp_rust::features::GroupHierarchy::Community),
                             subject: o.subject,
                             participant_count: o.participant_count.unwrap_or(0),
                             participants: vec![],
@@ -783,6 +784,7 @@ impl WaBridge {
                                 participants: vec![],
                                 membership_changed: false,
                                 joined_at: None,
+                                is_community: false,
                             })
                         }
                         _ => {}
@@ -852,6 +854,7 @@ impl WaBridge {
                 participants,
                 membership_changed: false,
                 joined_at,
+                is_community: md.is_parent_group,
             })
         })
         .await

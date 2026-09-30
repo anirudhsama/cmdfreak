@@ -92,6 +92,9 @@ pub struct BridgeGroup {
     /// shows in the list before its first message.
     #[uniffi(default)]
     pub joined_at: Option<i64>,
+    /// A community itself (its parent group): not a chat, never listed.
+    #[uniffi(default = false)]
+    pub is_community: bool,
 }
 
 /// Whether a user is a WhatsApp Business account, from `check_business`.

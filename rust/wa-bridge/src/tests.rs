@@ -809,6 +809,10 @@ fn group_create_and_own_add_are_joins() {
         group.joined_at
     };
     assert_eq!(joined(GroupNotificationAction::Create { raw: NodeBuilder::new("create").build() }), Some(1_700_000_500));
+    let community = NodeBuilder::new("create")
+        .children([NodeBuilder::new("group").children([NodeBuilder::new("parent").build()]).build()])
+        .build();
+    assert_eq!(joined(GroupNotificationAction::Create { raw: community }), None);
     let add = |who: Jid| GroupNotificationAction::Add { participants: vec![member(who)], reason: None };
     assert_eq!(joined(add(Jid::lid(ME_LID))), Some(1_700_000_500));
     assert_eq!(joined(add(Jid::lid("99999999999999"))), None);

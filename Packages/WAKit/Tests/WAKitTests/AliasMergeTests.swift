@@ -52,6 +52,19 @@ import Testing
         #expect(try db.count("SELECT COUNT(*) FROM message WHERE chatJid = ?", [F.aliceLID]) == 0)
     }
 
+    @Test func mergeDropsUnreadTheReadBoundaryCovers() async throws {
+        let db = try F.tempDB()
+        let ingest = try IngestActor(database: db)
+        // The PN chat is read through 100 and holds a read message at 200.
+        try await ingest.apply([
+            F.live(F.message("X", chat: F.alicePN, ts: 200)),
+            .chatAction(action: .markRead(chatJid: F.alicePN, read: true, readThrough: 100)),
+            F.live(F.message("OLD", chat: F.aliceLID, ts: 50), F.message("NEW", chat: F.aliceLID, ts: 300)),
+        ])
+        try await ingest.apply([F.history(aliases: [BridgeJidAlias(lid: F.aliceLID, pn: F.alicePN)])])
+        #expect(try db.chat(F.alicePN)?.unreadCount == 1)  // NEW only
+    }
+
     @Test func duplicatesKeepStateFromTheLidCopy() async throws {
         let db = try F.tempDB()
         let ingest = try IngestActor(database: db)
