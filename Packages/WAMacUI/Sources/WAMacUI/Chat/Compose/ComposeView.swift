@@ -299,6 +299,11 @@ final class ComposeView: NSView, NSTextViewDelegate {
         onTyping?()
     }
 
+    /// Chat isn't prose: skip the system "Capitalize words automatically" pass, keep spelling fixes.
+    func textView(_ view: NSTextView, willCheckTextIn range: NSRange, options: [NSSpellChecker.OptionKey: Any], types checkingTypes: UnsafeMutablePointer<NSTextCheckingTypes>) -> [NSSpellChecker.OptionKey: Any] {
+        options.merging([.automaticCapitalizationEnabledKey: false]) { _, new in new }
+    }
+
     private func contentDidChange() {
         updateSendEnabled()
         updateHeight()
