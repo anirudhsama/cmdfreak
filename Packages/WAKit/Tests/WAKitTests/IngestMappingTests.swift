@@ -262,6 +262,26 @@ import Testing
         #expect(try db.chat(jid)?.lastActivityAt == 1_700_000_500)
     }
 
+    @Test func joinedGroupsWithoutAChatAreAddedOnce() async throws {
+        let db = try F.tempDB()
+        let ingest = try IngestActor(database: db)
+        let bridge = FakeBridge()
+        let missing = "120363000000000078@g.us"
+        try await ingest.apply([F.history(chats: [F.chat(F.group, name: "Named", lastActivity: 1_700_000_000)])])
+        bridge.participating = [F.group, missing]
+        bridge.metadataJoinedAt = 1_700_000_900
+        let groups = GroupService(bridge: bridge, ingest: ingest, batchInterval: .zero)
+        await groups.addMissingJoinedGroups()
+        #expect(try db.chat(missing)?.name == "Meta \(missing)")
+        #expect(try db.chat(missing)?.lastActivityAt == 1_700_000_900)
+        // Known groups are left as they are.
+        #expect(try db.chat(F.group)?.lastActivityAt == 1_700_000_000)
+
+        bridge.participating.append("120363000000000079@g.us")
+        await groups.addMissingJoinedGroups()
+        #expect(try db.chat("120363000000000079@g.us") == nil)
+    }
+
     @Test func ownGroupSendsCarryOurParticipantAndOldRowsAreBackfilled() async throws {
         let db = try F.tempDB()
         let ingest = try IngestActor(database: db)

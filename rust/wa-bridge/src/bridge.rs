@@ -794,6 +794,22 @@ impl WaBridge {
         .await
     }
 
+    /// Every group we are a member of. Communities themselves are not chats and are left out.
+    pub async fn list_participating_groups(&self) -> R<Vec<String>> {
+        use whatsapp_rust::features::GroupHierarchy;
+        let shared = self.shared.clone();
+        self.run(async move {
+            let client = shared.require_client()?;
+            let groups = client.groups().list_participating().await.map_err(net)?;
+            Ok(groups
+                .into_iter()
+                .filter(|g| !matches!(g.hierarchy, GroupHierarchy::Community))
+                .map(|g| g.id.to_string())
+                .collect())
+        })
+        .await
+    }
+
     pub async fn fetch_group_metadata(&self, jid: String) -> R<BridgeGroup> {
         let shared = self.shared.clone();
         self.run(async move {
@@ -820,13 +836,22 @@ impl WaBridge {
             if !aliases.is_empty() {
                 shared.emit(vec![BridgeEvent::JidAliases { aliases }]);
             }
+            // Our own join time, else the group's creation.
+            let own = |j: &Option<Jid>| j.as_ref().is_some_and(|j| shared.canon.is_own(j));
+            let joined_at = md
+                .participants
+                .iter()
+                .find(|p| shared.canon.is_own(&p.jid) || own(&p.phone_number) || own(&p.lid))
+                .and_then(|p| p.details.as_ref()?.join_time)
+                .or(md.creation_time)
+                .map(|t| t as i64);
             Ok(BridgeGroup {
                 jid: md.id.to_string(),
                 subject: md.subject,
                 participant_count: participants.len() as u32,
                 participants,
                 membership_changed: false,
-                joined_at: None,
+                joined_at,
             })
         })
         .await

@@ -460,6 +460,9 @@ public final class WAClient: Sendable {
                 if !staleGroups.isEmpty || batch.events.contains(where: \.completesSyncPhase) {
                     Task { await groups.fillMissing(stale: staleGroups) }
                 }
+                if batch.events.contains(where: { if case .offlineSyncCompleted = $0 { true } else { false } }) {
+                    Task { await groups.addMissingJoinedGroups() }
+                }
                 if batch.events.contains(where: { if case .messages = $0 { true } else { $0.completesSyncPhase } }) {
                     Task { await businesses.checkPending() }
                 }

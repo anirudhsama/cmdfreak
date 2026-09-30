@@ -14,6 +14,7 @@ public actor GroupService {
     private var filling = false
     private var rerun = false
     private var attempted: Set<String> = []
+    private var reconciledJoins = false
 
     public init(bridge: any WaBridgeProtocol, ingest: IngestActor, batchInterval: Duration = .seconds(2)) {
         self.bridge = bridge
@@ -56,6 +57,30 @@ public actor GroupService {
             }
         } catch {
             WAKit.log.error("group overviews failed: \(error)")
+        }
+    }
+
+    /// Adds the groups we are in but have no chat for: a join whose notification was lost (or
+    /// predates handling it) is otherwise invisible until someone writes. Once per session; each
+    /// is listed at our join time, so an old, quiet group sorts into history rather than on top.
+    public func addMissingJoinedGroups() async {
+        guard !reconciledJoins else { return }
+        do {
+            let joined = try await bridge.listParticipatingGroups()
+            let known = try await ingest.database.reader.read { db in
+                try Set(String.fetchAll(db, sql: "SELECT jid FROM chat WHERE kind = 'group'"))
+            }
+            reconciledJoins = true
+            for (i, jid) in joined.filter({ !known.contains($0) }).enumerated() {
+                if i > 0 { try await Task.sleep(for: batchInterval) }
+                do {
+                    try await loadMetadata(jid: jid)
+                } catch {
+                    WAKit.log.error("joined group \(jid, privacy: .private) failed: \(error)")
+                }
+            }
+        } catch {
+            WAKit.log.error("joined groups check failed: \(error)")
         }
     }
 
