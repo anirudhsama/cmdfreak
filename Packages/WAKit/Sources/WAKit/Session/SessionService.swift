@@ -1,6 +1,8 @@
 import AppKit
 import Foundation
+import Network
 import Observation
+import Synchronization
 
 /// Session-relevant slice of a bridge event, small enough to hop to the main actor.
 public enum SessionEvent: Sendable, Hashable {
@@ -25,7 +27,7 @@ public enum SessionEvent: Sendable, Hashable {
 }
 
 /// Connection and pairing state for the UI. Reconnection belongs to the Rust library; this only
-/// nudges it on system wake.
+/// nudges it on system wake and network changes, and keeps App Nap from stalling its keepalive.
 @MainActor @Observable
 public final class SessionService {
     public enum Pairing: Hashable, Sendable {
@@ -67,6 +69,8 @@ public final class SessionService {
 
     @ObservationIgnored private let bridge: (any WaBridgeProtocol)?
     @ObservationIgnored private var wakeObserver: (any NSObjectProtocol)?
+    @ObservationIgnored private let pathMonitor = NWPathMonitor()
+    @ObservationIgnored private let activity: any NSObjectProtocol
 
     public init(bridge: (any WaBridgeProtocol)?, ownJid: String?) {
         self.bridge = bridge
@@ -77,10 +81,30 @@ public final class SessionService {
         ) { [bridge] _ in
             bridge?.nudgeReconnect()
         }
+        // App Nap throttles a hidden app's timers, keepalive pings included, so a socket that died
+        // under a network switch went unnoticed for many minutes and no messages arrived.
+        activity = ProcessInfo.processInfo.beginActivity(
+            options: .userInitiatedAllowingIdleSystemSleep, reason: "WhatsApp connection keepalive")
+        // A new network (e.g. hotspot to Wi-Fi) can strand the socket on an address that no longer
+        // exists without the socket erroring for a long while: redial on the new one.
+        // Compared with the last connected route, so an offline gap between networks still counts.
+        let lastRoute = Mutex<PathRoute?>(nil)
+        pathMonitor.pathUpdateHandler = { [bridge] path in
+            guard path.status == .satisfied else { return }
+            let route = PathRoute(path)
+            let changed = lastRoute.withLock { last in
+                defer { last = route }
+                return last != nil && last != route
+            }
+            if changed { bridge?.nudgeReconnect() }
+        }
+        pathMonitor.start(queue: DispatchQueue(label: "SessionService.path"))
     }
 
     isolated deinit {
         if let wakeObserver { NSWorkspace.shared.notificationCenter.removeObserver(wakeObserver) }
+        pathMonitor.cancel()
+        ProcessInfo.processInfo.endActivity(activity)
     }
 
     public func handle(_ events: [SessionEvent]) {
@@ -131,5 +155,22 @@ public final class SessionService {
         case .offlineSyncCompleted:
             if case .syncing(let p) = state, p.chunks > 0 { state = .ready }
         }
+    }
+}
+
+/// What a network path routes through; DNS and proxy updates leave it unchanged.
+private struct PathRoute: Equatable, Sendable {
+    let interfaces: [String]
+    let gateways: [String]
+    let ipv4: Bool
+    let ipv6: Bool
+    let expensive: Bool
+
+    init(_ path: NWPath) {
+        interfaces = path.availableInterfaces.map(\.name)
+        gateways = path.gateways.map { "\($0)" }
+        ipv4 = path.supportsIPv4
+        ipv6 = path.supportsIPv6
+        expensive = path.isExpensive
     }
 }
