@@ -45,6 +45,8 @@ const FLUSH_EVENTS: usize = 200;
 /// The raw bus handler never drops, so this only bounds the library's own closure mailbox
 /// (unused by the bridge) should one ever be registered.
 const ORDERED_CAPACITY: usize = 8192;
+/// Ids per `<receipt>`: the library splits larger calls at the same size.
+const RECEIPT_BATCH: usize = 256;
 
 pub(crate) enum Input {
     Lib(Arc<Event>),
@@ -704,7 +706,9 @@ impl WaBridge {
     // Receipts, presence
 
     /// Sends read receipts, one per sender (groups need the sender as the receipt participant).
-    pub async fn mark_read(&self, chat: String, messages: Vec<BridgeMessageKey>) -> R<()> {
+    /// Sends read receipts, one `<receipt>` per sender and at most `RECEIPT_BATCH` ids, and returns
+    /// what went out: each batch counts once the server acks it.
+    pub async fn mark_read(&self, chat: String, messages: Vec<BridgeMessageKey>) -> R<Vec<BridgeReceiptBatch>> {
         let shared = self.shared.clone();
         self.run(async move {
             let client = shared.require_client()?;
@@ -716,12 +720,17 @@ impl WaBridge {
                     None => groups.push((m.participant, vec![m.id])),
                 }
             }
+            let mut sent = Vec::new();
             for (participant, ids) in groups {
                 let sender = participant.as_deref().map(parse_jid).transpose()?;
-                let refs: Vec<&str> = ids.iter().map(String::as_str).collect();
-                client.mark_as_read(&chat, sender.as_ref(), &refs).await.map_err(net)?;
+                // The library's own per-stanza cap: one call is one stanza, so we know its ack id.
+                for batch in ids.chunks(RECEIPT_BATCH) {
+                    let refs: Vec<&str> = batch.iter().map(String::as_str).collect();
+                    client.mark_as_read(&chat, sender.as_ref(), &refs).await.map_err(net)?;
+                    sent.push(BridgeReceiptBatch { ack_id: batch[0].clone(), message_ids: batch.to_vec() });
+                }
             }
-            Ok(())
+            Ok(sent)
         })
         .await
     }

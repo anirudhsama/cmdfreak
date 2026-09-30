@@ -250,17 +250,29 @@ import Testing
         bridge.markReadFails = false
         await client.openChat(F.bob)
         #expect(bridge.calls.withLock { $0.markRead.count } == 1)
-        await deliver(sink, [.connection(state: .connected)])
-        var tries = 0
-        while try db.count("SELECT COUNT(*) FROM read_outbox") > 0, tries < 200 {
-            tries += 1
-            try await Task.sleep(for: .milliseconds(10))
+        func waitFor(_ condition: () throws -> Bool) async throws {
+            var tries = 0
+            while try !condition(), tries < 200 {
+                tries += 1
+                try await Task.sleep(for: .milliseconds(10))
+            }
         }
-        #expect(try db.count("SELECT COUNT(*) FROM read_outbox") == 0)
-        let calls = bridge.calls.withLock { $0.markRead }
+        await deliver(sink, [.connection(state: .connected)])
+        // Sent, but owed until the server acks the receipt.
+        try await waitFor { try db.count("SELECT COUNT(*) FROM read_outbox WHERE ackId = '1'") == 2 }
+        var calls = bridge.calls.withLock { $0.markRead }
         #expect(calls.count == 2)
         #expect(calls.last?.0 == F.bob)
         #expect(calls.last?.1.map(\.id) == ["1", "2"])
+
+        // The connection died before the ack: the next one sends them again, and the ack clears them.
+        await deliver(sink, [.connection(state: .connected)])
+        try await waitFor { bridge.calls.withLock { $0.markRead.count } == 3 }
+        calls = bridge.calls.withLock { $0.markRead }
+        #expect(calls.last?.1.map(\.id) == ["1", "2"])
+        await deliver(sink, [.receiptAck(ackId: "1")])
+        try await waitFor { try db.count("SELECT COUNT(*) FROM read_outbox") == 0 }
+        #expect(try db.count("SELECT COUNT(*) FROM read_outbox") == 0)
     }
 
     @MainActor @Test func logoutForgetsOwnIdentity() async throws {

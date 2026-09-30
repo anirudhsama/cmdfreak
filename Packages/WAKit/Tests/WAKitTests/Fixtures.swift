@@ -142,9 +142,11 @@ final class FakeBridge: WaBridgeProtocol, @unchecked Sendable {
     func logout() async throws {}
     func markChatRead(chat: String, read: Bool) async throws { calls.withLock { $0.markChatRead.append((chat, read)) } }
     var markReadFails = false
-    func markRead(chat: String, messages: [BridgeMessageKey]) async throws {
+    func markRead(chat: String, messages: [BridgeMessageKey]) async throws -> [BridgeReceiptBatch] {
         calls.withLock { $0.markRead.append((chat, messages)) }
         if markReadFails { throw BridgeError.Network("offline") }
+        let ids = messages.filter { !$0.fromMe }.map(\.id)
+        return ids.isEmpty ? [] : [BridgeReceiptBatch(ackId: ids[0], messageIds: ids)]
     }
     func muteChat(chat: String, until: Int64?) async throws {}
     func nudgeReconnect() { calls.withLock { $0.nudges += 1 } }

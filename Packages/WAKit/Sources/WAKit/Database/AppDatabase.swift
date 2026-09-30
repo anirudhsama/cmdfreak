@@ -372,6 +372,13 @@ extension AppDatabase {
                 """)
         }
 
+        // A read receipt written to the socket can die with the connection: an outbox row now waits
+        // for the server's ack of the `<receipt>` that carried it (`ackId`, that stanza's first id).
+        m.registerMigration("v14") { db in
+            try db.alter(table: "read_outbox") { t in t.add(column: "ackId", .text) }
+            try db.create(index: "read_outbox_on_ackId", on: "read_outbox", columns: ["ackId"])
+        }
+
         return m
     }
 

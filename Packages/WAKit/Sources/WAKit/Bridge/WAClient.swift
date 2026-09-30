@@ -269,9 +269,10 @@ actor SendRecovery {
 }
 
 /// Sends the read receipts ingest queued in `read_outbox`, one bridge call per chat. A chat's
-/// receipts leave the outbox only once the bridge sent them; a failed send (offline, a dropped
-/// connection) stays queued for the next flush: the next read, or a reconnect. One flush at a time;
-/// calls during one run another after it.
+/// receipts leave the outbox only once the server acked them: a failed send (offline) stays queued
+/// for the next flush, the next read or a reconnect, and one sent but never acked (the connection
+/// died under it) goes again after the reconnect. One flush at a time; calls during one run
+/// another after it.
 actor ReadReceiptSender {
     private let ingest: IngestActor
     private let bridge: any WaBridgeProtocol
@@ -322,8 +323,8 @@ actor ReadReceiptSender {
         }
         for (chat, keys) in pending {
             do {
-                try await bridge.markRead(chat: chat, messages: keys)
-                try await ingest.readsSent(chatJid: chat, ids: keys.map(\.id))
+                let batches = try await bridge.markRead(chat: chat, messages: keys)
+                try await ingest.readsSent(chatJid: chat, batches: batches)
             } catch {
                 WAKit.log.error("markRead \(chat, privacy: .private) failed: \(error)")
             }
@@ -452,7 +453,10 @@ public final class WAClient: Sendable {
                 if batch.events.contains(where: { if case .connection(.connected) = $0 { true } else { false } }) {
                     await retrier.scheduleSweep()
                     Task { await recovery.run(reconnected: true) }
-                    Task { await receipts.flush() }
+                    Task {
+                        try? await ingest.resendUnackedReads()
+                        await receipts.flush()
+                    }
                 }
                 let staleGroups = batch.events.compactMap { event -> String? in
                     if case .group(let g) = event, g.membershipChanged { g.jid } else { nil }
