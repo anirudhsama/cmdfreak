@@ -170,6 +170,7 @@ pub fn import_capture(shared: &Shared, dir: &str) -> R<()> {
                     chat_jid,
                     read,
                     read_through: if read { crate::live::range_last(json_range(action).as_ref()) } else { None },
+                    read_at: read.then(|| ts_of(&body["timestamp"])),
                 }
             }),
             "DeleteChatUpdate" => chat().map(|chat_jid| BridgeChatAction::Delete {

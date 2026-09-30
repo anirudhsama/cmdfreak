@@ -365,11 +365,15 @@ pub enum BridgeChatAction {
     Archive { chat_jid: String, archived: bool },
     /// `read == false` means "marked unread". A read covers messages up to `read_through` (unix
     /// seconds, from the synced message range; None without one), including ones not here yet.
+    /// `read_at` is when it was done: without a range, it bounds the messages already here that
+    /// it read. Both None for our own reads, which cover everything.
     MarkRead {
         chat_jid: String,
         read: bool,
         #[uniffi(default)]
         read_through: Option<i64>,
+        #[uniffi(default)]
+        read_at: Option<i64>,
     },
     /// Deletes messages at or before `cutoff` (unix seconds; the synced message range, else the
     /// action time) and the chat itself when nothing newer remains. `None`: everything.

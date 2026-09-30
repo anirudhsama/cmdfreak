@@ -265,6 +265,7 @@ pub async fn map_event(ctx: &MapCtx<'_>, event: &Event) -> Vec<BridgeEvent> {
                 // Only a range the sender synced: our own mark-read carries none, and the action
                 // time would also cover messages still on their way to the phone.
                 read_through: if read { range_last(m.action.message_range.as_option()) } else { None },
+                read_at: read.then(|| m.timestamp.timestamp()),
             }))
         }
         Event::DeleteChatUpdate(d) => out.push(action(BridgeChatAction::Delete {

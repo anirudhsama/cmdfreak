@@ -55,10 +55,11 @@ import Testing
     @Test func mergeDropsUnreadTheReadBoundaryCovers() async throws {
         let db = try F.tempDB()
         let ingest = try IngestActor(database: db)
-        // The PN chat is read through 100 and holds a read message at 200.
+        // The PN chat is read through 100 and holds a message at 200 read by a receipt.
         try await ingest.apply([
-            F.live(F.message("X", chat: F.alicePN, ts: 200)),
             .chatAction(action: .markRead(chatJid: F.alicePN, read: true, readThrough: 100)),
+            F.live(F.message("X", chat: F.alicePN, ts: 200)),
+            F.receipt(["X"], chat: F.alicePN, kind: .readSelf, from: F.me),
             F.live(F.message("OLD", chat: F.aliceLID, ts: 50), F.message("NEW", chat: F.aliceLID, ts: 300)),
         ])
         try await ingest.apply([F.history(aliases: [BridgeJidAlias(lid: F.aliceLID, pn: F.alicePN)])])

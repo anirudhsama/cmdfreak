@@ -19,6 +19,6 @@ public enum NoticeEvent: Sendable, Hashable {
     case incoming(IncomingNotice)
     /// Read here or on another device, cleared or deleted: its delivered notifications are stale.
     case chatRead(String)
-    /// Deleted for everyone or for me.
+    /// Deleted for everyone or for me, or read elsewhere while newer messages stay unread.
     case messageRemoved(chatJid: String, messageId: String)
 }

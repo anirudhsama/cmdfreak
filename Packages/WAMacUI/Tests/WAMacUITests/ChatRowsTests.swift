@@ -119,5 +119,8 @@ enum Fx {
         rows.replace(with: Fx.page([Fx.item("a", ts: day), Fx.item("me", ts: day + 1, fromMe: true), Fx.item("b", ts: day + 2), Fx.item("c", ts: day + 3)]))
         rows.setUnread(count: 2)
         #expect(rows.rows == [.day(ChatRows.dayStart(day)), .message("a"), .message("me"), .unread, .message("b"), .message("c")])
+        // The oldest flagged message wins over "the newest N" (c was read elsewhere, a was not).
+        rows.setUnread(firstId: "a", count: 2)
+        #expect(rows.rows == [.day(ChatRows.dayStart(day)), .unread, .message("a"), .message("me"), .message("b"), .message("c")])
     }
 }

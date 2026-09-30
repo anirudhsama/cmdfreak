@@ -110,9 +110,16 @@ struct ChatRows: Sendable {
         rebuild()
     }
 
-    /// Marks the first of the newest `unreadCount` incoming messages so the separator can be shown.
-    mutating func setUnread(count: Int) {
+    /// Marks the oldest unread message so the separator can be shown: `firstId` when the window
+    /// holds it, else (older than the window, or a count that includes messages not stored) the
+    /// first of the newest `count` incoming messages.
+    mutating func setUnread(firstId: String? = nil, count: Int) {
         guard count > 0 else { unreadFirstId = nil; rebuild(); return }
+        if let firstId, messages.contains(where: { $0.id == firstId }) {
+            unreadFirstId = firstId
+            rebuild()
+            return
+        }
         var remaining = count
         var firstId: String?
         for item in messages.reversed() where !item.message.fromMe && item.message.kind != .system {
