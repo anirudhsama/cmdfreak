@@ -1,5 +1,6 @@
 uniffi::setup_scaffolding!();
 
+mod acks;
 mod bridge;
 mod canon;
 mod history;

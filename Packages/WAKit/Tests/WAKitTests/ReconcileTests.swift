@@ -159,22 +159,6 @@ import Testing
 
 /// `WAClient` wiring: durability of sink batches, receipts for the focused chat, logout.
 @Suite struct ClientDurabilityTests {
-    private func makeClient(_ db: AppDatabase, _ bridge: FakeBridge) async throws -> (WAClient, any EventSink) {
-        nonisolated(unsafe) var sink: (any EventSink)?
-        let client = try await WAClient(database: db) { s in sink = s; return bridge }
-        return (client, try #require(sink))
-    }
-
-    /// Calls the sink the way the bridge does: from a plain thread that may block.
-    @discardableResult
-    private func deliver(_ sink: any EventSink, _ events: [BridgeEvent]) async -> Bool {
-        await withCheckedContinuation { (c: CheckedContinuation<Bool, Never>) in
-            Thread.detachNewThread {
-                c.resume(returning: sink.onEvents(events: events))
-            }
-        }
-    }
-
     @Test func onEventsReportsAFailedSaveSoTheBridgeDoesNotAck() async throws {
         let db = try F.tempDB()
         let (client, sink) = try await makeClient(db, FakeBridge())
@@ -244,35 +228,28 @@ import Testing
         bridge.markReadFails = true
         await client.openChat(F.bob)
         #expect(try db.chat(F.bob)?.unreadCount == 0)
-        #expect(try db.count("SELECT COUNT(*) FROM read_outbox") == 2)
+        #expect(try db.count("SELECT COUNT(*) FROM outbox WHERE kind = 'receipt'") == 2)
 
         // Reopening owes nothing new, but the queued receipts still go out once connected.
         bridge.markReadFails = false
         await client.openChat(F.bob)
         #expect(bridge.calls.withLock { $0.markRead.count } == 1)
-        func waitFor(_ condition: () throws -> Bool) async throws {
-            var tries = 0
-            while try !condition(), tries < 200 {
-                tries += 1
-                try await Task.sleep(for: .milliseconds(10))
-            }
-        }
+
+        // Sent, but the connection died before the server acked them (the bridge call failed):
+        // still owed, and the next connection sends them again.
+        bridge.markReadFails = true
         await deliver(sink, [.connection(state: .connected)])
-        // Sent, but owed until the server acks the receipt.
-        try await waitFor { try db.count("SELECT COUNT(*) FROM read_outbox WHERE ackId = '1'") == 2 }
-        var calls = bridge.calls.withLock { $0.markRead }
-        #expect(calls.count == 2)
+        try await waitFor { bridge.calls.withLock { $0.markRead.count } == 2 }
+        #expect(try db.count("SELECT COUNT(*) FROM outbox WHERE kind = 'receipt'") == 2)
+
+        bridge.markReadFails = false
+        await deliver(sink, [.connection(state: .connected)])
+        try await waitFor { try db.count("SELECT COUNT(*) FROM outbox") == 0 }
+        let calls = bridge.calls.withLock { $0.markRead }
+        #expect(calls.count == 3)
         #expect(calls.last?.0 == F.bob)
         #expect(calls.last?.1.map(\.id) == ["1", "2"])
-
-        // The connection died before the ack: the next one sends them again, and the ack clears them.
-        await deliver(sink, [.connection(state: .connected)])
-        try await waitFor { bridge.calls.withLock { $0.markRead.count } == 3 }
-        calls = bridge.calls.withLock { $0.markRead }
-        #expect(calls.last?.1.map(\.id) == ["1", "2"])
-        await deliver(sink, [.receiptAck(ackId: "1")])
-        try await waitFor { try db.count("SELECT COUNT(*) FROM read_outbox") == 0 }
-        #expect(try db.count("SELECT COUNT(*) FROM read_outbox") == 0)
+        #expect(try db.count("SELECT COUNT(*) FROM outbox") == 0)
     }
 
     @MainActor @Test func logoutForgetsOwnIdentity() async throws {

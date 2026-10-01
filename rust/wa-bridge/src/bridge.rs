@@ -32,6 +32,7 @@ use whatsapp_rust::pair_code::PairCodeOptions;
 use whatsapp_rust::prelude::*;
 use whatsapp_rust::wacore_binary::JidExt;
 
+use crate::acks::{ACK_TIMEOUT, AckClass, AckWaiters};
 use crate::canon::Canon;
 use crate::history::{self, HistoryInput};
 use crate::live::{self, MapCtx};
@@ -67,6 +68,7 @@ pub(crate) struct Shared {
     pub canon: Canon,
     pub polls: PollCache,
     pub counters: Counters,
+    pub acks: AckWaiters,
     pub tx: mpsc::UnboundedSender<Input>,
     history_tx: mpsc::UnboundedSender<Arc<Event>>,
     client: RwLock<Option<Arc<Client>>>,
@@ -269,8 +271,23 @@ impl EventHandler for BusHandler {
         {
             return;
         }
-        if matches!(&*event, Event::LoggedOut(_)) {
-            spawn_logout_reset(&shared, self.generation);
+        match &*event {
+            Event::LoggedOut(_) => spawn_logout_reset(&shared, self.generation),
+            // Resolved here, ahead of mapping: a send call is waiting on it.
+            Event::ServerAck(a) => {
+                if let Some(class) = AckClass::parse(a.class.as_deref()) {
+                    shared.acks.resolve(class, &a.id, a.error.clone());
+                }
+            }
+            Event::Disconnected(_) => shared.acks.fail_all(),
+            // Deliberate redials (`nudge_reconnect`, 515) emit no `Disconnected`: a new session
+            // acks nothing from the old one either. Its offline drain starts now.
+            Event::Connected(_) => {
+                shared.acks.fail_all();
+                shared.acks.set_draining(true);
+            }
+            Event::OfflineSyncCompleted(_) => shared.acks.set_draining(false),
+            _ => {}
         }
         shared.counters.received.fetch_add(1, Ordering::Relaxed);
         if shared.tx.send(Input::Lib(event)).is_err() {
@@ -374,7 +391,23 @@ impl InboundDurabilityHook for DurabilityHook {
             .iter()
             .map(|m| (m.info.source.chat.to_string(), m.info.source.sender.to_string(), m.info.id.to_string()))
             .collect();
-        self.commit(&shared, keys, events).await
+        let result = self.commit(&shared, keys, events).await;
+        // Acked now, so the library sends their delivery receipts next: one per message live, and
+        // during the offline drain one per sender and 256 ids in the batch, under its first id.
+        if result.is_ok() {
+            let incoming = batch.iter().filter(|m| !m.info.source.is_from_me);
+            if shared.acks.draining() {
+                let mut seen: HashMap<(&Jid, &Jid), usize> = HashMap::new();
+                shared.acks.delivery_receipts_owed(incoming.filter_map(|m| {
+                    let n = seen.entry((&m.info.source.chat, &m.info.source.sender)).or_default();
+                    *n += 1;
+                    ((*n - 1) % RECEIPT_BATCH == 0).then_some(m.info.id.as_str())
+                }));
+            } else {
+                shared.acks.delivery_receipts_owed(incoming.map(|m| m.info.id.as_str()));
+            }
+        }
+        result
     }
 }
 
@@ -508,6 +541,7 @@ impl WaBridge {
             canon: Canon::default(),
             polls: PollCache::default(),
             counters: Counters::default(),
+            acks: AckWaiters::default(),
             tx,
             history_tx,
             client: RwLock::new(None),
@@ -580,6 +614,7 @@ impl WaBridge {
     /// offline window that plain `reconnect` adds.
     pub fn nudge_reconnect(&self) {
         if let Some(client) = self.shared.client() {
+            self.shared.acks.fail_all();
             self.rt.spawn(async move { client.reconnect_immediately().await });
         }
     }
@@ -659,14 +694,16 @@ impl WaBridge {
             .await
     }
 
-    /// Empty `emoji` removes our reaction.
+    /// Empty `emoji` removes our reaction. Returns once the server acked it (`Timeout` if it never
+    /// did: it may or may not have landed); likewise `edit_message` and `revoke_message`.
     pub async fn send_reaction(&self, target: BridgeMessageKey, emoji: String) -> R<()> {
         let shared = self.shared.clone();
         self.run(async move {
             let client = shared.require_client()?;
             let (chat, key) = wire_key(&client, &target).await?;
-            client.send_reaction(chat, key, &emoji).await.map_err(net)?;
-            Ok(())
+            let epoch = shared.acks.epoch();
+            let sent = client.send_reaction(chat, key, &emoji).await.map_err(net)?;
+            shared.acks.expect(AckClass::Message, &sent.message_id, epoch).wait(ACK_TIMEOUT).await
         })
         .await
     }
@@ -676,8 +713,10 @@ impl WaBridge {
         self.run(async move {
             let client = shared.require_client()?;
             let chat = wire_chat(&client, &target.chat_jid).await?;
-            client.edit_message(chat, target.id.clone(), wa::Message::text(text)).await.map_err(net)?;
-            Ok(())
+            let epoch = shared.acks.epoch();
+            // The edit is a message of its own, under a fresh id.
+            let sent = client.edit_message(chat, target.id.clone(), wa::Message::text(text)).await.map_err(net)?;
+            shared.acks.expect(AckClass::Message, &sent.message_id, epoch).wait(ACK_TIMEOUT).await
         })
         .await
     }
@@ -697,18 +736,19 @@ impl WaBridge {
                     .ok_or_else(|| BridgeError::InvalidJid("admin revoke needs participant".into()))?;
                 RevokeType::Admin { original_sender: parse_jid(sender)? }
             };
-            client.revoke_message(chat, target.id.clone(), kind).await.map_err(net)?;
-            Ok(())
+            let epoch = shared.acks.epoch();
+            let sent = client.revoke_message(chat, target.id.clone(), kind).await.map_err(net)?;
+            shared.acks.expect(AckClass::Message, &sent.message_id, epoch).wait(ACK_TIMEOUT).await
         })
         .await
     }
 
     // Receipts, presence
 
-    /// Sends read receipts, one per sender (groups need the sender as the receipt participant).
     /// Sends read receipts, one `<receipt>` per sender and at most `RECEIPT_BATCH` ids, and returns
-    /// what went out: each batch counts once the server acks it.
-    pub async fn mark_read(&self, chat: String, messages: Vec<BridgeMessageKey>) -> R<Vec<BridgeReceiptBatch>> {
+    /// once the server acked every one. A failure leaves it unknown which landed; receipts are
+    /// idempotent, so the caller sends them all again.
+    pub async fn mark_read(&self, chat: String, messages: Vec<BridgeMessageKey>) -> R<()> {
         let shared = self.shared.clone();
         self.run(async move {
             let client = shared.require_client()?;
@@ -720,17 +760,20 @@ impl WaBridge {
                     None => groups.push((m.participant, vec![m.id])),
                 }
             }
-            let mut sent = Vec::new();
+            let mut acks = Vec::new();
             for (participant, ids) in groups {
                 let sender = participant.as_deref().map(parse_jid).transpose()?;
-                // The library's own per-stanza cap: one call is one stanza, so we know its ack id.
+                // The library's own per-stanza cap: one call is one stanza, acked under its first id.
                 for batch in ids.chunks(RECEIPT_BATCH) {
+                    acks.push(shared.acks.expect(AckClass::Receipt, &batch[0], shared.acks.epoch()));
                     let refs: Vec<&str> = batch.iter().map(String::as_str).collect();
                     client.mark_as_read(&chat, sender.as_ref(), &refs).await.map_err(net)?;
-                    sent.push(BridgeReceiptBatch { ack_id: batch[0].clone(), message_ids: batch.to_vec() });
                 }
             }
-            Ok(sent)
+            for ack in acks {
+                ack.wait(ACK_TIMEOUT).await?;
+            }
+            Ok(())
         })
         .await
     }
@@ -988,7 +1031,8 @@ impl WaBridge {
         .await
     }
 
-    // Chat actions (synced to other devices via app state)
+    // Chat actions (synced to other devices via app state). Each is an IQ the library awaits the
+    // server's answer to, so returning `Ok` means the server took the patch.
 
     pub async fn pin_chat(&self, chat: String, pinned: bool) -> R<()> {
         let shared = self.shared.clone();

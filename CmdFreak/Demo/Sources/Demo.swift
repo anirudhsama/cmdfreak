@@ -175,7 +175,7 @@ final class DemoBridge: WaBridgeProtocol, @unchecked Sendable {
     func importCapture(captureDir: String) async throws {}
     func logout() async throws {}
     func markChatRead(chat: String, read: Bool) async throws {}
-    func markRead(chat: String, messages: [BridgeMessageKey]) async throws -> [BridgeReceiptBatch] { [] }
+    func markRead(chat: String, messages: [BridgeMessageKey]) async throws {}
     func muteChat(chat: String, until: Int64?) async throws {}
     func nudgeReconnect() {}
     func pairWithPhone(number: String) async throws -> String { "" }

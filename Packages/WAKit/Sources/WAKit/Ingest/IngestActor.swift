@@ -22,6 +22,102 @@ enum MessageMutation: Codable, Hashable, Sendable {
     case readElsewhere
 }
 
+/// An outbound change in `outbox`, queued in the transaction of the local change it mirrors and
+/// kept until the server confirmed it. The row's `chatJid` and `messageId` (the target message;
+/// empty for chat actions) name what it applies to; `previous` is what a give-up restores.
+enum OutboxChange: Codable, Hashable, Sendable {
+    case receipt
+    case reaction(fromMe: Bool, participant: String?, emoji: String, timestamp: Int64, previous: OwnReaction?)
+    case edit(text: String, editedAt: Int64, previousText: String?, previousEditedAt: Int64?)
+    case revoke(fromMe: Bool, participant: String?, previousText: String?, previousMedia: MediaRecord?)
+    case pin(pinnedAt: Int64?, previous: Int64?)
+    case mute(until: Int64?, previous: Int64?)
+    case archive(archived: Bool, previous: Bool)
+    case markRead(read: Bool, previousMarkedUnread: Bool)
+
+    struct OwnReaction: Codable, Hashable, Sendable {
+        var senderJid: String
+        var emoji: String
+        var timestamp: Int64
+    }
+
+    /// `.receipt` as stored; the queue writes these in bulk.
+    static let receiptPayload = #"{"receipt":{}}"#
+
+    /// The `outbox.kind` column: one row per kind and target.
+    var kind: String {
+        switch self {
+        case .receipt: "receipt"
+        case .reaction: "reaction"
+        case .edit: "edit"
+        case .revoke: "revoke"
+        case .pin: "pin"
+        case .mute: "mute"
+        case .archive: "archive"
+        case .markRead: "markRead"
+        }
+    }
+
+    /// For a chat action, whether it turns the state on (pinned, muted, archived, read).
+    var chatActionValue: Bool? {
+        switch self {
+        case .pin(let pinnedAt, _): pinnedAt != nil
+        case .mute(let until, _): until != nil
+        case .archive(let archived, _): archived
+        case .markRead(let read, _): read
+        case .receipt, .reaction, .edit, .revoke: nil
+        }
+    }
+
+    /// This change, replacing `sent` while it was in flight, after the server confirmed `sent`: a
+    /// give-up now restores `sent`.
+    func restoring(confirmed sent: OutboxChange, ownSender: String) -> OutboxChange {
+        switch (self, sent) {
+        case let (.reaction(fromMe, participant, emoji, ts, _), .reaction(_, _, sentEmoji, sentTs, _)):
+            .reaction(fromMe: fromMe, participant: participant, emoji: emoji, timestamp: ts,
+                      previous: sentEmoji.isEmpty ? nil : OwnReaction(senderJid: ownSender, emoji: sentEmoji, timestamp: sentTs))
+        case let (.edit(text, editedAt, _, _), .edit(sentText, sentAt, _, _)):
+            .edit(text: text, editedAt: editedAt, previousText: sentText, previousEditedAt: sentAt)
+        case let (.pin(pinnedAt, _), .pin(sent, _)): .pin(pinnedAt: pinnedAt, previous: sent)
+        case let (.mute(until, _), .mute(sent, _)): .mute(until: until, previous: sent)
+        case let (.archive(archived, _), .archive(sent, _)): .archive(archived: archived, previous: sent)
+        case let (.markRead(read, _), .markRead(sent, _)): .markRead(read: read, previousMarkedUnread: !sent)
+        default: self
+        }
+    }
+
+    /// Replacing a queued change of the same kind: what the server last confirmed is still the
+    /// older row's `previous`.
+    func keepingPrevious(of older: OutboxChange) -> OutboxChange {
+        switch (self, older) {
+        case let (.reaction(fromMe, participant, emoji, ts, _), .reaction(_, _, _, _, previous)):
+            .reaction(fromMe: fromMe, participant: participant, emoji: emoji, timestamp: ts, previous: previous)
+        case let (.edit(text, editedAt, _, _), .edit(_, _, previousText, previousEditedAt)):
+            .edit(text: text, editedAt: editedAt, previousText: previousText, previousEditedAt: previousEditedAt)
+        case let (.pin(pinnedAt, _), .pin(_, previous)): .pin(pinnedAt: pinnedAt, previous: previous)
+        case let (.mute(until, _), .mute(_, previous)): .mute(until: until, previous: previous)
+        case let (.archive(archived, _), .archive(_, previous)): .archive(archived: archived, previous: previous)
+        case let (.markRead(read, _), .markRead(_, previous)): .markRead(read: read, previousMarkedUnread: previous)
+        default: self
+        }
+    }
+}
+
+/// A queued change other than a read receipt, as `Outbox` sends it.
+struct OutboxEntry: Sendable {
+    let id: Int64
+    let chatJid: String
+    let messageId: String
+    let change: OutboxChange
+}
+
+/// What `Outbox` sends in one pass: read receipts per chat (with their row ids), then the rest in
+/// queue order.
+struct OutboxDue: Sendable {
+    var receipts: [(chatJid: String, rowIds: [Int64], keys: [BridgeMessageKey])] = []
+    var changes: [OutboxEntry] = []
+}
+
 /// A parked encrypted add-on whose target has been stored; `retryParked` decrypts and applies it.
 public struct ParkedEnvelope: Sendable, Hashable {
     let rowId: Int64
@@ -30,7 +126,7 @@ public struct ParkedEnvelope: Sendable, Hashable {
 
 /// What one applied batch leaves for the caller to do after commit.
 struct IngestResult {
-    /// Incoming messages read in the focused chat (per chat), queued in `read_outbox`.
+    /// Incoming messages read in the focused chat (per chat), their receipts queued in `outbox`.
     var reads: [String: [BridgeMessageKey]] = [:]
     /// Encrypted add-ons whose target arrived in this batch.
     var parked: [ParkedEnvelope] = []
@@ -50,7 +146,7 @@ struct ChangeSet {
     var pushNames: [String: String] = [:]
     var verifiedNames: [String: String] = [:]
     /// Incoming live messages that landed in the focused chat: not counted unread, and their read
-    /// receipts queued in `read_outbox` for the caller to flush after commit.
+    /// receipts queued in `outbox` for the caller to flush after commit.
     var readWhileFocused: [String: [BridgeMessageKey]] = [:]
     var parked: [ParkedEnvelope] = []
     /// Group chats where a reported own participant arrived for an existing row.
@@ -87,9 +183,9 @@ struct ChangeSet {
 }
 
 public struct OpenChatResult: Sendable {
-    /// Unread incoming messages now owed read receipts (queued in `read_outbox`).
+    /// Unread incoming messages now owed read receipts (queued in `outbox`).
     public var unreadKeys: [BridgeMessageKey]
-    /// The chat was marked unread; the caller should sync `markChatRead(read: true)`.
+    /// The chat was marked unread; clearing that is queued in `outbox` too.
     public var wasMarkedUnread: Bool
 }
 
@@ -113,6 +209,9 @@ public actor IngestActor {
     private var pendingCount: Int
     /// Delete-for-me tombstones exist (skips the per-insert lookup while there are none).
     private var hasMessageTombstones: Bool
+    /// Chat actions `Outbox` is sending, by kind and chat, with the state each sets. After the
+    /// patch lands, the library's re-sync replays it to us as if from another device.
+    private var echoes: [String: (on: Bool, at: ContinuousClock.Instant)] = [:]
 
     static let maxAddsBeforeReload = 300
     /// Older incoming messages (an offline backlog after sleep) arrive silently.
@@ -198,14 +297,49 @@ public actor IngestActor {
         return jid
     }
 
-    /// Our own edit of `key`. We send no mention list, so the message keeps the one it had: mentions the
-    /// new text still has resolve as before.
+    /// Our own edit of `key`, queued for the server. We send no mention list, so the message keeps the
+    /// one it had: mentions the new text still has resolve as before.
     public func localEdit(_ key: BridgeMessageKey, text: String, editedAt: Int64) throws {
         try perform { db, cs in
-            let mentions = try String.fetchOne(db, sql: "SELECT json_extract(extra, '$.mentions') FROM message WHERE chatJid = ? AND id = ?",
-                                               arguments: [self.canon(key.chatJid), key.id])
-                .map { try JSONDecoder().decode([String].self, from: Data($0.utf8)) }
+            let jid = self.canon(key.chatJid)
+            let old = try Row.fetchOne(db, sql: """
+                SELECT text, editedAt, json_extract(extra, '$.mentions') AS mentions FROM message WHERE chatJid = ? AND id = ?
+                """, arguments: [jid, key.id])
+            let mentions = try (old?["mentions"] as String?).map { try JSONDecoder().decode([String].self, from: Data($0.utf8)) }
             try self.applyOrPark(db, key, .edit(text: text, mentions: mentions, editedAt: editedAt), &cs)
+            try self.enqueue(db, jid, key.id, .edit(text: text, editedAt: editedAt, previousText: old?["text"], previousEditedAt: old?["editedAt"]))
+        }
+    }
+
+    /// Our own reaction to `key` ("" removes it), queued for the server.
+    public func localReaction(_ key: BridgeMessageKey, emoji: String, senderJid: String, timestamp: Int64) throws {
+        try perform { db, cs in
+            let jid = self.canon(key.chatJid)
+            let previous = try Self.ownReaction(db, jid, key.id)
+            let reaction = BridgeReaction(senderJid: senderJid, fromMe: true, emoji: emoji, timestamp: timestamp)
+            try self.applyUpdate(.reaction(target: key, reaction: reaction), db, &cs)
+            try self.enqueue(db, jid, key.id, .reaction(fromMe: key.fromMe, participant: key.participant, emoji: emoji,
+                                                       timestamp: timestamp, previous: previous))
+        }
+    }
+
+    /// Our own delete-for-everyone of `key`, queued for the server.
+    public func localRevoke(_ key: BridgeMessageKey, timestamp: Int64) throws {
+        try perform { db, cs in
+            let jid = self.canon(key.chatJid)
+            // The revoke drops our edits and reactions still queued for it; undo them first, so a
+            // revoke that never lands restores what the server has.
+            for row in try Row.fetchAll(db, sql: """
+                SELECT kind, payload FROM outbox WHERE chatJid = ? AND messageId = ? AND kind IN ('edit', 'reaction')
+                """, arguments: [jid, key.id]) {
+                if let change = try? JSONDecoder().decode(OutboxChange.self, from: Data((row["payload"] as String).utf8)) {
+                    try self.revert(change, jid, key.id, db, &cs)
+                }
+            }
+            let text = try String.fetchOne(db, sql: "SELECT text FROM message WHERE chatJid = ? AND id = ?", arguments: [jid, key.id])
+            let media = try MediaRecord.fetchOne(db, key: ["chatJid": jid, "messageId": key.id])
+            try self.applyOrPark(db, key, .revoke(timestamp: timestamp), &cs)
+            try self.enqueue(db, jid, key.id, .revoke(fromMe: key.fromMe, participant: key.participant, previousText: text, previousMedia: media))
         }
     }
 
@@ -234,6 +368,7 @@ public actor IngestActor {
                     """, arguments: [Self.now, jid])
             }
             try Self.queueReads(db, keys)
+            if chat.markedUnread { try self.enqueue(db, jid, "", .markRead(read: true, previousMarkedUnread: true)) }
             cs.chatRead(jid)
             return OpenChatResult(unreadKeys: keys, wasMarkedUnread: chat.markedUnread)
         }
@@ -335,9 +470,38 @@ public actor IngestActor {
         }
     }
 
-    /// Optimistically applies a chat action made locally (pin, mute, archive, read/unread…).
+    /// Optimistically applies a chat action made locally (pin, mute, archive, read/unread) and
+    /// queues it for the server.
     public func applyLocal(_ action: BridgeChatAction) throws {
-        try perform { db, cs in try self.handleChatAction(action, db, &cs) }
+        try perform { db, cs in
+            let queued = try self.outboxChange(for: action, db)
+            try self.handleChatAction(action, local: true, db, &cs)
+            if let (jid, change) = queued { try self.enqueue(db, jid, "", change) }
+        }
+    }
+
+    /// The outbox row for a local chat action, with the state it replaces.
+    private func outboxChange(for action: BridgeChatAction, _ db: Database) throws -> (String, OutboxChange)? {
+        func chat(_ jid: String) throws -> (String, ChatRecord?) {
+            let jid = canon(jid)
+            return (jid, try ChatRecord.fetchOne(db, key: jid))
+        }
+        switch action {
+        case .pin(let jid, let pinnedAt):
+            let (jid, c) = try chat(jid)
+            return (jid, .pin(pinnedAt: pinnedAt, previous: c?.pinnedAt))
+        case .mute(let jid, let until):
+            let (jid, c) = try chat(jid)
+            return (jid, .mute(until: until, previous: c?.mutedUntil))
+        case .archive(let jid, let archived):
+            let (jid, c) = try chat(jid)
+            return (jid, .archive(archived: archived, previous: c?.archived ?? false))
+        case .markRead(let jid, let read, _, _):
+            let (jid, c) = try chat(jid)
+            return (jid, .markRead(read: read, previousMarkedUnread: c?.markedUnread ?? false))
+        case .delete, .clear, .deleteMessageForMe:
+            return nil
+        }
     }
 
     public func applyGroups(_ groups: [BridgeGroup]) throws {
@@ -419,54 +583,235 @@ public actor IngestActor {
 
     public func canonicalJid(_ jid: String) -> String { canon(jid) }
 
-    // MARK: Read receipts
+    // MARK: Outbox
 
     /// Owes read receipts for `keys` until the server acks them. Runs in the transaction that reads them.
     private static func queueReads(_ db: Database, _ keys: [BridgeMessageKey]) throws {
         for k in keys {
-            try db.execute(sql: "INSERT OR IGNORE INTO read_outbox (chatJid, messageId, queuedAt) VALUES (?, ?, ?)",
-                           arguments: [k.chatJid, k.id, now])
+            try db.execute(sql: "INSERT OR IGNORE INTO outbox (kind, chatJid, messageId, payload, queuedAt) VALUES ('receipt', ?, ?, ?, ?)",
+                           arguments: [k.chatJid, k.id, OutboxChange.receiptPayload, now])
         }
     }
 
-    /// Read receipts owed and not yet sent on this connection, oldest first, per chat.
-    public func pendingReads(limit: Int = 1000) throws -> [String: [BridgeMessageKey]] {
-        let rows = try database.pool.read { db in
-            try MessageRecord.fetchAll(db, sql: """
-                SELECT message.* FROM read_outbox
-                JOIN message ON message.chatJid = read_outbox.chatJid AND message.id = read_outbox.messageId
-                WHERE read_outbox.ackId IS NULL
-                ORDER BY message.sortKey LIMIT ?
-                """, arguments: [limit])
+    /// Queues `change`, replacing a queued change of the same kind for the same target. The
+    /// replacement gets a new row id, so a pass still sending the old one doesn't remove it. A
+    /// revoke already queued stays as it is.
+    private func enqueue(_ db: Database, _ chatJid: String, _ messageId: String, _ change: OutboxChange) throws {
+        var change = change
+        if let old = try Row.fetchOne(db, sql: "SELECT id, payload FROM outbox WHERE kind = ? AND chatJid = ? AND messageId = ?",
+                                      arguments: [change.kind, chatJid, messageId]) {
+            if case .revoke = change { return }
+            if let older = try? JSONDecoder().decode(OutboxChange.self, from: Data((old["payload"] as String).utf8)) {
+                change = change.keepingPrevious(of: older)
+            }
+            try db.execute(sql: "DELETE FROM outbox WHERE id = ?", arguments: [old["id"] as Int64])
         }
-        return Dictionary(grouping: rows.map(\.key), by: \.chatJid)
+        try db.execute(sql: "INSERT INTO outbox (kind, chatJid, messageId, payload, queuedAt) VALUES (?, ?, ?, ?, ?)",
+                       arguments: [change.kind, chatJid, messageId, String(decoding: try JSONEncoder().encode(change), as: UTF8.self), Self.now])
     }
 
-    /// The bridge wrote `batches` for `chatJid` to the socket: each waits for its server ack.
-    public func readsSent(chatJid: String, batches: [BridgeReceiptBatch]) throws {
-        guard !batches.isEmpty else { return }
+    /// One `Outbox` pass: receipts per chat in message order, then the other changes in queue
+    /// order. What no longer applies goes first, unsent: receipts for messages gone, and changes
+    /// newer state has overtaken.
+    func outboxDue() throws -> OutboxDue {
         try perform { db, _ in
-            for b in batches where !b.messageIds.isEmpty {
-                try db.execute(sql: """
-                    UPDATE read_outbox SET ackId = ?
-                    WHERE chatJid = ? AND messageId IN (\(b.messageIds.map { _ in "?" }.joined(separator: ",")))
-                    """, arguments: StatementArguments([b.ackId, chatJid] + b.messageIds))
+            try db.execute(sql: """
+                DELETE FROM outbox WHERE kind = 'receipt'
+                  AND NOT EXISTS (SELECT 1 FROM message WHERE message.chatJid = outbox.chatJid AND message.id = outbox.messageId)
+                """)
+            var due = OutboxDue()
+            let receipts = try Row.fetchAll(db, sql: """
+                SELECT o.id, m.chatJid, m.id AS messageId, m.fromMe, m.participant FROM outbox o
+                JOIN message m ON m.chatJid = o.chatJid AND m.id = o.messageId
+                WHERE o.kind = 'receipt' ORDER BY m.sortKey
+                """)
+            var byChat: [String: Int] = [:]
+            for row in receipts {
+                let chat: String = row["chatJid"]
+                let key = BridgeMessageKey(chatJid: chat, id: row["messageId"], fromMe: row["fromMe"], participant: row["participant"])
+                if let i = byChat[chat] {
+                    due.receipts[i].rowIds.append(row["id"])
+                    due.receipts[i].keys.append(key)
+                } else {
+                    byChat[chat] = due.receipts.count
+                    due.receipts.append((chat, [row["id"]], [key]))
+                }
+            }
+            for row in try Row.fetchAll(db, sql: "SELECT id, chatJid, messageId, payload FROM outbox WHERE kind != 'receipt' ORDER BY id") {
+                let entry = OutboxEntry(id: row["id"], chatJid: row["chatJid"], messageId: row["messageId"],
+                                        change: (try? JSONDecoder().decode(OutboxChange.self, from: Data((row["payload"] as String).utf8))) ?? .receipt)
+                if case .receipt = entry.change {
+                    try db.execute(sql: "DELETE FROM outbox WHERE id = ?", arguments: [entry.id])
+                } else if try Self.superseded(entry, db) {
+                    WAKit.log.info("outbox: \(entry.change.kind, privacy: .public) superseded, not sent")
+                    try db.execute(sql: "DELETE FROM outbox WHERE id = ?", arguments: [entry.id])
+                } else {
+                    due.changes.append(entry)
+                }
+            }
+            return due
+        }
+    }
+
+    /// Newer state overtook the queued change (a later change by us here or on another device):
+    /// sending it would overwrite that. Receipts and revokes are idempotent and never are.
+    private static func superseded(_ e: OutboxEntry, _ db: Database) throws -> Bool {
+        let chat = { try ChatRecord.fetchOne(db, key: e.chatJid) }
+        switch e.change {
+        case .receipt, .revoke:
+            return false
+        case .reaction(_, _, let emoji, _, _):
+            guard try Bool.fetchOne(db, sql: "SELECT 1 FROM message WHERE chatJid = ? AND id = ?", arguments: [e.chatJid, e.messageId]) == true
+            else { return true }
+            return try (ownReaction(db, e.chatJid, e.messageId)?.emoji ?? "") != emoji
+        case .edit(let text, let editedAt, _, _):
+            return try Bool.fetchOne(db, sql: """
+                SELECT 1 FROM message WHERE chatJid = ? AND id = ? AND revoked = 0 AND text IS ? AND editedAt IS ?
+                """, arguments: [e.chatJid, e.messageId, text, editedAt]) != true
+        case .pin(let pinnedAt, _):
+            guard let c = try chat() else { return true }
+            return c.isPinned != (pinnedAt != nil)
+        case .mute(let until, _):
+            guard let c = try chat() else { return true }
+            return c.mutedUntil != until
+        case .archive(let archived, _):
+            guard let c = try chat() else { return true }
+            return c.archived != archived
+        case .markRead(let read, _):
+            guard let c = try chat() else { return true }
+            return c.markedUnread == read
+        }
+    }
+
+    /// Right before `Outbox` sends `e`: whether it still applies. One replaced or overtaken since
+    /// the pass began is not sent. A chat action is noted so its echo is recognised.
+    func claimOutbox(_ e: OutboxEntry) throws -> Bool {
+        try perform { db, _ in
+            guard try Bool.fetchOne(db, sql: "SELECT 1 FROM outbox WHERE id = ?", arguments: [e.id]) == true else { return false }
+            if try Self.superseded(e, db) {
+                WAKit.log.info("outbox: \(e.change.kind, privacy: .public) superseded, not sent")
+                try db.execute(sql: "DELETE FROM outbox WHERE id = ?", arguments: [e.id])
+                return false
+            }
+            if let on = e.change.chatActionValue { self.echoes[e.change.kind + " " + e.chatJid] = (on, .now) }
+            return true
+        }
+    }
+
+    /// The server confirmed rows `ids`; `entry` is the change they carried (nil for receipts). A
+    /// newer change that replaced it meanwhile now falls back to it on a give-up.
+    func outboxSent(_ ids: [Int64], entry: OutboxEntry? = nil) throws {
+        guard !ids.isEmpty else { return }
+        try perform { db, _ in
+            try db.execute(sql: "DELETE FROM outbox WHERE id IN (\(ids.map { _ in "?" }.joined(separator: ",")))", arguments: StatementArguments(ids))
+            guard let entry, let newer = try Row.fetchOne(db, sql: """
+                SELECT id, payload FROM outbox WHERE kind = ? AND chatJid = ? AND messageId = ?
+                """, arguments: [entry.change.kind, entry.chatJid, entry.messageId]),
+                  let change = try? JSONDecoder().decode(OutboxChange.self, from: Data((newer["payload"] as String).utf8))
+            else { return }
+            let ownSender = try Self.ownReaction(db, entry.chatJid, entry.messageId)?.senderJid
+                ?? String.fetchOne(db, sql: "SELECT value FROM meta WHERE key = 'ownPn'") ?? ""
+            let updated = change.restoring(confirmed: entry.change, ownSender: ownSender)
+            try db.execute(sql: "UPDATE outbox SET payload = ? WHERE id = ?",
+                           arguments: [String(decoding: try JSONEncoder().encode(updated), as: UTF8.self), newer["id"] as Int64])
+        }
+    }
+
+    /// Sending rows `ids` failed. A `counted` failure (the connection was up throughout) adds an
+    /// attempt; rows at `maxAttempts` give up. Returns whether any did.
+    @discardableResult
+    func outboxFailed(_ ids: [Int64], entry: OutboxEntry? = nil, error: String, counted: Bool, maxAttempts: Int) throws -> Bool {
+        guard !ids.isEmpty else { return false }
+        // Not applied, so no echo comes.
+        if let entry { echoes[entry.change.kind + " " + entry.chatJid] = nil }
+        let list = ids.map { _ in "?" }.joined(separator: ",")
+        return try perform { db, cs in
+            try db.execute(sql: "UPDATE outbox SET lastError = ?, attempts = attempts + ? WHERE id IN (\(list))",
+                           arguments: [error, counted ? 1 : 0] + StatementArguments(ids))
+            let spent = try Row.fetchAll(db, sql: "SELECT * FROM outbox WHERE attempts >= ? AND id IN (\(list))",
+                                         arguments: [maxAttempts] + StatementArguments(ids))
+            for row in spent { try self.giveUp(row, db, &cs) }
+            return !spent.isEmpty
+        }
+    }
+
+    /// Gives up on rows queued before `cutoff`: they could not be sent for so long that they no
+    /// longer matter, or the user's change should not land this late.
+    public func pruneOutbox(olderThan cutoff: Int64) throws {
+        try perform { db, cs in
+            for row in try Row.fetchAll(db, sql: "SELECT * FROM outbox WHERE queuedAt < ?", arguments: [cutoff]) {
+                try self.giveUp(row, db, &cs)
             }
         }
     }
 
-    /// A new connection: receipts sent on the last one and never acked may have died with it.
-    public func resendUnackedReads() throws {
-        try perform { db, _ in
-            try db.execute(sql: "UPDATE read_outbox SET ackId = NULL WHERE ackId IS NOT NULL")
+    /// Drops an outbox row the server never took. A receipt just goes; a change of ours is undone
+    /// locally, so this Mac shows what the server and our other devices have.
+    private func giveUp(_ row: Row, _ db: Database, _ cs: inout ChangeSet) throws {
+        let kind: String = row["kind"], chatJid: String = row["chatJid"], messageId: String = row["messageId"]
+        try db.execute(sql: "DELETE FROM outbox WHERE id = ?", arguments: [row["id"] as Int64])
+        guard kind != "receipt",
+              let change = try? JSONDecoder().decode(OutboxChange.self, from: Data((row["payload"] as String).utf8)) else { return }
+        WAKit.log.error("""
+            outbox: gave up on \(kind, privacy: .public) after \(row["attempts"] as Int) attempts \
+            (\(row["lastError"] as String? ?? "", privacy: .public)); undone here
+            """)
+        try revert(change, chatJid, messageId, db, &cs)
+    }
+
+    /// Undoes our local `change`, back to its `previous`, unless newer state replaced it meanwhile.
+    private func revert(_ change: OutboxChange, _ chatJid: String, _ messageId: String, _ db: Database, _ cs: inout ChangeSet) throws {
+        let key: StatementArguments = [chatJid, messageId]
+        switch change {
+        case .receipt:
+            break
+        case .reaction(_, _, let emoji, let timestamp, let previous):
+            guard try (Self.ownReaction(db, chatJid, messageId)?.emoji ?? "") == emoji else { return }
+            try db.execute(sql: "DELETE FROM reaction WHERE chatJid = ? AND messageId = ? AND fromMe = 1", arguments: key)
+            if emoji.isEmpty {
+                try db.execute(sql: "DELETE FROM tombstone WHERE chatJid = ? AND messageId = ? AND kind = 'reaction' AND timestamp = ?",
+                               arguments: key + [timestamp])
+            }
+            if let p = previous {
+                try db.execute(sql: """
+                    INSERT OR REPLACE INTO reaction (chatJid, messageId, senderJid, emoji, fromMe, timestamp) VALUES (?, ?, ?, ?, 1, ?)
+                    """, arguments: key + [p.senderJid, p.emoji, p.timestamp])
+            }
+            cs.update(chatJid, messageId)
+        case .edit(let text, let editedAt, let previousText, let previousEditedAt):
+            try db.execute(sql: """
+                UPDATE message SET text = ?, editedAt = ? WHERE chatJid = ? AND id = ? AND revoked = 0 AND text IS ? AND editedAt IS ?
+                """, arguments: [previousText, previousEditedAt] + key + [text, editedAt])
+            if db.changesCount > 0 { cs.update(chatJid, messageId) }
+        case .revoke(_, _, let previousText, let previousMedia):
+            try db.execute(sql: "UPDATE message SET revoked = 0, text = ? WHERE chatJid = ? AND id = ? AND revoked = 1",
+                           arguments: [previousText] + key)
+            guard db.changesCount > 0 else { return }
+            if var media = previousMedia {
+                // Stored under the chat's JID at the time, which an alias merge may have changed.
+                media.chatJid = chatJid
+                media.messageId = messageId
+                try media.insert(db, onConflict: .ignore)
+            }
+            cs.update(chatJid, messageId)
+        case .pin(let pinnedAt, let previous):
+            try db.execute(sql: "UPDATE chat SET pinnedAt = ? WHERE jid = ? AND (pinnedAt IS NULL) = ?",
+                           arguments: [previous, chatJid, pinnedAt == nil])
+        case .mute(let until, let previous):
+            try db.execute(sql: "UPDATE chat SET mutedUntil = ? WHERE jid = ? AND mutedUntil IS ?", arguments: [previous, chatJid, until])
+        case .archive(let archived, let previous):
+            try db.execute(sql: "UPDATE chat SET archived = ? WHERE jid = ? AND archived = ?", arguments: [previous, chatJid, archived])
+        case .markRead(let read, let previous):
+            try db.execute(sql: "UPDATE chat SET markedUnread = ? WHERE jid = ? AND markedUnread = ?", arguments: [previous, chatJid, !read])
         }
     }
 
-    /// Drops receipts that could not be sent for so long that they no longer matter.
-    public func pruneReadOutbox(olderThan cutoff: Int64) throws {
-        try perform { db, _ in
-            try db.execute(sql: "DELETE FROM read_outbox WHERE queuedAt < ?", arguments: [cutoff])
-        }
+    /// Our newest reaction to the message, from this Mac or another of our devices.
+    private static func ownReaction(_ db: Database, _ chatJid: String, _ id: String) throws -> OutboxChange.OwnReaction? {
+        try Row.fetchOne(db, sql: """
+            SELECT senderJid, emoji, timestamp FROM reaction WHERE chatJid = ? AND messageId = ? AND fromMe = 1
+            ORDER BY timestamp DESC LIMIT 1
+            """, arguments: [chatJid, id]).map { OutboxChange.OwnReaction(senderJid: $0["senderJid"], emoji: $0["emoji"], timestamp: $0["timestamp"]) }
     }
 
     public func canonicalJids(_ jids: Set<String>) -> [String: String] {
@@ -577,9 +922,6 @@ public actor IngestActor {
             try handleReceipt(receipt, db, &cs)
         case .serverAck(let ack):
             try handleServerAck(ack, db, &cs)
-        case .receiptAck(let ackId):
-            // Also our delivery receipts' acks, which match no row.
-            try db.execute(sql: "DELETE FROM read_outbox WHERE ackId = ?", arguments: [ackId])
         case .contacts(let contacts):
             for c in contacts { try upsertContact(c, db) }
         case .jidAliases(let aliases):
@@ -1025,6 +1367,8 @@ public actor IngestActor {
         case .revoke:
             try db.execute(sql: "UPDATE message SET revoked = 1, text = NULL WHERE chatJid = ? AND id = ?", arguments: key)
             try db.execute(sql: "DELETE FROM media WHERE chatJid = ? AND messageId = ?", arguments: key)
+            // Our edits and reactions still queued for it would land on a deleted message.
+            try db.execute(sql: "DELETE FROM outbox WHERE chatJid = ? AND messageId = ? AND kind IN ('edit', 'reaction')", arguments: key)
             cs.removed(chatJid, id)
         case .reaction(let sender, let fromMe, let emoji, let ts):
             if !emoji.isEmpty, try Self.reactionSuppressed(db, chatJid, id, sender, fromMe: fromMe, timestamp: ts) {
@@ -1367,7 +1711,21 @@ public actor IngestActor {
         try Self.recountUnread(db, jid)
     }
 
-    private func handleChatAction(_ action: BridgeChatAction, _ db: Database, _ cs: inout ChangeSet) throws {
+    /// `local`: made here (`applyLocal`). One from another device replaces any of ours of the same
+    /// kind still queued for the chat.
+    private func handleChatAction(_ action: BridgeChatAction, local: Bool = false, _ db: Database, _ cs: inout ChangeSet) throws {
+        if !local, let (jid, change) = try outboxChange(for: action, db), let on = change.chatActionValue {
+            let key = change.kind + " " + jid
+            // Ours carry no read range; a read with one is another device's.
+            var ranged = false
+            if case .markRead(_, _, let readThrough, _) = action, readThrough != nil { ranged = true }
+            if !ranged, let echo = echoes[key], echo.on == on, ContinuousClock.now - echo.at < .seconds(60) {
+                // Our own action replayed by the library's re-sync: this Mac has it, or something newer.
+                echoes[key] = nil
+                return
+            }
+            try db.execute(sql: "DELETE FROM outbox WHERE kind = ? AND chatJid = ?", arguments: [change.kind, jid])
+        }
         switch action {
         case .pin(let jid, let pinnedAt):
             let jid = canon(jid)
@@ -1655,6 +2013,14 @@ public actor IngestActor {
             ON CONFLICT(chatJid, messageId, kind, senderJid) DO UPDATE SET timestamp = MAX(timestamp, excluded.timestamp)
             """, arguments: [lid, pn])
         try db.execute(sql: "DELETE FROM tombstone WHERE chatJid = ?1 OR senderJid = ?1", arguments: [lid])
+
+        // Where both JIDs have a row for the same change, the newer one stays.
+        try db.execute(sql: """
+            DELETE FROM outbox WHERE chatJid = ?1 AND EXISTS (
+                SELECT 1 FROM outbox l WHERE l.chatJid = ?2 AND l.kind = outbox.kind AND l.messageId = outbox.messageId AND l.id > outbox.id)
+            """, arguments: [pn, lid])
+        try db.execute(sql: "UPDATE OR IGNORE outbox SET chatJid = ? WHERE chatJid = ?", arguments: [pn, lid])
+        try db.execute(sql: "DELETE FROM outbox WHERE chatJid = ?", arguments: [lid])
 
         if pendingCount > 0 {
             try db.execute(sql: "UPDATE pending_mutation SET chatJid = ? WHERE chatJid = ?", arguments: [pn, lid])
