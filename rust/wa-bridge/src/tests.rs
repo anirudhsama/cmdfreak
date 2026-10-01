@@ -817,3 +817,90 @@ fn group_create_and_own_add_are_joins() {
     assert_eq!(joined(add(Jid::lid(ME_LID))), Some(1_700_000_500));
     assert_eq!(joined(add(Jid::lid("99999999999999"))), None);
 }
+
+mod ack_waiters {
+    use std::time::Duration;
+
+    use crate::acks::{AckClass, AckWaiters};
+    use crate::types::BridgeError;
+
+    const WAIT: Duration = Duration::from_secs(5);
+
+    #[tokio::test]
+    async fn ack_resolves_the_waiter_for_its_class_and_id() {
+        let acks = AckWaiters::default();
+        let pending = acks.expect(AckClass::Receipt, "R1", acks.epoch());
+        // Another class with the same id, or another id, leaves it waiting.
+        acks.resolve(AckClass::Message, "R1", None);
+        acks.resolve(AckClass::Receipt, "R2", None);
+        let waiter = tokio::spawn(pending.wait(WAIT));
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(!waiter.is_finished());
+        acks.resolve(AckClass::Receipt, "R1", None);
+        assert!(waiter.await.unwrap().is_ok());
+    }
+
+    #[tokio::test]
+    async fn an_ack_that_beats_the_waiter_still_counts() {
+        let acks = AckWaiters::default();
+        let epoch = acks.epoch();
+        acks.resolve(AckClass::Message, "M1", None);
+        assert!(acks.expect(AckClass::Message, "M1", epoch).wait(WAIT).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn no_ack_times_out() {
+        let acks = AckWaiters::default();
+        let result = acks.expect(AckClass::Message, "M1", acks.epoch()).wait(Duration::from_millis(30)).await;
+        assert!(matches!(result, Err(BridgeError::Timeout(id)) if id == "M1"));
+    }
+
+    #[tokio::test]
+    async fn a_nack_errors() {
+        let acks = AckWaiters::default();
+        let pending = acks.expect(AckClass::Message, "M1", acks.epoch());
+        acks.resolve(AckClass::Message, "M1", Some("479".into()));
+        let result = pending.wait(WAIT).await;
+        assert!(matches!(result, Err(BridgeError::Protocol(msg)) if msg.contains("479")));
+    }
+
+    #[tokio::test]
+    async fn a_delivery_receipts_ack_does_not_confirm_a_read_receipt_under_the_same_id() {
+        let acks = AckWaiters::default();
+        acks.delivery_receipts_owed(["X", "Y"]);
+        // The delivery receipt for X is still unacked when the read receipt starting with X goes.
+        let pending = acks.expect(AckClass::Receipt, "X", acks.epoch());
+        acks.resolve(AckClass::Receipt, "X", None);
+        let waiter = tokio::spawn(pending.wait(WAIT));
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(!waiter.is_finished());
+        acks.resolve(AckClass::Receipt, "X", None);
+        assert!(waiter.await.unwrap().is_ok());
+
+        // A nack under such an id fails the read receipt rather than passing for the delivery ack.
+        acks.delivery_receipts_owed(["Z"]);
+        let pending = acks.expect(AckClass::Receipt, "Z", acks.epoch());
+        acks.resolve(AckClass::Receipt, "Z", Some("400".into()));
+        assert!(matches!(pending.wait(WAIT).await, Err(BridgeError::Protocol(_))));
+
+        // Y's delivery ack came first: nobody waits for it, and it is not kept for a later read receipt.
+        acks.resolve(AckClass::Receipt, "Y", None);
+        let result = acks.expect(AckClass::Receipt, "Y", acks.epoch()).wait(Duration::from_millis(30)).await;
+        assert!(matches!(result, Err(BridgeError::Timeout(_))));
+    }
+
+    #[tokio::test]
+    async fn a_dropped_connection_fails_waits_in_flight_and_sends_from_before_it() {
+        let acks = AckWaiters::default();
+        let epoch = acks.epoch();
+        let pending = acks.expect(AckClass::Receipt, "R1", epoch);
+        acks.fail_all();
+        assert!(matches!(pending.wait(WAIT).await, Err(BridgeError::NotConnected)));
+        // Sent before the drop, registered after it: no ack will come.
+        assert!(matches!(acks.expect(AckClass::Message, "M1", epoch).wait(WAIT).await, Err(BridgeError::NotConnected)));
+        // Sent after it: waits as usual.
+        let pending = acks.expect(AckClass::Message, "M2", acks.epoch());
+        acks.resolve(AckClass::Message, "M2", None);
+        assert!(pending.wait(WAIT).await.is_ok());
+    }
+}

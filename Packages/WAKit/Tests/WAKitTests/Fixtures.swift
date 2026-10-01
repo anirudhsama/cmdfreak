@@ -1,5 +1,6 @@
 import Foundation
 import Synchronization
+import Testing
 @testable import WAKit
 
 /// Synthetic bridge fixtures built from the generated UniFFI record types.
@@ -68,6 +69,32 @@ enum F {
     }
 }
 
+/// A client on `bridge`, and the sink the bridge would deliver to.
+func makeClient(_ db: AppDatabase, _ bridge: FakeBridge) async throws -> (WAClient, any EventSink) {
+    nonisolated(unsafe) var sink: (any EventSink)?
+    let client = try await WAClient(database: db) { s in sink = s; return bridge }
+    return (client, try #require(sink))
+}
+
+/// Calls the sink the way the bridge does: from a plain thread that may block.
+@discardableResult
+func deliver(_ sink: any EventSink, _ events: [BridgeEvent]) async -> Bool {
+    await withCheckedContinuation { (c: CheckedContinuation<Bool, Never>) in
+        Thread.detachNewThread {
+            c.resume(returning: sink.onEvents(events: events))
+        }
+    }
+}
+
+/// Polls `condition` for up to two seconds.
+func waitFor(_ condition: () throws -> Bool) async throws {
+    var tries = 0
+    while try !condition(), tries < 200 {
+        tries += 1
+        try await Task.sleep(for: .milliseconds(10))
+    }
+}
+
 extension AppDatabase {
     func chat(_ jid: String) throws -> ChatRecord? {
         try reader.read { try ChatRecord.fetchOne($0, key: jid) }
@@ -87,6 +114,12 @@ final class FakeBridge: WaBridgeProtocol, @unchecked Sendable {
     struct Calls {
         var markRead: [(String, [BridgeMessageKey])] = []
         var markChatRead: [(String, Bool)] = []
+        var reactions: [(id: String, emoji: String)] = []
+        var edits: [(id: String, text: String)] = []
+        var revokes: [String] = []
+        var pins: [(String, Bool)] = []
+        var mutes: [(String, Int64?)] = []
+        var archives: [(String, Bool)] = []
         var downloads = 0
         var overviews: [[String]] = []
         var sentTexts: [String] = []
@@ -108,7 +141,16 @@ final class FakeBridge: WaBridgeProtocol, @unchecked Sendable {
     }
     var downloadDelay: Duration = .milliseconds(50)
 
-    func archiveChat(chat: String, archived: Bool) async throws {}
+    /// Reactions, edits, revokes and chat actions fail (after being recorded) while set.
+    var actionsFail = false
+    private func actionResult() throws {
+        if actionsFail { throw BridgeError.Network("offline") }
+    }
+
+    func archiveChat(chat: String, archived: Bool) async throws {
+        calls.withLock { $0.archives.append((chat, archived)) }
+        try actionResult()
+    }
     func cancelPairing() async throws {}
     func connect() async throws {}
     func dataDir() -> String { "/tmp" }
@@ -120,7 +162,10 @@ final class FakeBridge: WaBridgeProtocol, @unchecked Sendable {
         try Data("payload".utf8).write(to: URL(filePath: destPath))
         progress?.onProgress(done: 100, total: 100)
     }
-    func editMessage(target: BridgeMessageKey, text: String) async throws {}
+    func editMessage(target: BridgeMessageKey, text: String) async throws {
+        calls.withLock { $0.edits.append((target.id, text)) }
+        try actionResult()
+    }
     var metadataJoinedAt: Int64?
     var communities: Set<String> = []
     func fetchGroupMetadata(jid: String) async throws -> BridgeGroup {
@@ -140,18 +185,25 @@ final class FakeBridge: WaBridgeProtocol, @unchecked Sendable {
     }
     func importCapture(captureDir: String) async throws {}
     func logout() async throws {}
-    func markChatRead(chat: String, read: Bool) async throws { calls.withLock { $0.markChatRead.append((chat, read)) } }
+    func markChatRead(chat: String, read: Bool) async throws {
+        calls.withLock { $0.markChatRead.append((chat, read)) }
+        try actionResult()
+    }
     var markReadFails = false
-    func markRead(chat: String, messages: [BridgeMessageKey]) async throws -> [BridgeReceiptBatch] {
+    func markRead(chat: String, messages: [BridgeMessageKey]) async throws {
         calls.withLock { $0.markRead.append((chat, messages)) }
         if markReadFails { throw BridgeError.Network("offline") }
-        let ids = messages.filter { !$0.fromMe }.map(\.id)
-        return ids.isEmpty ? [] : [BridgeReceiptBatch(ackId: ids[0], messageIds: ids)]
     }
-    func muteChat(chat: String, until: Int64?) async throws {}
+    func muteChat(chat: String, until: Int64?) async throws {
+        calls.withLock { $0.mutes.append((chat, until)) }
+        try actionResult()
+    }
     func nudgeReconnect() { calls.withLock { $0.nudges += 1 } }
     func pairWithPhone(number: String) async throws -> String { "ABCD-EFGH" }
-    func pinChat(chat: String, pinned: Bool) async throws {}
+    func pinChat(chat: String, pinned: Bool) async throws {
+        calls.withLock { $0.pins.append((chat, pinned)) }
+        try actionResult()
+    }
     /// What `profilePicture` answers: a picture, none, or this error.
     var hasPicture = true
     var pictureError: BridgeError?
@@ -162,13 +214,19 @@ final class FakeBridge: WaBridgeProtocol, @unchecked Sendable {
         try Data([0xFF, 0xD8]).write(to: URL(filePath: destPath))
         return true
     }
-    func revokeMessage(target: BridgeMessageKey) async throws {}
+    func revokeMessage(target: BridgeMessageKey) async throws {
+        calls.withLock { $0.revokes.append(target.id) }
+        try actionResult()
+    }
     func sendChatState(chat: String, state: ChatState) async throws {}
     func sendMedia(chat: String, media: BridgeOutgoingMedia, replyTo: BridgeMessageKey?, messageId: String?, progress: (any ProgressSink)?) async throws -> BridgeSendResult {
         calls.withLock { $0.mediaSends.append((media.filePath, messageId)) }
         throw BridgeError.NotImplemented("sendMedia")
     }
-    func sendReaction(target: BridgeMessageKey, emoji: String) async throws {}
+    func sendReaction(target: BridgeMessageKey, emoji: String) async throws {
+        calls.withLock { $0.reactions.append((target.id, emoji)) }
+        try actionResult()
+    }
     func sendText(chat: String, text: String, replyTo: BridgeMessageKey?, messageId: String?) async throws -> BridgeSendResult {
         calls.withLock {
             $0.sentTexts.append(text)

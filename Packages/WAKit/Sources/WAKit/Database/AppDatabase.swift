@@ -379,6 +379,30 @@ extension AppDatabase {
             try db.create(index: "read_outbox_on_ackId", on: "read_outbox", columns: ["ackId"])
         }
 
+        // Every outbound change that must reach the server (read receipts, reactions, edits, revokes,
+        // chat actions), queued with the local change it mirrors and removed once the server
+        // confirmed it. One row per kind and target (`messageId` is empty for chat actions);
+        // AUTOINCREMENT, so a replaced row's id never comes back. Queued receipts move over; one
+        // already sent and never acked goes again.
+        m.registerMigration("v15") { db in
+            try db.create(table: "outbox") { t in
+                t.autoIncrementedPrimaryKey("id")
+                t.column("kind", .text).notNull()
+                t.column("chatJid", .text).notNull()
+                t.column("messageId", .text).notNull().defaults(to: "")
+                t.column("payload", .jsonText).notNull()
+                t.column("queuedAt", .integer).notNull()
+                t.column("attempts", .integer).notNull().defaults(to: 0)
+                t.column("lastError", .text)
+                t.uniqueKey(["kind", "chatJid", "messageId"])
+            }
+            try db.execute(sql: """
+                INSERT INTO outbox (kind, chatJid, messageId, payload, queuedAt)
+                SELECT 'receipt', chatJid, messageId, ?, queuedAt FROM read_outbox
+                """, arguments: [OutboxChange.receiptPayload])
+            try db.drop(table: "read_outbox")
+        }
+
         return m
     }
 

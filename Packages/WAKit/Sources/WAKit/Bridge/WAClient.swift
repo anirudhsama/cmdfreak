@@ -268,26 +268,37 @@ actor SendRecovery {
     private static func key(_ m: MessageRecord) -> String { m.chatJid + "/" + m.id }
 }
 
-/// Sends the read receipts ingest queued in `read_outbox`, one bridge call per chat. A chat's
-/// receipts leave the outbox only once the server acked them: a failed send (offline) stays queued
-/// for the next flush, the next read or a reconnect, and one sent but never acked (the connection
-/// died under it) goes again after the reconnect. One flush at a time; calls during one run
-/// another after it.
-actor ReadReceiptSender {
+/// Sends what ingest queued in `outbox`: read receipts (one bridge call per chat), reactions,
+/// edits, revokes and chat actions. Each bridge call returns once the server confirmed it, and only
+/// then does the row go. A failure leaves it for the next pass: the next change, a reconnect, or
+/// `retryDelay` later while connected. Failures with the connection up count; after `maxAttempts`
+/// ingest gives up on the row and undoes the local change. Nothing is counted while disconnected,
+/// and a pass stops at the first failure then. One pass at a time; calls during one run another
+/// after it.
+actor Outbox {
+    static let maxAttempts = 5
+
     private let ingest: IngestActor
     private let bridge: any WaBridgeProtocol
     private let delay: Duration
+    private let retryDelay: Duration
+    private var connected = false
     private var scheduled = false
+    private var retryScheduled = false
     private var running = false
     private var again = false
 
-    init(ingest: IngestActor, bridge: any WaBridgeProtocol, delay: Duration = .milliseconds(300)) {
+    init(ingest: IngestActor, bridge: any WaBridgeProtocol, delay: Duration = .milliseconds(300), retryDelay: Duration = .seconds(30)) {
         self.ingest = ingest
         self.bridge = bridge
         self.delay = delay
+        self.retryDelay = retryDelay
     }
 
-    /// Flushes after `delay`, so receipts for messages arriving together go out in one call.
+    func setConnected(_ connected: Bool) { self.connected = connected }
+
+    /// Flushes after `delay`, so changes made together (receipts for messages arriving together)
+    /// go out in one pass.
     func schedule() {
         guard !scheduled else { return }
         scheduled = true
@@ -303,11 +314,13 @@ actor ReadReceiptSender {
             return
         }
         running = true
+        var failed = false
         repeat {
             again = false
-            await pass()
+            failed = await pass()
         } while again
         running = false
+        if failed, connected { scheduleRetry() }
     }
 
     private func runScheduled() async {
@@ -315,19 +328,89 @@ actor ReadReceiptSender {
         await flush()
     }
 
-    private func pass() async {
-        let pending: [String: [BridgeMessageKey]]
-        do { pending = try await ingest.pendingReads() } catch {
-            WAKit.log.error("pending reads: \(error)")
-            return
+    private func scheduleRetry() {
+        guard !retryScheduled else { return }
+        retryScheduled = true
+        Task {
+            try? await Task.sleep(for: retryDelay)
+            await runRetry()
         }
-        for (chat, keys) in pending {
-            do {
-                let batches = try await bridge.markRead(chat: chat, messages: keys)
-                try await ingest.readsSent(chatJid: chat, batches: batches)
-            } catch {
-                WAKit.log.error("markRead \(chat, privacy: .private) failed: \(error)")
+    }
+
+    private func runRetry() async {
+        retryScheduled = false
+        await flush()
+    }
+
+    /// Returns whether anything failed.
+    private func pass() async -> Bool {
+        let due: OutboxDue
+        do { due = try await ingest.outboxDue() } catch {
+            WAKit.log.error("outbox: \(error)")
+            return true
+        }
+        var failed = false
+        for r in due.receipts {
+            guard await attempt(r.rowIds, "receipts", { [bridge] in try await bridge.markRead(chat: r.chatJid, messages: r.keys) }) else {
+                failed = true
+                if !connected { return true }
+                continue
             }
+        }
+        for e in due.changes {
+            // Changes made or received while this pass waited on earlier sends may have replaced it.
+            guard (try? await ingest.claimOutbox(e)) == true else { continue }
+            guard await attempt([e.id], e.change.kind, entry: e, { try await self.send(e) }) else {
+                failed = true
+                if !connected { return true }
+                continue
+            }
+        }
+        return failed
+    }
+
+    private func attempt(_ ids: [Int64], _ what: String, entry: OutboxEntry? = nil, _ body: @Sendable () async throws -> Void) async -> Bool {
+        let wasConnected = connected
+        do {
+            try await body()
+        } catch {
+            WAKit.log.error("outbox: \(what, privacy: .public) failed: \(error)")
+            // The connection dropped under it (`NotConnected`, even without a disconnect event):
+            // not the row's fault.
+            var dropped = false
+            if case BridgeError.NotConnected = error { dropped = true }
+            _ = try? await ingest.outboxFailed(ids, entry: entry, error: "\(error)", counted: wasConnected && connected && !dropped,
+                                               maxAttempts: Self.maxAttempts)
+            return false
+        }
+        // Confirmed: a failure to record it must not send it again.
+        do { try await ingest.outboxSent(ids, entry: entry) } catch {
+            WAKit.log.error("outbox: recording a confirmed \(what, privacy: .public) failed: \(error)")
+        }
+        return true
+    }
+
+    private func send(_ e: OutboxEntry) async throws {
+        func key(_ fromMe: Bool, _ participant: String?) -> BridgeMessageKey {
+            BridgeMessageKey(chatJid: e.chatJid, id: e.messageId, fromMe: fromMe, participant: participant)
+        }
+        switch e.change {
+        case .receipt:
+            break
+        case .reaction(let fromMe, let participant, let emoji, _, _):
+            try await bridge.sendReaction(target: key(fromMe, participant), emoji: emoji)
+        case .edit(let text, _, _, _):
+            try await bridge.editMessage(target: key(true, nil), text: text)
+        case .revoke(let fromMe, let participant, _, _):
+            try await bridge.revokeMessage(target: key(fromMe, participant))
+        case .pin(let pinnedAt, _):
+            try await bridge.pinChat(chat: e.chatJid, pinned: pinnedAt != nil)
+        case .mute(let until, _):
+            try await bridge.muteChat(chat: e.chatJid, until: until)
+        case .archive(let archived, _):
+            try await bridge.archiveChat(chat: e.chatJid, archived: archived)
+        case .markRead(let read, _):
+            try await bridge.markChatRead(chat: e.chatJid, read: read)
         }
     }
 }
@@ -374,7 +457,7 @@ public final class WAClient: Sendable {
     public let businesses: BusinessService
     public let avatars: AvatarService
     let recovery: SendRecovery
-    let receipts: ReadReceiptSender
+    let outbox: Outbox
     public var feed: MessageChangeFeed { ingest.feed }
     public var focus: ChatFocus { ingest.focus }
     /// Messages to notify about and notifications to withdraw. Single consumer.
@@ -422,8 +505,8 @@ public final class WAClient: Sendable {
         let businesses = BusinessService(bridge: bridge, ingest: ingest)
         self.businesses = businesses
         avatars = AvatarService(bridge: bridge, ingest: ingest)
-        let receipts = ReadReceiptSender(ingest: ingest, bridge: bridge)
-        self.receipts = receipts
+        let outbox = Outbox(ingest: ingest, bridge: bridge)
+        self.outbox = outbox
         let retrier = ParkedRetrier(ingest: ingest, bridge: bridge)
 
         // Single consumer: batches are applied one at a time, in bridge order.
@@ -431,7 +514,7 @@ public final class WAClient: Sendable {
             let now = Int64(Date().timeIntervalSince1970)
             try? await ingest.prunePendingMutations(olderThan: now - 14 * 86_400, readMarkersOlderThan: now - 60 * 86_400)
             try? await ingest.pruneTombstones(olderThan: now - 90 * 86_400)
-            try? await ingest.pruneReadOutbox(olderThan: now - 14 * 86_400)
+            try? await ingest.pruneOutbox(olderThan: now - 14 * 86_400)
             for await batch in ingestStream {
                 var result = IngestResult()
                 do {
@@ -441,7 +524,7 @@ public final class WAClient: Sendable {
                     WAKit.log.error("ingest failed: \(error)")
                     batch.done?.finish(committed: false)
                 }
-                if !result.reads.isEmpty { await receipts.schedule() }
+                if !result.reads.isEmpty { await outbox.schedule() }
                 if !result.parked.isEmpty {
                     await retrier.retry(result.parked)
                     await retrier.scheduleSweep()
@@ -449,14 +532,12 @@ public final class WAClient: Sendable {
                 if let state = batch.events.last(where: { if case .connection = $0 { true } else { false } }),
                    case .connection(let connection) = state {
                     await recovery.setConnected(connection == .connected)
+                    await outbox.setConnected(connection == .connected)
                 }
                 if batch.events.contains(where: { if case .connection(.connected) = $0 { true } else { false } }) {
                     await retrier.scheduleSweep()
                     Task { await recovery.run(reconnected: true) }
-                    Task {
-                        try? await ingest.resendUnackedReads()
-                        await receipts.flush()
-                    }
+                    Task { await outbox.flush() }
                 }
                 let staleGroups = batch.events.compactMap { event -> String? in
                     if case .group(let g) = event, g.membershipChanged { g.jid } else { nil }
@@ -520,8 +601,7 @@ public final class WAClient: Sendable {
     public func markRead(_ chatJid: String) async {
         do {
             let result = try await ingest.chatOpened(chatJid)
-            if !result.unreadKeys.isEmpty { await receipts.flush() }
-            if result.wasMarkedUnread { try await bridge.markChatRead(chat: chatJid, read: true) }
+            if !result.unreadKeys.isEmpty || result.wasMarkedUnread { await outbox.flush() }
         } catch {
             WAKit.log.error("markRead \(chatJid, privacy: .private) failed: \(error)")
         }
@@ -637,26 +717,25 @@ public final class WAClient: Sendable {
                      snippet: String((item.message.text ?? "").prefix(200)))
     }
 
-    // MARK: Message actions
+    // MARK: Message actions (optimistic locally, then queued in `outbox`)
 
     /// Toggle semantics are the caller's: pass "" to remove your reaction.
     public func react(to key: BridgeMessageKey, emoji: String) async throws {
-        let reaction = BridgeReaction(senderJid: ownJid ?? "", fromMe: true, emoji: emoji, timestamp: Int64(Date().timeIntervalSince1970))
-        try await ingest.apply([.messages(messages: [], updates: [.reaction(target: key, reaction: reaction)])])
-        try await bridge.sendReaction(target: key, emoji: emoji)
+        try await ingest.localReaction(key, emoji: emoji, senderJid: ownJid ?? "", timestamp: Self.now)
+        await outbox.schedule()
     }
 
     public func edit(_ key: BridgeMessageKey, text: String) async throws {
-        try await bridge.editMessage(target: key, text: text)
-        try await ingest.localEdit(key, text: text, editedAt: Int64(Date().timeIntervalSince1970))
+        try await ingest.localEdit(key, text: text, editedAt: Self.now)
+        await outbox.schedule()
     }
 
     public func revoke(_ key: BridgeMessageKey) async throws {
-        try await bridge.revokeMessage(target: key)
-        try await ingest.apply([.messages(messages: [], updates: [
-            .revoke(target: key, revokedBy: ownJid ?? "", timestamp: Int64(Date().timeIntervalSince1970)),
-        ])])
+        try await ingest.localRevoke(key, timestamp: Self.now)
+        await outbox.schedule()
     }
+
+    private static var now: Int64 { Int64(Date().timeIntervalSince1970) }
 
     public func sendChatState(_ state: ChatState, in chatJid: String) async {
         try? await bridge.sendChatState(chat: chatJid, state: state)
@@ -666,28 +745,28 @@ public final class WAClient: Sendable {
         try? await bridge.subscribePresence(jid: jid)
     }
 
-    // MARK: Chat actions (optimistic locally, then synced)
+    // MARK: Chat actions (optimistic locally, then queued in `outbox`)
 
     public func setPinned(_ chatJid: String, _ pinned: Bool) async throws {
-        try await ingest.applyLocal(.pin(chatJid: chatJid, pinnedAt: pinned ? Int64(Date().timeIntervalSince1970) : nil))
-        try await bridge.pinChat(chat: chatJid, pinned: pinned)
+        try await ingest.applyLocal(.pin(chatJid: chatJid, pinnedAt: pinned ? Self.now : nil))
+        await outbox.schedule()
     }
 
     /// `nil` unmutes; `Int64.max` mutes forever.
     public func setMuted(_ chatJid: String, until: Int64?) async throws {
         try await ingest.applyLocal(.mute(chatJid: chatJid, mutedUntil: until))
-        try await bridge.muteChat(chat: chatJid, until: until)
+        await outbox.schedule()
     }
 
     public func setArchived(_ chatJid: String, _ archived: Bool) async throws {
         try await ingest.applyLocal(.archive(chatJid: chatJid, archived: archived))
-        try await bridge.archiveChat(chat: chatJid, archived: archived)
+        await outbox.schedule()
     }
 
     /// `read == false` marks the chat unread.
     public func setRead(_ chatJid: String, _ read: Bool) async throws {
         try await ingest.applyLocal(.markRead(chatJid: chatJid, read: read))
-        try await bridge.markChatRead(chat: chatJid, read: read)
+        await outbox.schedule()
     }
 }
 
