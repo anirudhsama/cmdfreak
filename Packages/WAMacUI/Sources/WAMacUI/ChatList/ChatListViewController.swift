@@ -1,12 +1,13 @@
 import AppKit
 import WAKit
 
-/// The chat list: an `NSCollectionView` driven by a diffable snapshot of chat JIDs. Row content
-/// lives in long-lived `ChatRowState` objects keyed by JID; a snapshot change only re-points
-/// reused items at existing states. The list is fed by WAKit's chat-list observation (first value
-/// synchronous), so the first frame has content.
+/// The chat list: an `NSTableView` driven by a diffable snapshot of chat JIDs. Row content lives
+/// in long-lived `ChatRowState` objects keyed by JID; a snapshot change only re-points reused cells
+/// at existing states. The list is fed by WAKit's chat-list observation (first value synchronous),
+/// so the first frame has content. Swiping a row uncovers its actions (`RowSwipeController`):
+/// read/unread on the leading edge, archive and pin on the trailing edge.
 @MainActor
-final class ChatListViewController: NSViewController, NSCollectionViewDelegate {
+final class ChatListViewController: NSViewController, NSTableViewDelegate {
     let client: WAClient
     let actions: ChatActions
     let appearance = ChatListAppearance()
@@ -41,9 +42,10 @@ final class ChatListViewController: NSViewController, NSCollectionViewDelegate {
     }
     private(set) var selectedJid: String?
 
-    private let collectionView = ChatListCollectionView()
+    private let tableView = ChatListTableView()
+    private lazy var swipe = RowSwipeController(tableView: tableView)
     private let scrollView = NSScrollView()
-    private var dataSource: NSCollectionViewDiffableDataSource<Int, String>!
+    private var dataSource: NSTableViewDiffableDataSource<Int, String>!
     private var states: [String: ChatRowState] = [:]
     private let avatarLoader: AvatarLoader
     private var observation: AnyDatabaseCancellable?
@@ -68,46 +70,68 @@ final class ChatListViewController: NSViewController, NSCollectionViewDelegate {
     // MARK: View
 
     override func loadView() {
-        collectionView.collectionViewLayout = Self.makeLayout()
-        collectionView.backgroundColors = [.clear]
-        collectionView.isSelectable = true
-        collectionView.allowsEmptySelection = true
-        collectionView.allowsMultipleSelection = false
-        collectionView.delegate = self
-        collectionView.register(ChatRowItem.self, forItemWithIdentifier: ChatRowItem.identifier)
+        let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("chat"))
+        column.resizingMask = .autoresizingMask
+        tableView.addTableColumn(column)
+        tableView.headerView = nil
+        tableView.style = .plain
+        tableView.columnAutoresizingStyle = .uniformColumnAutoresizingStyle
+        tableView.intercellSpacing = .zero
+        tableView.rowHeight = ChatRowMetrics.height
+        tableView.backgroundColor = .clear
+        tableView.allowsEmptySelection = true
+        tableView.allowsMultipleSelection = false
+        tableView.delegate = self
+        tableView.swipe = swipe
+        swipe.actions = { [weak self] row, edge in
+            guard let self, let jid = dataSource.itemIdentifier(forRow: row), let chat = states[jid]?.item.chat else { return [] }
+            return actions.swipeActions(for: chat, edge: edge)
+        }
 
-        scrollView.documentView = collectionView
+        scrollView.documentView = tableView
         scrollView.drawsBackground = false
         scrollView.hasVerticalScroller = true
         scrollView.autohidesScrollers = true
         scrollView.scrollerStyle = .overlay
+        scrollView.horizontalScrollElasticity = .none
         // Set by the column from its safe area plus the floating search field (`topInset`).
         scrollView.automaticallyAdjustsContentInsets = false
+        scrollView.contentInsets.bottom = 12
         view = scrollView
 
-        dataSource = NSCollectionViewDiffableDataSource<Int, String>(collectionView: collectionView) { [weak self] collectionView, indexPath, jid in
-            let item = collectionView.makeItem(withIdentifier: ChatRowItem.identifier, for: indexPath)
-            guard let self, let row = item as? ChatRowItem, let state = states[jid] else { return item }
-            row.configure(state: state, appearance: appearance)
-            row.onContextMenu = { [weak self] state in self?.actions.contextMenu(for: state.item.chat) }
+        dataSource = NSTableViewDiffableDataSource<Int, String>(tableView: tableView) { [weak self] tableView, _, _, jid in
+            let cell = tableView.makeView(withIdentifier: ChatRowCell.identifier, owner: nil) as? ChatRowCell ?? {
+                let cell = ChatRowCell()
+                cell.identifier = ChatRowCell.identifier
+                return cell
+            }()
+            guard let self, let state = states[jid] else { return cell }
+            cell.configure(state: state, appearance: appearance)
+            cell.onContextMenu = { [weak self] state in self?.actions.contextMenu(for: state.item.chat) }
             avatarLoader.load(state)
-            return item
+            return cell
         }
+        dataSource.rowViewProvider = { [weak self] tableView, _, jid in
+            let rowView = tableView.makeView(withIdentifier: ChatTableRowView.identifier, owner: nil) as? ChatTableRowView ?? {
+                let rowView = ChatTableRowView()
+                rowView.identifier = ChatTableRowView.identifier
+                return rowView
+            }()
+            rowView.state = (jid as? String).flatMap { self?.states[$0] }
+            return rowView
+        }
+        dataSource.defaultRowAnimation = .effectFade
         startObserving()
-    }
-
-    private static func makeLayout() -> NSCollectionViewCompositionalLayout {
-        let size = NSCollectionLayoutSize(widthDimension: .fractionalWidth(1), heightDimension: .absolute(ChatRowMetrics.height))
-        let item = NSCollectionLayoutItem(layoutSize: size)
-        let group = NSCollectionLayoutGroup.vertical(layoutSize: size, subitems: [item])
-        let section = NSCollectionLayoutSection(group: group)
-        section.contentInsets = NSDirectionalEdgeInsets(top: 0, leading: 0, bottom: 12, trailing: 0)
-        return NSCollectionViewCompositionalLayout(section: section)
     }
 
     override func viewDidAppear() {
         super.viewDidAppear()
         updateEmphasis()
+    }
+
+    override func viewDidDisappear() {
+        super.viewDidDisappear()
+        swipe.reset()
     }
 
     // MARK: Data
@@ -146,15 +170,16 @@ final class ChatListViewController: NSViewController, NSCollectionViewDelegate {
         let animate = hasAppliedSnapshot && view.window != nil
         dataSource.apply(snapshot, animatingDifferences: animate)
         hasAppliedSnapshot = true
+        swipe.reconcile()
 
-        if let selectedJid, indexPath(for: selectedJid) == nil {
+        if let selectedJid, row(for: selectedJid) == nil {
             // Selected chat left this filter (archived, or the rail switched); keep the content side as is.
-            collectionView.deselectAll(nil)
+            tableView.deselectAll(nil)
         } else {
-            syncSelectionToCollectionView()
+            syncSelectionToTableView()
             // The open chat jumped (usually to the top, after a send): follow it if it was on screen.
             if selectedWasVisible {
-                collectionView.layoutSubtreeIfNeeded()
+                tableView.layoutSubtreeIfNeeded()
                 if !isSelectedRowVisible { revealSelectedRow() }
             }
         }
@@ -172,10 +197,10 @@ final class ChatListViewController: NSViewController, NSCollectionViewDelegate {
     }
 
     private var isSelectedRowVisible: Bool {
-        guard let selectedJid, let path = indexPath(for: selectedJid),
-              let frame = collectionView.layoutAttributesForItem(at: path)?.frame else { return false }
+        guard let selectedJid, let row = row(for: selectedJid) else { return false }
+        let frame = tableView.rect(ofRow: row)
         // Rows under the toolbar (the top content inset) count as hidden.
-        var visible = collectionView.visibleRect
+        var visible = tableView.visibleRect
         let inset = scrollView.contentInsets.top
         visible.origin.y += inset
         visible.size.height -= inset
@@ -183,17 +208,17 @@ final class ChatListViewController: NSViewController, NSCollectionViewDelegate {
     }
 
     /// Scrolls the least needed to show the selected row in full below the toolbar and search
-    /// field (`scrollToItems` ignores the top inset and can leave it under them).
+    /// field (`scrollRowToVisible` ignores the top inset and can leave it under them).
     private func revealSelectedRow() {
-        guard let selectedJid, let path = indexPath(for: selectedJid),
-              let frame = collectionView.layoutAttributesForItem(at: path)?.frame else { return }
+        guard let selectedJid, let row = row(for: selectedJid) else { return }
+        let frame = tableView.rect(ofRow: row)
         let clip = scrollView.contentView
         let inset = scrollView.contentInsets.top
         let top = clip.bounds.minY + inset
         var y: CGFloat
         if frame.minY < top {
-            // The first row goes all the way up, so the section's top inset shows too.
-            y = path.item == 0 ? -inset : frame.minY - inset
+            // The first row goes all the way up, to the top of the content.
+            y = row == 0 ? -inset : frame.minY - inset
         } else if frame.maxY > clip.bounds.maxY {
             y = frame.maxY - clip.bounds.height
         } else {
@@ -207,27 +232,26 @@ final class ChatListViewController: NSViewController, NSCollectionViewDelegate {
 
     // MARK: Selection
 
-    func indexPath(for jid: String) -> IndexPath? {
-        dataSource.indexPath(for: jid)
+    func row(for jid: String) -> Int? {
+        dataSource.row(forItemIdentifier: jid)
     }
 
     /// Selects `jid` (or clears with `nil`), scrolls to it, and reports it through `onSelect`.
     func select(_ jid: String?) {
         selectedJid = jid
-        syncSelectionToCollectionView(scroll: true)
+        syncSelectionToTableView(scroll: true)
         onSelect?(jid)
     }
 
-    /// Re-applies `selectedJid` to the collection view without notifying.
-    private func syncSelectionToCollectionView(scroll: Bool = false) {
-        guard let selectedJid, let path = indexPath(for: selectedJid) else {
-            if !collectionView.selectionIndexPaths.isEmpty { collectionView.deselectAll(nil) }
+    /// Re-applies `selectedJid` to the table view without notifying.
+    private func syncSelectionToTableView(scroll: Bool = false) {
+        guard let selectedJid, let row = row(for: selectedJid) else {
+            if tableView.selectedRow >= 0 { tableView.deselectAll(nil) }
             return
         }
-        let target: Set<IndexPath> = [path]
-        if collectionView.selectionIndexPaths != target { collectionView.selectionIndexPaths = target }
+        if tableView.selectedRowIndexes != [row] { tableView.selectRowIndexes([row], byExtendingSelection: false) }
         if scroll {
-            collectionView.layoutSubtreeIfNeeded()
+            tableView.layoutSubtreeIfNeeded()
             revealSelectedRow()
         }
     }
@@ -269,7 +293,7 @@ final class ChatListViewController: NSViewController, NSCollectionViewDelegate {
     }
 
     private func updateEmphasis() {
-        appearance.isEmphasized = collectionView.window?.isKeyWindow == true
+        appearance.isEmphasized = tableView.window?.isKeyWindow == true
     }
 
     func windowKeyStateChanged() { updateEmphasis() }
@@ -305,29 +329,39 @@ final class ChatListViewController: NSViewController, NSCollectionViewDelegate {
         return ChatTyping(senders: senders, recording: typists.values.allSatisfy(\.recording))
     }
 
-    // MARK: NSCollectionViewDelegate
+    // MARK: NSTableViewDelegate
 
-    func collectionView(_ collectionView: NSCollectionView, didSelectItemsAt indexPaths: Set<IndexPath>) {
-        guard let path = indexPaths.first, let jid = dataSource.itemIdentifier(for: path) else { return }
-        guard jid != selectedJid else { return }
-        selectedJid = jid
-        syncSelectionToCollectionView()
-        onSelect?(jid)
+    func tableView(_ tableView: NSTableView, selectionIndexesForProposedSelection proposed: IndexSet) -> IndexSet {
+        // A click while a row is swiped open only closes it.
+        if swipe.isOpen {
+            swipe.close()
+            return tableView.selectedRowIndexes
+        }
+        // A chat stays open once chosen: refuse user-driven clearing (⌘-click, a click below the rows).
+        return proposed.isEmpty && selectedJid != nil ? tableView.selectedRowIndexes : proposed
     }
 
-    func collectionView(_ collectionView: NSCollectionView, didDeselectItemsAt indexPaths: Set<IndexPath>) {
-        // A chat stays open once chosen: undo user-driven clearing (⌘-click, a click below the rows).
-        guard collectionView.selectionIndexPaths.isEmpty, selectedJid != nil else { return }
-        syncSelectionToCollectionView()
+    func tableViewSelectionDidChange(_ notification: Notification) {
+        guard tableView.selectedRow >= 0, let jid = dataSource.itemIdentifier(forRow: tableView.selectedRow) else { return }
+        guard jid != selectedJid else { return }
+        selectedJid = jid
+        onSelect?(jid)
     }
 }
 
 /// Never takes keyboard focus: focus lives in the open chat, and chats switch by click, menu
 /// shortcut or the search field.
-final class ChatListCollectionView: NSCollectionView {
+final class ChatListTableView: NSTableView {
+    var swipe: RowSwipeController?
+
     override var acceptsFirstResponder: Bool { false }
     // `makeFirstResponder` does not consult `acceptsFirstResponder`; clicks go through it.
     override func becomeFirstResponder() -> Bool { false }
+
+    override func scrollWheel(with event: NSEvent) {
+        guard let swipe else { return super.scrollWheel(with: event) }
+        swipe.scrollWheel(event) { super.scrollWheel(with: $0) }
+    }
 }
 
 #if DEBUG
@@ -336,27 +370,27 @@ extension ChatListViewController {
         guard let window = view.window else { return false }
         let previous = window.firstResponder
         defer { window.makeFirstResponder(previous) }
-        window.makeFirstResponder(collectionView)
-        return window.firstResponder !== collectionView
+        window.makeFirstResponder(tableView)
+        return window.firstResponder !== tableView
     }
 
-    /// A synthetic click (mouse-down and -up) on the visible part of the row at `index`; the
-    /// floating sidebar covers the list's leading edge. Delivered to the collection view directly:
-    /// a window that is not key (a locked test session) swallows the first click.
+    /// A synthetic click (mouse-down and -up) on the row at `index`, at the first point from its
+    /// trailing end that hits the table. Delivered through the window: the table handles clicks with
+    /// gesture recognizers, which never see a direct `mouseDown`.
     func debugClick(row index: Int, modifiers: NSEvent.ModifierFlags = []) {
-        guard let window, let frameView = window.contentView?.superview, items.indices.contains(index),
-              let frame = collectionView.layoutAttributesForItem(at: IndexPath(item: index, section: 0))?.frame else { return }
+        guard let window, let frameView = window.contentView?.superview, items.indices.contains(index) else { return }
+        let frame = tableView.rect(ofRow: index)
         let candidates = stride(from: frame.maxX - 20, to: frame.minX, by: -20).map {
-            collectionView.convert(NSPoint(x: $0, y: frame.midY), to: nil)
+            tableView.convert(NSPoint(x: $0, y: frame.midY), to: nil)
         }
-        guard let point = candidates.first(where: { frameView.hitTest($0)?.isDescendant(of: collectionView) == true }) else { return }
+        guard let point = candidates.first(where: { frameView.hitTest($0)?.isDescendant(of: tableView) == true }) else { return }
         func event(_ type: NSEvent.EventType) -> NSEvent? {
             NSEvent.mouseEvent(with: type, location: point, modifierFlags: modifiers, timestamp: ProcessInfo.processInfo.systemUptime,
                                windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1)
         }
         guard let down = event(.leftMouseDown), let up = event(.leftMouseUp) else { return }
-        collectionView.mouseDown(with: down)
-        collectionView.mouseUp(with: up)
+        window.sendEvent(down)
+        window.sendEvent(up)
     }
 
     private var window: NSWindow? { view.window }

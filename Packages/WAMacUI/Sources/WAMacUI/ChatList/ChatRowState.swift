@@ -3,8 +3,8 @@ import Observation
 import WAKit
 
 /// Per-row model the SwiftUI row observes. One instance lives per chat for as long as the chat is
-/// in the list; a reused collection item is re-pointed at a different state instead of rebuilding
-/// its hosting view. Everything displayable is precomputed here, so the row body does no work
+/// in the list; a reused table cell is re-pointed at a different state instead of rebuilding its
+/// hosting view. Everything displayable is precomputed here, so the row body does no work
 /// beyond reading fields.
 @MainActor @Observable
 final class ChatRowState: Identifiable {

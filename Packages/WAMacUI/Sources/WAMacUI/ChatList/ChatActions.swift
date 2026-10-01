@@ -1,8 +1,8 @@
 import AppKit
 import WAKit
 
-/// Chat-level actions shared by the menu bar and the row context menu. Each call is optimistic in
-/// WAKit; failures are logged, not surfaced, since the local state already changed.
+/// Chat-level actions shared by the menu bar, the row context menu and the row swipe actions. Each
+/// call is optimistic in WAKit; failures are logged, not surfaced, since the local state already changed.
 @MainActor
 struct ChatActions {
     let client: WAClient
@@ -77,6 +77,24 @@ struct ChatActions {
         menu.addItem(makeItem(chat.archived ? "Unarchive" : "Archive",
                               symbol: chat.archived ? "tray.and.arrow.up" : "archivebox") { toggleArchive(chat) })
         return menu
+    }
+
+    /// What swiping `chat`'s row uncovers, outermost first: read/unread on the leading edge, archive
+    /// and pin on the trailing edge. A full swipe runs the outermost.
+    func swipeActions(for chat: ChatRecord, edge: SwipeEdge) -> [SwipeAction] {
+        switch edge {
+        case .leading:
+            let unread = chat.unreadCount > 0 || chat.markedUnread
+            return [SwipeAction(title: unread ? "Mark as Read" : "Mark as Unread",
+                                symbol: unread ? "envelope.open.fill" : "envelope.badge.fill", color: .systemBlue) { toggleUnread(chat) }]
+        case .trailing:
+            return [
+                SwipeAction(title: chat.archived ? "Unarchive" : "Archive", symbol: chat.archived ? "tray.and.arrow.up.fill" : "archivebox.fill",
+                            color: .systemPurple, removesRow: true) { toggleArchive(chat) },
+                SwipeAction(title: chat.isPinned ? "Unpin" : "Pin", symbol: chat.isPinned ? "pin.slash.fill" : "pin.fill",
+                            color: .systemOrange) { togglePin(chat) },
+            ]
+        }
     }
 
     private func makeItem(_ title: String, symbol: String?, _ action: @escaping @MainActor () -> Void) -> NSMenuItem {

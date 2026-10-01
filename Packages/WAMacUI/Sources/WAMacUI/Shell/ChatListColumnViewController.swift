@@ -53,7 +53,7 @@ final class ChatListColumnViewController: NSViewController {
         searchBar.onCommit = { [weak self] in
             guard let self else { return }
             // Return on a search that hides the open chat opens the top result.
-            if !searchBar.text.isEmpty, chatList.selectedJid.flatMap(chatList.indexPath(for:)) == nil {
+            if !searchBar.text.isEmpty, chatList.selectedJid.flatMap(chatList.row(for:)) == nil {
                 chatList.selectAdjacent(offset: 1)
             }
             onFocusCompose?()
@@ -61,7 +61,9 @@ final class ChatListColumnViewController: NSViewController {
         footer.sizingOptions = []
         footerHeight = footer.heightAnchor.constraint(equalToConstant: 0)
         NSLayoutConstraint.activate([
-            listView.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+            // Rows start at the floating sidebar's edge, not under it: a swipe reveals its actions at
+            // the row's edge, and moves the row out of the safe area its content is laid out in.
+            listView.leadingAnchor.constraint(equalTo: root.safeAreaLayoutGuide.leadingAnchor),
             listView.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             // Under the toolbar: the scroll view insets its content and draws the scroll-edge glass.
             listView.topAnchor.constraint(equalTo: root.topAnchor),
