@@ -165,6 +165,9 @@ pub async fn map_event(ctx: &MapCtx<'_>, event: &Event) -> Vec<BridgeEvent> {
                 ack: BridgeServerAck { chat_jid, message_id: a.id.clone(), error: a.error.clone() },
             });
         }
+        Event::ServerAck(a) if a.class.as_deref() == Some("receipt") && a.error.is_none() => {
+            out.push(BridgeEvent::ReceiptAck { ack_id: a.id.clone() });
+        }
         Event::ChatPresence(p) => {
             out.push(BridgeEvent::ChatPresence { presence: chat_presence(ctx, p).await });
         }

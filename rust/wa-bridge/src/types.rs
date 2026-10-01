@@ -326,6 +326,14 @@ pub struct BridgeReceipt {
     pub timestamp: i64,
 }
 
+/// One `<receipt>` stanza `mark_read` sent. Written to the socket only: it counts once the server
+/// acks it (`BridgeEvent::ReceiptAck` with this `ack_id`, its first message id).
+#[derive(Debug, Clone, serde::Serialize, uniffi::Record)]
+pub struct BridgeReceiptBatch {
+    pub ack_id: String,
+    pub message_ids: Vec<String>,
+}
+
 #[derive(Debug, Clone, serde::Serialize, uniffi::Record)]
 pub struct BridgeServerAck {
     /// None when the server omitted it.
@@ -452,6 +460,9 @@ pub enum BridgeEvent {
     /// The server accepted (`error == None`) or rejected one of our messages. Until then a sent
     /// message was only written to the socket, which a dying connection can swallow.
     ServerAck { ack: BridgeServerAck },
+    /// The server accepted a `<receipt>` we sent, acked under its first message id
+    /// (`BridgeReceiptBatch::ack_id`).
+    ReceiptAck { ack_id: String },
     ChatPresence { presence: BridgeChatPresence },
     Presence { presence: BridgePresence },
     Contacts { contacts: Vec<BridgeContact> },

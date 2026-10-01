@@ -421,7 +421,7 @@ public actor IngestActor {
 
     // MARK: Read receipts
 
-    /// Owes read receipts for `keys` until `readsSent`. Runs in the transaction that reads them.
+    /// Owes read receipts for `keys` until the server acks them. Runs in the transaction that reads them.
     private static func queueReads(_ db: Database, _ keys: [BridgeMessageKey]) throws {
         for k in keys {
             try db.execute(sql: "INSERT OR IGNORE INTO read_outbox (chatJid, messageId, queuedAt) VALUES (?, ?, ?)",
@@ -429,24 +429,36 @@ public actor IngestActor {
         }
     }
 
-    /// Read receipts still owed, oldest first, per chat.
+    /// Read receipts owed and not yet sent on this connection, oldest first, per chat.
     public func pendingReads(limit: Int = 1000) throws -> [String: [BridgeMessageKey]] {
         let rows = try database.pool.read { db in
             try MessageRecord.fetchAll(db, sql: """
                 SELECT message.* FROM read_outbox
                 JOIN message ON message.chatJid = read_outbox.chatJid AND message.id = read_outbox.messageId
+                WHERE read_outbox.ackId IS NULL
                 ORDER BY message.sortKey LIMIT ?
                 """, arguments: [limit])
         }
         return Dictionary(grouping: rows.map(\.key), by: \.chatJid)
     }
 
-    /// The bridge sent receipts for `ids` in `chatJid`.
-    public func readsSent(chatJid: String, ids: [String]) throws {
-        guard !ids.isEmpty else { return }
+    /// The bridge wrote `batches` for `chatJid` to the socket: each waits for its server ack.
+    public func readsSent(chatJid: String, batches: [BridgeReceiptBatch]) throws {
+        guard !batches.isEmpty else { return }
         try perform { db, _ in
-            try db.execute(sql: "DELETE FROM read_outbox WHERE chatJid = ? AND messageId IN (\(ids.map { _ in "?" }.joined(separator: ",")))",
-                           arguments: StatementArguments([chatJid] + ids))
+            for b in batches where !b.messageIds.isEmpty {
+                try db.execute(sql: """
+                    UPDATE read_outbox SET ackId = ?
+                    WHERE chatJid = ? AND messageId IN (\(b.messageIds.map { _ in "?" }.joined(separator: ",")))
+                    """, arguments: StatementArguments([b.ackId, chatJid] + b.messageIds))
+            }
+        }
+    }
+
+    /// A new connection: receipts sent on the last one and never acked may have died with it.
+    public func resendUnackedReads() throws {
+        try perform { db, _ in
+            try db.execute(sql: "UPDATE read_outbox SET ackId = NULL WHERE ackId IS NOT NULL")
         }
     }
 
@@ -565,6 +577,9 @@ public actor IngestActor {
             try handleReceipt(receipt, db, &cs)
         case .serverAck(let ack):
             try handleServerAck(ack, db, &cs)
+        case .receiptAck(let ackId):
+            // Also our delivery receipts' acks, which match no row.
+            try db.execute(sql: "DELETE FROM read_outbox WHERE ackId = ?", arguments: [ackId])
         case .contacts(let contacts):
             for c in contacts { try upsertContact(c, db) }
         case .jidAliases(let aliases):
