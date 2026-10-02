@@ -350,17 +350,7 @@ public actor IngestActor {
             guard let chat = try ChatRecord.fetchOne(db, key: jid) else {
                 return OpenChatResult(unreadKeys: [], wasMarkedUnread: false)
             }
-            var keys: [BridgeMessageKey] = []
-            if chat.unreadCount > 0 {
-                // The unread messages, and for a snapshot's unattributed count the newest others.
-                keys = try MessageRecord.fetchAll(db, sql: """
-                    SELECT * FROM message WHERE chatJid = ? AND fromMe = 0 AND kind != 'system'
-                      AND (unread OR localId IN (
-                          SELECT localId FROM message WHERE chatJid = ? AND fromMe = 0 AND kind != 'system' AND NOT unread
-                          ORDER BY sortKey DESC LIMIT (SELECT unreadUnattributed FROM chat WHERE jid = ?)))
-                    ORDER BY sortKey DESC LIMIT 1000
-                    """, arguments: [jid, jid, jid]).map(\.key)
-            }
+            let keys = try Self.unreadKeys(db, chat)
             if chat.unreadCount > 0 || chat.markedUnread {
                 try db.execute(sql: "UPDATE message SET unread = 0 WHERE chatJid = ? AND unread", arguments: [jid])
                 try db.execute(sql: """
@@ -475,6 +465,10 @@ public actor IngestActor {
     public func applyLocal(_ action: BridgeChatAction) throws {
         try perform { db, cs in
             let queued = try self.outboxChange(for: action, db)
+            // Marking a chat read sends its read receipts, as opening it does.
+            if case .markRead(let jid, true, _, _) = action, let chat = try ChatRecord.fetchOne(db, key: self.canon(jid)) {
+                try Self.queueReads(db, Self.unreadKeys(db, chat))
+            }
             try self.handleChatAction(action, local: true, db, &cs)
             if let (jid, change) = queued { try self.enqueue(db, jid, "", change) }
         }
@@ -584,6 +578,19 @@ public actor IngestActor {
     public func canonicalJid(_ jid: String) -> String { canon(jid) }
 
     // MARK: Outbox
+
+    /// What reading `chat` here sends receipts for: its unread messages, and for a snapshot's
+    /// unattributed count the newest others.
+    private static func unreadKeys(_ db: Database, _ chat: ChatRecord) throws -> [BridgeMessageKey] {
+        guard chat.unreadCount > 0 else { return [] }
+        return try MessageRecord.fetchAll(db, sql: """
+            SELECT * FROM message WHERE chatJid = ? AND fromMe = 0 AND kind != 'system'
+              AND (unread OR localId IN (
+                  SELECT localId FROM message WHERE chatJid = ? AND fromMe = 0 AND kind != 'system' AND NOT unread
+                  ORDER BY sortKey DESC LIMIT (SELECT unreadUnattributed FROM chat WHERE jid = ?)))
+            ORDER BY sortKey DESC LIMIT 1000
+            """, arguments: [chat.jid, chat.jid, chat.jid]).map(\.key)
+    }
 
     /// Owes read receipts for `keys` until the server acks them. Runs in the transaction that reads them.
     private static func queueReads(_ db: Database, _ keys: [BridgeMessageKey]) throws {

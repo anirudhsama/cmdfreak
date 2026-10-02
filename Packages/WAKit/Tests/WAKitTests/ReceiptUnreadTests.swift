@@ -304,4 +304,16 @@ import Testing
         #expect(calls.markChatRead.first?.1 == true)
         #expect(client.focus.current.chatJid == F.bob)
     }
+
+    @Test func clientMarkReadSendsReceipts() async throws {
+        let db = try F.tempDB()
+        let bridge = FakeBridge()
+        let (client, _) = try await makeClient(db, bridge)
+        try await client.ingest.apply([F.live(F.message("1", chat: F.bob), F.message("2", chat: F.bob, ts: 1_700_000_001))])
+        try await client.setRead(F.bob, true)
+        try await waitFor { bridge.calls.withLock { !$0.markRead.isEmpty } }
+        let calls = bridge.calls.withLock { $0 }
+        #expect(Set(calls.markRead.flatMap { $0.1.map(\.id) }) == ["1", "2"])
+        #expect(try #require(try db.chat(F.bob)).unreadCount == 0)
+    }
 }
