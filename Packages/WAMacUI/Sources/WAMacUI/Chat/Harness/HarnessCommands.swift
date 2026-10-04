@@ -21,6 +21,7 @@ import UniformTypeIdentifiers
 ///   resize W H           resize the window
 ///   esc | up | select N  keyboard-equivalents: Esc, ↑ in empty compose, select row N
 ///   reply N | react N E  reply to / react E on the message at row N
+///   reactbar N           open the quick reaction bar on the message at row N
 ///   click N              click the media of the message at row N (download / Quick Look)
 ///   ql                   Quick Look the selected row
 ///   reload               push a `.reload` change through the list pipeline
@@ -84,6 +85,7 @@ enum HarnessCommands {
         case "react":
             let p = arg.split(separator: " ").map(String.init)
             if p.count == 2, let n = Int(p[0]), let item = list.rows.item(atRow: n) { controller.toggleReaction(p[1], on: item) }
+        case "reactbar": if let n = Int(arg) { list.debugShowReactionPicker(row: n) }
         case "click": if let n = Int(arg), let item = list.rows.item(atRow: n) { list.open(item) }
         case "ql": list.quickLookSelection()
         case "reload": list.debugInjectReload()
@@ -125,8 +127,24 @@ enum HarnessCommands {
             return
         }
         guard let dest = CGImageDestinationCreateWithURL(URL(filePath: path) as CFURL, UTType.png.identifier as CFString, 1, nil) else { return }
-        CGImageDestinationAddImage(dest, image, nil)
+        CGImageDestinationAddImage(dest, withChildWindows(image, of: window, scale: rep.size.width > 0 ? CGFloat(rep.pixelsWide) / rep.size.width : 2), nil)
         CGImageDestinationFinalize(dest)
+    }
+
+    /// Child panels (the reaction bar) are separate windows; draws them over the capture.
+    private static func withChildWindows(_ image: CGImage, of window: NSWindow, scale: CGFloat) -> CGImage {
+        let children = (window.childWindows ?? []).filter(\.isVisible)
+        guard !children.isEmpty, let ctx = CGContext(data: nil, width: image.width, height: image.height, bitsPerComponent: 8, bytesPerRow: 0,
+                                                     space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue) else { return image }
+        ctx.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
+        for child in children {
+            guard let view = child.contentView, let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { continue }
+            view.cacheDisplay(in: view.bounds, to: rep)
+            guard let img = rep.cgImage else { continue }
+            let f = child.frame.offsetBy(dx: -window.frame.minX, dy: -window.frame.minY)
+            ctx.draw(img, in: CGRect(x: f.minX * scale, y: f.minY * scale, width: f.width * scale, height: f.height * scale))
+        }
+        return ctx.makeImage() ?? image
     }
 }
 #endif

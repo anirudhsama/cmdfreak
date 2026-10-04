@@ -62,6 +62,7 @@ final class MessageListController: NSViewController {
     private var openedPreviewPanel = false
     private var previewResizeObserver: NSObjectProtocol?
     private let avatarLoader: AvatarLoader
+    private var reactionPicker: ReactionPicker?
 
     private enum ListOp: Sendable {
         case change(MessageChange)
@@ -99,6 +100,11 @@ final class MessageListController: NSViewController {
     }
 
     // MARK: - View
+
+    override func viewWillDisappear() {
+        super.viewWillDisappear()
+        reactionPicker?.close()
+    }
 
     override func loadView() {
         let column = NSTableColumn(identifier: .init("message"))
@@ -194,6 +200,7 @@ final class MessageListController: NSViewController {
         loadingOlder = false
         loadingNewer = false
         closePreviewPanel()
+        reactionPicker?.close()
     }
 
     /// Installs a prepared window and renders it in the current runloop turn.
@@ -244,6 +251,7 @@ final class MessageListController: NSViewController {
     /// Harness: feed a `.reload` through the pipeline as the change feed would.
     func debugInjectReload() { ops?.yield(.change(.reload)) }
     var debugLoadingFlags: (older: Bool, newer: Bool) { (loadingOlder, loadingNewer) }
+    func debugShowReactionPicker(row: Int) { if let item = rows.item(atRow: row) { showReactionPicker(for: item, row: row) } }
     #endif
 
     private func run(_ op: ListOp, gen: Int) async {
@@ -447,6 +455,7 @@ final class MessageListController: NSViewController {
         }
         scheduleWarmup()
         refreshSelectionHighlight()
+        closeStaleReactionPicker()
     }
 
     /// The first message row at least partly visible, and its top's offset from the clip's top.
@@ -493,6 +502,12 @@ final class MessageListController: NSViewController {
         if atBottom { scrollToBottom() }
         scheduleWarmup()
         refreshSelectionHighlight()
+        closeStaleReactionPicker()
+    }
+
+    /// The bar's message was deleted, revoked or paged out.
+    private func closeStaleReactionPicker() {
+        if let id = reactionPicker?.messageId, rows.item(id: id).map(ChatRows.canRespond) != true { reactionPicker?.close() }
     }
 
     func setTyping(_ new: ChatTyping?) {
@@ -589,6 +604,8 @@ final class MessageListController: NSViewController {
 
     @objc private func boundsChanged() {
         wasAtBottom = isAtBottom
+        // The bar is placed in screen coordinates; it would float away from its message.
+        reactionPicker?.close()
         if !view.inLiveResize {
             let minY = clip.bounds.minY + scrollView.contentInsets.top
             if minY < clip.bounds.height * 1.5 { loadOlderIfNeeded() }
@@ -682,6 +699,7 @@ final class MessageListController: NSViewController {
         withoutAnimation { tableView.reloadData() }
         view.layoutSubtreeIfNeeded()
         scheduleWarmup()
+        closeStaleReactionPicker()
         if let row = rows.rowIndex[messageId] { scrollAndFlash(row: row) }
     }
 
@@ -848,7 +866,7 @@ final class MessageListController: NSViewController {
             }
             if mods.isEmpty, key == "r" {
                 guard ChatRows.canRespond(to: item) else { return shake(row: selected) }
-                showReactionMenu(for: item, row: selected)
+                showReactionPicker(for: item, row: selected)
                 return true
             }
         }
@@ -886,23 +904,42 @@ final class MessageListController: NSViewController {
         return true
     }
 
-    static let quickReactions = ["👍", "❤️", "😂", "😮", "😢", "🙏"]
-
-    /// R: the quick reactions under the bubble; 1–6 pick, and the current one is checked.
-    private func showReactionMenu(for item: MessageItem, row: Int) {
-        guard let cell = tableView.view(atColumn: 0, row: row, makeIfNecessary: false) as? MessageCell,
+    /// The quick reaction bar over the message at `row`, from its hover smiley or R. Choosing the
+    /// current reaction removes it.
+    private func showReactionPicker(for item: MessageItem, row: Int) {
+        reactionPicker?.close()
+        guard let window = view.window,
+              let cell = tableView.view(atColumn: 0, row: row, makeIfNecessary: false) as? MessageCell,
               let bubble = cell.plan?.bubble else { return }
-        let mine = item.reactions.first { $0.fromMe }?.emoji
-        let menu = NSMenu()
-        for (i, emoji) in Self.quickReactions.enumerated() {
-            let mi = NSMenuItem(title: emoji, action: #selector(menuReact(_:)), keyEquivalent: String(i + 1))
-            mi.keyEquivalentModifierMask = []
-            mi.representedObject = (item, emoji)
-            mi.target = self
-            mi.state = emoji == mine ? .on : .off
-            menu.addItem(mi)
+        let picker = ReactionPicker(messageId: item.id, current: item.reactions.first { $0.fromMe }?.emoji) { [weak self] emoji in
+            // The message as it is now: reactions may have changed while the bar was open.
+            guard let self, let current = self.rows.item(id: item.id), ChatRows.canRespond(to: current) else { return }
+            self.actions?.toggleReaction(emoji, on: current)
         }
-        menu.popUp(positioning: nil, at: NSPoint(x: bubble.minX, y: bubble.maxY + 4), in: cell)
+        picker.onClose = { [weak self, weak picker] in
+            guard let self, let picker, self.reactionPicker === picker else { return }
+            self.reactionPicker = nil
+            self.refreshReactTarget()
+        }
+        picker.dismissOnlyView = scrollView
+        reactionPicker = picker
+        refreshReactTarget()
+        // Next to the react button that opened it; the bubble only when there is no button (R on a
+        // message too wide for one).
+        let anchor = window.convertToScreen(cell.convert(cell.reactButtonFrame ?? bubble, to: nil))
+        var list = window.convertToScreen(scrollView.convert(scrollView.bounds, to: nil))
+        list.size.height -= scrollView.contentInsets.top
+        list.origin.y += scrollView.contentInsets.bottom
+        list.size.height -= scrollView.contentInsets.bottom
+        picker.show(in: window, anchor: anchor, bounds: list)
+    }
+
+    private func refreshReactTarget() {
+        let id = reactionPicker?.messageId
+        tableView.enumerateAvailableRowViews { rowView, _ in
+            guard let cell = rowView.view(atColumn: 0) as? MessageCell else { return }
+            cell.isReactTarget = id != nil && cell.item?.id == id
+        }
     }
 
     // MARK: - Media opening & Quick Look
@@ -1027,7 +1064,7 @@ final class MessageListController: NSViewController {
             menu.addItem(withTitle: "Reply", action: #selector(menuReply(_:)), keyEquivalent: "").representedObject = item
             let react = NSMenuItem(title: "React", action: nil, keyEquivalent: "")
             let sub = NSMenu()
-            for e in Self.quickReactions {
+            for e in ReactionPicker.quickReactions {
                 let mi = NSMenuItem(title: e, action: #selector(menuReact(_:)), keyEquivalent: "")
                 mi.representedObject = (item, e)
                 mi.target = self
@@ -1168,6 +1205,7 @@ extension MessageListController: NSTableViewDataSource, NSTableViewDelegate {
             }()
             cell.configure(item: item, plan: plan(for: mid))
             cell.isRowSelected = tableView.selectedRow == row
+            cell.isReactTarget = reactionPicker?.messageId == mid
             cell.setDownloadFraction(item.media.flatMap { client.media.progress.fraction(for: $0) })
             return cell
         case nil:
@@ -1221,6 +1259,13 @@ extension MessageListController: MessageCellDelegate {
     func cell(_ cell: MessageCell, didToggleReaction emoji: String, on item: MessageItem) {
         actions?.toggleReaction(emoji, on: item)
     }
+
+    func cell(_ cell: MessageCell, didClickReactButtonFor item: MessageItem) {
+        let row = tableView.row(for: cell)
+        if row >= 0 { showReactionPicker(for: item, row: row) }
+    }
+
+    func cell(_ cell: MessageCell, didClickReplyButtonFor item: MessageItem) { actions?.reply(to: item) }
 
     func cell(_ cell: MessageCell, didClickMedia item: MessageItem) { open(item) }
 
