@@ -1,9 +1,9 @@
 import AppKit
 
 /// WhatsApp's quick reaction bar: a glass capsule of emoji over a message, the current reaction
-/// ringed, and a "+" that opens the system emoji picker. The quick six come first; recently used
-/// others follow, scrolled into view sideways. A borderless child panel of the chat window. 1–6
-/// pick, Esc closes; a click elsewhere, the panel losing key or the app deactivating dismisses it.
+/// ringed, and a "+" that hands off to the system emoji picker. The quick six come first; recently
+/// used others follow, scrolled into view sideways. A borderless child panel of the chat window.
+/// 1–6 pick, Esc closes; a click elsewhere, the panel losing key or the app deactivating dismisses it.
 @MainActor
 final class ReactionPicker: NSObject, NSWindowDelegate {
     nonisolated static let quickReactions = ["👍", "❤️", "😂", "😮", "😢", "🙏"]
@@ -16,24 +16,24 @@ final class ReactionPicker: NSObject, NSWindowDelegate {
 
     private let current: String?
     private let onPick: (String) -> Void
+    private let onMore: () -> Void
     private let size: NSSize
     private let panel: PickerPanel
-    private let sink = EmojiSink()
     private weak var owner: NSWindow?
     private var mouseMonitor: Any?
     private var deactivateObserver: NSObjectProtocol?
-    /// The system emoji picker may take key from the panel; that must not close it.
-    private var paletteOpen = false
     private var isClosed = false
 
     private static let item: CGFloat = 40
     private static let padding: CGFloat = 6
     private static let spacing: CGFloat = 2
 
-    init(messageId: String, current: String?, onPick: @escaping (String) -> Void) {
+    /// `onMore`: "+" was clicked; the bar has closed and the system emoji picker should open.
+    init(messageId: String, current: String?, onPick: @escaping (String) -> Void, onMore: @escaping () -> Void) {
         self.messageId = messageId
         self.current = current
         self.onPick = onPick
+        self.onMore = onMore
         let emoji = Self.quickReactions + RecentReactions.all
         let step = Self.item + Self.spacing
         let quickWidth = step * CGFloat(Self.quickReactions.count)
@@ -62,13 +62,7 @@ final class ReactionPicker: NSObject, NSWindowDelegate {
         glass.contentView = content
         panel.contentView = glass
 
-        // Under the "+" so the emoji picker opens beside it; added first so the button takes clicks.
         let plusFrame = NSRect(x: size.width - Self.padding - Self.item, y: Self.padding, width: Self.item, height: Self.item)
-        sink.frame = plusFrame
-        sink.onEmoji = { [weak self] in self?.pick($0) }
-        // Keys typed while the palette flow holds focus still reach the shortcuts.
-        sink.onKey = { [weak self] in self?.handleKey($0) ?? false }
-        content.addSubview(sink)
 
         let strip = SidewaysScrollView(frame: NSRect(x: Self.padding, y: Self.padding, width: stripWidth, height: Self.item))
         // Trailing room so the last recent scrolls clear of the "+".
@@ -85,7 +79,11 @@ final class ReactionPicker: NSObject, NSWindowDelegate {
 
         let plus = PickerItem(kind: .more, selected: false)
         plus.frame = plusFrame
-        plus.onClick = { [weak self] in self?.openEmojiPalette() }
+        plus.onClick = { [weak self] in
+            guard let self else { return }
+            self.close()
+            self.onMore()
+        }
         content.addSubview(plus)
     }
 
@@ -149,12 +147,6 @@ final class ReactionPicker: NSObject, NSWindowDelegate {
         close()
     }
 
-    private func openEmojiPalette() {
-        paletteOpen = true
-        panel.makeFirstResponder(sink)
-        NSApp.orderFrontCharacterPalette(sink)
-    }
-
     private func handleKey(_ event: NSEvent) -> Bool {
         guard event.modifierFlags.intersection([.command, .control, .option]).isEmpty else { return false }
         if event.keyCode == 53 {  // Esc
@@ -169,22 +161,7 @@ final class ReactionPicker: NSObject, NSWindowDelegate {
     }
 
     func windowDidResignKey(_ notification: Notification) {
-        guard paletteOpen else { return close(restoringFocus: false) }
-        // The emoji palette may take key for itself; another of this app's windows taking it means
-        // the user moved on.
-        DispatchQueue.main.async { [weak self] in
-            MainActor.assumeIsolated {
-                guard let self, let key = NSApp.keyWindow, key !== self.panel else { return }
-                self.close(restoringFocus: false)
-            }
-        }
-    }
-
-    /// Back from the emoji palette without a choice: shortcuts and dismiss-on-blur apply again.
-    func windowDidBecomeKey(_ notification: Notification) {
-        guard paletteOpen else { return }
-        paletteOpen = false
-        panel.makeFirstResponder((panel.contentView as? NSGlassEffectView)?.contentView)
+        close(restoringFocus: false)
     }
 }
 
@@ -240,16 +217,33 @@ private final class PickerContentView: NSView {
     }
 }
 
-/// Invisible text input that receives the system emoji picker's choice.
-private final class EmojiSink: NSTextView {
+/// Invisible text input that the system emoji picker types into. It has to be a real text view
+/// with an insertion point for macOS to show the compact picker beside it rather than the full
+/// Character Viewer.
+final class EmojiSink: NSTextView {
     var onEmoji: ((String) -> Void)?
-    var onKey: ((NSEvent) -> Bool)?
+    /// Esc, or focus moved on without a choice.
+    var onEnd: (() -> Void)?
 
     convenience init() {
         self.init(frame: .zero)
         drawsBackground = false
         insertionPointColor = .clear
         isRichText = false
+        isSelectable = true
+        isEditable = true
+    }
+
+    /// The compact picker opens once this is the active input; asked for in the same turn as
+    /// becoming first responder, macOS falls back to the full Character Viewer.
+    func openPicker() {
+        guard window?.makeFirstResponder(self) == true else { return }
+        DispatchQueue.main.async { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self, self.window?.firstResponder === self else { return }
+                NSApp.orderFrontCharacterPalette(self)
+            }
+        }
     }
 
     override func insertText(_ string: Any, replacementRange: NSRange) {
@@ -258,8 +252,14 @@ private final class EmojiSink: NSTextView {
         onEmoji?(String(first))
     }
 
-    override func keyDown(with event: NSEvent) {
-        if onKey?(event) != true { super.keyDown(with: event) }
+    override func cancelOperation(_ sender: Any?) { onEnd?() }
+    /// It sits over the react button; clicks belong to what's beneath.
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    override func resignFirstResponder() -> Bool {
+        let resigned = super.resignFirstResponder()
+        if resigned { onEnd?() }
+        return resigned
     }
 
     /// Digits and # are emoji-capable scalars too; only take ones that render as emoji.

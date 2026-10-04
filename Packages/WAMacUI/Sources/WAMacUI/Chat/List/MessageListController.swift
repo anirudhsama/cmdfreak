@@ -63,6 +63,12 @@ final class MessageListController: NSViewController {
     private var previewResizeObserver: NSObjectProtocol?
     private let avatarLoader: AvatarLoader
     private var reactionPicker: ReactionPicker?
+    /// Takes the system emoji picker's choice after "+" in the reaction bar.
+    private let emojiSink = EmojiSink()
+    /// The message the system emoji picker reacts to, while it's open.
+    private var emojiTargetId: String?
+    /// Who had focus before the emoji picker; it gets it back afterwards.
+    private weak var focusBeforeEmoji: NSResponder?
 
     private enum ListOp: Sendable {
         case change(MessageChange)
@@ -201,6 +207,7 @@ final class MessageListController: NSViewController {
         loadingNewer = false
         closePreviewPanel()
         reactionPicker?.close()
+        endEmojiPicker()
     }
 
     /// Installs a prepared window and renders it in the current runloop turn.
@@ -505,9 +512,10 @@ final class MessageListController: NSViewController {
         closeStaleReactionPicker()
     }
 
-    /// The bar's message was deleted, revoked or paged out.
+    /// The bar's or emoji picker's message was deleted, revoked or paged out.
     private func closeStaleReactionPicker() {
         if let id = reactionPicker?.messageId, rows.item(id: id).map(ChatRows.canRespond) != true { reactionPicker?.close() }
+        if let id = emojiTargetId, rows.item(id: id).map(ChatRows.canRespond) != true { endEmojiPicker() }
     }
 
     func setTyping(_ new: ChatTyping?) {
@@ -911,11 +919,11 @@ final class MessageListController: NSViewController {
         guard let window = view.window,
               let cell = tableView.view(atColumn: 0, row: row, makeIfNecessary: false) as? MessageCell,
               let bubble = cell.plan?.bubble else { return }
-        let picker = ReactionPicker(messageId: item.id, current: item.reactions.first { $0.fromMe }?.emoji) { [weak self] emoji in
-            // The message as it is now: reactions may have changed while the bar was open.
-            guard let self, let current = self.rows.item(id: item.id), ChatRows.canRespond(to: current) else { return }
-            self.actions?.toggleReaction(emoji, on: current)
-        }
+        let picker = ReactionPicker(messageId: item.id, current: item.reactions.first { $0.fromMe }?.emoji, onPick: { [weak self] emoji in
+            self?.react(emoji, toMessage: item.id)
+        }, onMore: { [weak self] in
+            self?.showEmojiPicker(forMessage: item.id)
+        })
         picker.onClose = { [weak self, weak picker] in
             guard let self, let picker, self.reactionPicker === picker else { return }
             self.reactionPicker = nil
@@ -934,8 +942,49 @@ final class MessageListController: NSViewController {
         picker.show(in: window, anchor: anchor, bounds: list)
     }
 
+    /// Toggles `emoji` on the message as it is now: it may have changed while a picker was open.
+    private func react(_ emoji: String, toMessage id: String) {
+        guard let item = rows.item(id: id), ChatRows.canRespond(to: item) else { return }
+        if emoji != item.reactions.first(where: { $0.fromMe })?.emoji { RecentReactions.note(emoji) }
+        actions?.toggleReaction(emoji, on: item)
+    }
+
+    /// The system emoji picker for one message, opened from the hidden `emojiSink` placed at its react
+    /// button so the compact picker appears there. One pick reacts and hands focus back, which
+    /// closes the picker.
+    private func showEmojiPicker(forMessage id: String) {
+        guard let window = view.window, let row = rows.rowIndex[id],
+              let cell = tableView.view(atColumn: 0, row: row, makeIfNecessary: false) as? MessageCell,
+              let anchor = cell.reactButtonFrame ?? cell.plan?.bubble else { return }
+        if emojiSink.superview !== scrollView {
+            scrollView.addSubview(emojiSink)
+            emojiSink.onEmoji = { [weak self] emoji in
+                guard let self, let id = self.emojiTargetId else { return }
+                self.react(emoji, toMessage: id)
+                self.endEmojiPicker()
+            }
+            emojiSink.onEnd = { [weak self] in self?.endEmojiPicker() }
+        }
+        let current = window.firstResponder
+        focusBeforeEmoji = current === emojiSink ? focusBeforeEmoji : current
+        emojiTargetId = id
+        emojiSink.frame = scrollView.convert(anchor, from: cell)
+        emojiSink.isHidden = false
+        refreshReactTarget()
+        emojiSink.openPicker()
+    }
+
+    private func endEmojiPicker() {
+        guard emojiTargetId != nil else { return }
+        emojiTargetId = nil
+        refreshReactTarget()
+        if view.window?.firstResponder === emojiSink { view.window?.makeFirstResponder(focusBeforeEmoji ?? tableView) }
+        emojiSink.isHidden = true
+        focusBeforeEmoji = nil
+    }
+
     private func refreshReactTarget() {
-        let id = reactionPicker?.messageId
+        let id = reactionPicker?.messageId ?? emojiTargetId
         tableView.enumerateAvailableRowViews { rowView, _ in
             guard let cell = rowView.view(atColumn: 0) as? MessageCell else { return }
             cell.isReactTarget = id != nil && cell.item?.id == id
@@ -1205,7 +1254,7 @@ extension MessageListController: NSTableViewDataSource, NSTableViewDelegate {
             }()
             cell.configure(item: item, plan: plan(for: mid))
             cell.isRowSelected = tableView.selectedRow == row
-            cell.isReactTarget = reactionPicker?.messageId == mid
+            cell.isReactTarget = (reactionPicker?.messageId ?? emojiTargetId) == mid
             cell.setDownloadFraction(item.media.flatMap { client.media.progress.fraction(for: $0) })
             return cell
         case nil:
