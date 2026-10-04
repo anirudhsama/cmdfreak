@@ -108,6 +108,10 @@ enum MessageTextConfiguration {
         static let reactionHeight: CGFloat = 22
         static let reactionOverlap: CGFloat = 8
         static let reactionGap: CGFloat = 4
+        /// The hover reply and react buttons beside the bubble.
+        static let reactButtonSize: CGFloat = 28
+        static let reactButtonGap: CGFloat = 10
+        static let hoverButtonSpacing: CGFloat = 8
         static let daySeparatorHeight: CGFloat = 36
         static let unreadSeparatorHeight: CGFloat = 28
         static let systemPaddingV: CGFloat = 6

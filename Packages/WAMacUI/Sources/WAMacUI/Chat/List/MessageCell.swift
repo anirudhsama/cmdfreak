@@ -9,6 +9,8 @@ protocol MessageCellDelegate: AnyObject {
     var mediaStore: MediaStore { get }
     func cell(_ cell: MessageCell, didClickQuote targetId: String)
     func cell(_ cell: MessageCell, didToggleReaction emoji: String, on item: MessageItem)
+    func cell(_ cell: MessageCell, didClickReactButtonFor item: MessageItem)
+    func cell(_ cell: MessageCell, didClickReplyButtonFor item: MessageItem)
     func cell(_ cell: MessageCell, didClickMedia item: MessageItem)
     func cell(_ cell: MessageCell, didClickRetry item: MessageItem)
     func cell(_ cell: MessageCell, menuFor item: MessageItem) -> NSMenu?
@@ -27,6 +29,11 @@ final class MessageCell: NSTableCellView {
     private(set) var item: MessageItem?
     private(set) var plan: LayoutPlan?
     var isRowSelected = false { didSet { if oldValue != isRowSelected { needsDisplay = true } } }
+    /// The reaction bar is open for this message, so its hover buttons stay up without hover.
+    var isReactTarget = false { didSet { if oldValue != isReactTarget { updateHoverActions() } } }
+    private var isHovering = false { didSet { if oldValue != isHovering { updateHoverActions() } } }
+    private var hoverArea: NSTrackingArea?
+    private var hoverActions: MessageHoverActions?
 
     private var textView: MessageTextView?
     private var mediaLayer: CALayer?
@@ -94,6 +101,7 @@ final class MessageCell: NSTableCellView {
         configureMedia(plan: plan)
         configureAudio()
         avatarImage = plan.avatar.flatMap { delegate?.cell(self, avatarFor: $0.jid) }
+        updateHoverActions()
         needsLayout = true
         needsDisplay = true
         overlay.needsDisplay = true
@@ -122,6 +130,8 @@ final class MessageCell: NSTableCellView {
         item = nil
         plan = nil
         avatarImage = nil
+        isHovering = false
+        isReactTarget = false
         textView?.isHidden = true
         mediaLayer?.isHidden = true
     }
@@ -369,6 +379,7 @@ final class MessageCell: NSTableCellView {
     override func layout() {
         super.layout()
         overlay.frame = bounds
+        updateHoverActions()
         guard let plan else { return }
         if let text = plan.text, let textView, !textView.isHidden {
             textView.frame = text.frame
@@ -681,6 +692,45 @@ final class MessageCell: NSTableCellView {
         }
     }
 
+    /// WhatsApp's hover buttons beside the bubble, on the side away from its tail: reply next to
+    /// the bubble, react beyond it.
+    private var hoverButtonFrames: (react: NSRect, reply: NSRect)? {
+        guard let plan, let item, plan.shape != .system, !plan.isFailed, ChatRows.canRespond(to: item) else { return nil }
+        let d = M.reactButtonSize
+        let b = plan.bubble
+        let y = (b.midY - d / 2).rounded()
+        let replyX = plan.outgoing ? b.minX - M.reactButtonGap - d : b.maxX + M.reactButtonGap
+        let reactX = plan.outgoing ? replyX - M.hoverButtonSpacing - d : replyX + d + M.hoverButtonSpacing
+        guard min(replyX, reactX) >= 2, max(replyX, reactX) + d <= bounds.width - 2 else { return nil }
+        return (NSRect(x: reactX, y: y, width: d, height: d), NSRect(x: replyX, y: y, width: d, height: d))
+    }
+
+    var reactButtonFrame: NSRect? { hoverButtonFrames?.react }
+
+    private func updateHoverActions() {
+        guard isHovering || isReactTarget, let frames = hoverButtonFrames else {
+            hoverActions?.isHidden = true
+            return
+        }
+        let v = hoverActions ?? {
+            let v = MessageHoverActions()
+            v.onReact = { [weak self] in
+                guard let self, let item = self.item else { return }
+                self.delegate?.cell(self, didClickReactButtonFor: item)
+            }
+            v.onReply = { [weak self] in
+                guard let self, let item = self.item else { return }
+                self.delegate?.cell(self, didClickReplyButtonFor: item)
+            }
+            hoverActions = v
+            return v
+        }()
+        // Above the text view, which is added lazily.
+        if subviews.last !== v { addSubview(v) }
+        v.place(react: frames.react, reply: frames.reply)
+        v.isHidden = false
+    }
+
     private func drawFailedBadge(_ plan: LayoutPlan) {
         let r = failedBadgeRect(plan)
         let img = NSImage(systemSymbolName: "exclamationmark.circle.fill", accessibilityDescription: "Failed")?
@@ -742,6 +792,24 @@ final class MessageCell: NSTableCellView {
     }
 
     // MARK: - Interaction
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if hoverArea == nil {
+            let area = NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeInActiveApp, .inVisibleRect], owner: self)
+            addTrackingArea(area)
+            hoverArea = area
+        }
+        // Scrolling moves rows under a still mouse without entered/exited events.
+        if let window, NSApp.isActive {
+            isHovering = visibleRect.contains(convert(window.mouseLocationOutsideOfEventStream, from: nil))
+        } else {
+            isHovering = false
+        }
+    }
+
+    override func mouseEntered(with event: NSEvent) { isHovering = true }
+    override func mouseExited(with event: NSEvent) { isHovering = false }
 
     override func menu(for event: NSEvent) -> NSMenu? {
         guard let item else { return nil }
