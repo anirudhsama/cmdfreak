@@ -294,8 +294,8 @@ public enum JID {
     public static func isPhoneNumber(_ jid: String) -> Bool { jid.hasSuffix("@s.whatsapp.net") }
     public static func isLid(_ jid: String) -> Bool { jid.hasSuffix("@lid") }
 
-    /// "+15551234567" for phone-number JIDs; nil otherwise.
+    /// "+1 555-123-4567" for phone-number JIDs; nil otherwise.
     public static func phoneDisplay(_ jid: String) -> String? {
-        isPhoneNumber(jid) ? "+" + user(jid) : nil
+        isPhoneNumber(jid) ? PhoneFormat.display(user(jid)) : nil
     }
 }

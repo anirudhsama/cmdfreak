@@ -81,7 +81,7 @@ final class DemoBridge: WaBridgeProtocol, @unchecked Sendable {
 
     // MARK: Sending
 
-    func sendText(chat: String, text: String, replyTo: BridgeMessageKey?, messageId: String?) async throws -> BridgeSendResult {
+    func sendText(chat: String, text: String, mentions: [String], replyTo: BridgeMessageKey?, messageId: String?) async throws -> BridgeSendResult {
         try await Task.sleep(for: .milliseconds(300))
         return sent(chat: chat, kind: .text, text: text, media: nil)
     }
@@ -171,7 +171,7 @@ final class DemoBridge: WaBridgeProtocol, @unchecked Sendable {
     func cancelPairing() async throws {}
     func dataDir() -> String { WAKit.dataDirectory.path }
     func disconnect() async throws {}
-    func editMessage(target: BridgeMessageKey, text: String) async throws {}
+    func editMessage(target: BridgeMessageKey, text: String, mentions: [String]) async throws {}
     func importCapture(captureDir: String) async throws {}
     func logout() async throws {}
     func markChatRead(chat: String, read: Bool) async throws {}

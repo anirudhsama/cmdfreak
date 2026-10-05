@@ -15,7 +15,7 @@ use whatsapp_rust::wacore::upload::{UploadSource, encrypt_media_streaming, encry
 use whatsapp_rust::wacore::net::{HttpClient, HttpRequest};
 use whatsapp_rust_ureq_http_client::UreqHttpClient;
 
-use crate::bridge::{Shared, quote_context, require_client, sent_result};
+use crate::bridge::{Shared, mention_context, quote_context, require_client, sent_result};
 use crate::map::media_type;
 use crate::types::*;
 
@@ -286,8 +286,15 @@ pub async fn send_media(
         Some(k) => Some(quote_context(&shared, &client, &to, k).await?),
         None => None,
     };
-    let ctx_field = || ctx.clone().map(MessageField::some).unwrap_or_default();
     let caption = m.caption.clone().filter(|c| !c.is_empty());
+    let (wire_caption, ctx) = match &caption {
+        Some(c) => {
+            let (text, ctx) = mention_context(&shared, &client, &to, c, &m.mentions, ctx).await;
+            (Some(text), ctx)
+        }
+        None => (None, ctx),
+    };
+    let ctx_field = || ctx.clone().map(MessageField::some).unwrap_or_default();
     let doc_name = m.file_name.clone().or_else(|| {
         Path::new(&m.file_path).file_name().map(|n| n.to_string_lossy().into_owned())
     });
@@ -303,7 +310,7 @@ pub async fn send_media(
                 file_length: Some(up.file_length),
                 media_key_timestamp: Some(up.media_key_timestamp),
                 mimetype: Some(m.mimetype.clone()),
-                caption: caption.clone(),
+                caption: wire_caption.clone(),
                 width: m.width,
                 height: m.height,
                 jpeg_thumbnail: m.jpeg_thumbnail.clone(),
@@ -323,7 +330,7 @@ pub async fn send_media(
                 file_length: Some(up.file_length),
                 media_key_timestamp: Some(up.media_key_timestamp),
                 mimetype: Some(m.mimetype.clone()),
-                caption: caption.clone(),
+                caption: wire_caption.clone(),
                 width: m.width,
                 height: m.height,
                 seconds: m.duration_secs,
@@ -347,7 +354,7 @@ pub async fn send_media(
                 mimetype: Some(m.mimetype.clone()),
                 file_name: doc_name.clone(),
                 title: doc_name.clone(),
-                caption: caption.clone(),
+                caption: wire_caption.clone(),
                 page_count: m.page_count,
                 jpeg_thumbnail: m.jpeg_thumbnail.clone(),
                 thumbnail_width: m.thumbnail_width,

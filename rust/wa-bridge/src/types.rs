@@ -498,6 +498,9 @@ pub struct BridgeOutgoingMedia {
     pub thumbnail_width: Option<u32>,
     pub thumbnail_height: Option<u32>,
     pub page_count: Option<u32>,
+    /// JIDs the caption mentions (see `WaBridge::send_text`).
+    #[uniffi(default)]
+    pub mentions: Vec<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, uniffi::Record)]

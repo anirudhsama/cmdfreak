@@ -153,6 +153,15 @@ import Testing
         #expect(Change.edit.sent(bridge) >= 1)
     }
 
+    /// An edit goes out with the mentions it names, so the bridge can address them like a send.
+    @Test func editsCarryTheirMentions() async throws {
+        let (db, bridge, client, sink) = try await setUp()
+        try await client.edit(F.key("m", chat: F.bob, fromMe: true), text: "@15551110000 hi", mentions: [F.alicePN])
+        await deliver(sink, [.connection(state: .connected)])
+        try await waitFor { try queued(db) == 0 }
+        #expect(bridge.calls.withLock { $0.editMentions } == [[F.alicePN]])
+    }
+
     @Test func aReactionOvertakenByAnotherDeviceIsNotSent() async throws {
         let (db, bridge, client, sink) = try await setUp()
         bridge.actionsFail = true
@@ -223,6 +232,42 @@ import Testing
         let m = try #require(try db.message(F.bob, "m"))
         #expect(!m.revoked && m.text == "caption")
         #expect(try db.count("SELECT COUNT(*) FROM media WHERE messageId = 'm'") == 1)
+    }
+
+    /// An edit given up on restores the mention list along with the text.
+    @Test func aGivenUpEditRestoresItsMentions() async throws {
+        let (db, bridge, client, sink) = try await setUp()
+        let text = "@15551110000 @15552220000 hi"
+        await deliver(sink, [F.live(F.message("n", chat: F.bob, fromMe: true, text: text, mentions: [F.alicePN, F.bob])),
+                             .connection(state: .connected)])
+        bridge.actionsFail = true
+        try await client.edit(F.key("n", chat: F.bob, fromMe: true), text: "@15552220000 hi")
+        #expect(try db.message(F.bob, "n")?.extra?.mentions == [F.bob])
+        for _ in 0..<100 where try queued(db) > 0 {
+            await client.outbox.flush()
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        let m = try #require(try db.message(F.bob, "n"))
+        #expect(m.text == text)
+        #expect(m.extra?.mentions == [F.alicePN, F.bob])
+    }
+
+    /// A message that listed no mentions gets its empty list back, not none, so "@<number>" stays plain.
+    @Test func aGivenUpEditRestoresAnEmptyList() async throws {
+        let (db, bridge, client, sink) = try await setUp()
+        let text = "call @15551110000"
+        await deliver(sink, [F.live(F.message("n", chat: F.bob, fromMe: true, text: text, mentions: [])),
+                             .connection(state: .connected)])
+        let before = try #require(try db.message(F.bob, "n")).extra?.mentions
+        bridge.actionsFail = true
+        try await client.edit(F.key("n", chat: F.bob, fromMe: true), text: "call later")
+        for _ in 0..<100 where try queued(db) > 0 {
+            await client.outbox.flush()
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        let m = try #require(try db.message(F.bob, "n"))
+        #expect(m.text == text)
+        #expect(m.extra?.mentions == before)
     }
 
     @Test func theEchoOfOurOwnChatActionDoesNotUndoANewerOne() async throws {

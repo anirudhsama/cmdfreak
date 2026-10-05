@@ -27,6 +27,20 @@ final class ComposeTextView: NSTextView {
         return view
     }
 
+    /// Called before marked text (an input method's composition) replaces a range.
+    var willSetMarkedText: ((NSRange) -> Void)?
+
+    override func setMarkedText(_ string: Any, selectedRange: NSRange, replacementRange: NSRange) {
+        let range = replacementRange.location != NSNotFound ? replacementRange : hasMarkedText() ? markedRange() : self.selectedRange()
+        willSetMarkedText?(range)
+        super.setMarkedText(string, selectedRange: selectedRange, replacementRange: replacementRange)
+        // Composed characters never join a mention, wherever the input method put them.
+        if hasMarkedText(), let storage = textStorage {
+            storage.removeAttribute(.composeMention, range: markedRange())
+            storage.addAttribute(.foregroundColor, value: NSColor.labelColor, range: markedRange())
+        }
+    }
+
     var isEmpty: Bool { string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
 
     /// Rendered height for the current text, clamped to `maxLines`.

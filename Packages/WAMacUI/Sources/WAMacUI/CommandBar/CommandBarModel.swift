@@ -195,6 +195,6 @@ final class CommandBarModel {
         let stripped = query.filter { !" +-().".contains($0) }
         guard digits.count >= 8, digits.count <= 15, stripped == digits else { return nil }
         let jid = digits + "@s.whatsapp.net"
-        return RankedCandidate(candidate: QuickSearchCandidate(jid: jid, kind: .dm, title: "+" + digits, phone: digits, hasChat: false), score: 0)
+        return RankedCandidate(candidate: QuickSearchCandidate(jid: jid, kind: .dm, title: PhoneFormat.display(digits), phone: digits, hasChat: false), score: 0)
     }
 }

@@ -77,7 +77,7 @@ final class MessageTextView: NSTextView, NSTextViewDelegate {
         if let phone = mention.phone {
             let copy = menu.addItem(withTitle: "Copy Phone Number", action: #selector(copyMentionPhone(_:)), keyEquivalent: "")
             copy.target = self
-            copy.representedObject = phone
+            copy.representedObject = phone.filter { $0 == "+" || $0.isNumber }
         }
         var anchor = NSPoint(x: 0, y: bounds.maxY)
         let screenRect = firstRect(forCharacterRange: range, actualRange: nil)

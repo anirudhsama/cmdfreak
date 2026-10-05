@@ -97,10 +97,8 @@ enum LayoutPlanner {
         // Quoted reply
         if let qid = m.quotedId, !m.revoked, !isSticker {
             let qName = quoteName(m, ctx)
-            let snippet = quoteSnippet(m, m.quotedSnippet)
             let nameAttr = NSAttributedString(string: qName, attributes: [.font: C.quoteName, .foregroundColor: C.senderColor(for: m.quotedSenderJid ?? "me")])
-            let snipAttr = NSMutableAttributedString(string: snippet, attributes: [.font: C.quoteBody, .foregroundColor: NSColor.secondaryLabelColor])
-            MarkdownLite.replaceMentions(item.quotedMentions, in: snipAttr)
+            let snipAttr = quotePreview(m.quotedSnippet, kind: m.quotedKind, mentions: item.quotedMentions)
             let w = min(innerMax, max(180, ceil(snipAttr.size().width) + 24, TextMeasurer.width(qName, font: C.quoteName) + 24))
             quote = .init(frame: CGRect(x: M.bubblePaddingH, y: contentY, width: w, height: M.quoteHeight),
                           name: nameAttr, snippet: snipAttr, color: C.senderColor(for: m.quotedSenderJid ?? "me"), targetId: qid)
@@ -395,13 +393,19 @@ enum LayoutPlanner {
 
     static func phoneDisplay(_ jid: String) -> String {
         let user = jid.split(separator: "@").first.map(String.init) ?? jid
-        return user.allSatisfy(\.isNumber) ? "+" + user : user
+        return user.allSatisfy(\.isNumber) ? PhoneFormat.display(user) : user
     }
 
-    private static func quoteSnippet(_ m: MessageRecord, _ snippet: String?) -> String {
-        let s = snippet ?? ""
-        if !s.isEmpty { return s.replacingOccurrences(of: "\n", with: " ") }
-        switch m.quotedKind {
+    /// How a quote of a message reads, in a reply's bubble and in the compose reply bar: its text as its
+    /// own bubble renders it, else what kind of message it is.
+    static func quotePreview(_ text: String?, kind: MessageKind?, mentions: [String: Mention]) -> NSAttributedString {
+        let font = C.quoteBody, color = NSColor.secondaryLabelColor
+        if let text, !text.isEmpty { return MarkdownLite.preview(text, mentions: mentions, font: font, color: color) }
+        return NSAttributedString(string: kindLabel(kind), attributes: [.font: font, .foregroundColor: color])
+    }
+
+    static func kindLabel(_ kind: MessageKind?) -> String {
+        switch kind {
         case .image: return "Photo"
         case .video: return "Video"
         case .gif: return "GIF"

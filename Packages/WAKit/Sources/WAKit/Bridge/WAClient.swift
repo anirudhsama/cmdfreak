@@ -247,7 +247,7 @@ actor SendRecovery {
                 try? await ingest.refreshSentMedia(chatJid: m.chatJid, id: m.id, media: media)
             }
         } else if let text = m.text {
-            _ = try await bridge.sendText(chat: m.chatJid, text: text, replyTo: quoted, messageId: m.id)
+            _ = try await bridge.sendText(chat: m.chatJid, text: text, mentions: m.extra?.mentions ?? [], replyTo: quoted, messageId: m.id)
         } else {
             throw BridgeError.NotImplemented("resend of \(m.kind)")
         }
@@ -262,7 +262,8 @@ actor SendRecovery {
             kind: item.message.kind.sendKind, filePath: path, mimetype: m.mimetype ?? "application/octet-stream",
             fileName: m.fileName, caption: item.message.text, width: m.width.map(UInt32.init), height: m.height.map(UInt32.init),
             durationSecs: m.durationSecs.map(UInt32.init), jpegThumbnail: m.jpegThumbnail,
-            thumbnailWidth: nil, thumbnailHeight: nil, pageCount: m.pageCount.map(UInt32.init))
+            thumbnailWidth: nil, thumbnailHeight: nil, pageCount: m.pageCount.map(UInt32.init),
+            mentions: item.message.extra?.mentions ?? [])
     }
 
     private static func key(_ m: MessageRecord) -> String { m.chatJid + "/" + m.id }
@@ -399,8 +400,8 @@ actor Outbox {
             break
         case .reaction(let fromMe, let participant, let emoji, _, _):
             try await bridge.sendReaction(target: key(fromMe, participant), emoji: emoji)
-        case .edit(let text, _, _, _):
-            try await bridge.editMessage(target: key(true, nil), text: text)
+        case .edit(let text, _, _, _, let mentions, _):
+            try await bridge.editMessage(target: key(true, nil), text: text, mentions: mentions ?? [])
         case .revoke(let fromMe, let participant, _, _):
             try await bridge.revokeMessage(target: key(fromMe, participant))
         case .pin(let pinnedAt, _):
@@ -607,6 +608,11 @@ public final class WAClient: Sendable {
         }
     }
 
+    /// A group's other members, for mentioning. The first call per group per session asks the server.
+    public func groupMembers(_ groupJid: String) async -> [GroupMember] {
+        await groups.members(of: groupJid)
+    }
+
     /// Makes sure a chat exists for `jid` (a contact with no chat yet) and returns its canonical JID.
     public func startChat(with jid: String) async throws -> String {
         try await ingest.createLocalChat(jid)
@@ -615,12 +621,13 @@ public final class WAClient: Sendable {
     // MARK: Sending (optimistic)
 
     /// Inserts a pending row, sends, then marks it sent (server id) or failed. Returns the local id.
+    /// `mentions` are the JIDs the text's "@<number>"s stand for (see `Mentions`).
     @discardableResult
-    public func sendText(_ text: String, to chatJid: String, replyTo: MessageItem? = nil) async throws -> String {
+    public func sendText(_ text: String, mentions: [String] = [], to chatJid: String, replyTo: MessageItem? = nil) async throws -> String {
         let pending = try await ingest.insertOutgoing(
-            chatJid: chatJid, text: text, quoted: replyTo.map(Self.quote), ownJid: ownJid)
+            chatJid: chatJid, text: text, mentions: mentions, quoted: replyTo.map(Self.quote), ownJid: ownJid)
         await performSend(localId: pending.id, chatJid: chatJid) { [bridge] in
-            try await bridge.sendText(chat: chatJid, text: text, replyTo: replyTo?.message.key, messageId: nil)
+            try await bridge.sendText(chat: chatJid, text: text, mentions: mentions, replyTo: replyTo?.message.key, messageId: nil)
         }
         return pending.id
     }
@@ -628,12 +635,13 @@ public final class WAClient: Sendable {
     /// Inserts one optimistic row per attachment (in order) and uploads them one at a time. The caption
     /// and reply go on the first item, as in WhatsApp's own clients. Returns the local ids.
     @discardableResult
-    public func sendAttachments(_ items: [PreparedAttachment], caption: String?, to chatJid: String,
+    public func sendAttachments(_ items: [PreparedAttachment], caption: String?, mentions: [String] = [], to chatJid: String,
                                 replyTo: MessageItem? = nil) async throws -> [String] {
         var queued: [(String, BridgeOutgoingMedia, MessageItem?)] = []
         for (i, item) in items.enumerated() {
             var outgoing = item.outgoing
             outgoing.caption = i == 0 ? caption.flatMap { $0.isEmpty ? nil : $0 } : nil
+            outgoing.mentions = outgoing.caption == nil ? [] : mentions
             let reply = i == 0 ? replyTo : nil
             let pending = try await insertPendingMedia(outgoing, to: chatJid, replyTo: reply)
             queued.append((pending.id, outgoing, reply))
@@ -653,7 +661,7 @@ public final class WAClient: Sendable {
 
     private func insertPendingMedia(_ outgoing: BridgeOutgoingMedia, to chatJid: String, replyTo: MessageItem?) async throws -> MessageItem {
         try await ingest.insertOutgoing(
-            chatJid: chatJid, text: outgoing.caption, kind: outgoing.kind.messageKind,
+            chatJid: chatJid, text: outgoing.caption, mentions: outgoing.mentions, kind: outgoing.kind.messageKind,
             quoted: replyTo.map(Self.quote), media: outgoing, ownJid: ownJid)
     }
 
@@ -692,7 +700,7 @@ public final class WAClient: Sendable {
             await uploadAndSend(localId: localId, outgoing: outgoing, chatJid: chatJid, replyKey: quoted)
         } else if let text = item.message.text {
             await performSend(localId: localId, chatJid: chatJid) { [bridge] in
-                try await bridge.sendText(chat: chatJid, text: text, replyTo: quoted, messageId: nil)
+                try await bridge.sendText(chat: chatJid, text: text, mentions: item.message.extra?.mentions ?? [], replyTo: quoted, messageId: nil)
             }
         }
     }
@@ -712,9 +720,10 @@ public final class WAClient: Sendable {
         }
     }
 
+    /// The quote as the target is shown: its whole text with its mention list, so it renders the same.
     static func quote(_ item: MessageItem) -> BridgeQuoted {
         BridgeQuoted(id: item.message.id, senderJid: item.message.senderJid, kind: item.message.kind,
-                     snippet: String((item.message.text ?? "").prefix(200)))
+                     snippet: item.message.text ?? "", mentions: item.message.extra?.mentions ?? [])
     }
 
     // MARK: Message actions (optimistic locally, then queued in `outbox`)
@@ -725,8 +734,9 @@ public final class WAClient: Sendable {
         await outbox.schedule()
     }
 
-    public func edit(_ key: BridgeMessageKey, text: String) async throws {
-        try await ingest.localEdit(key, text: text, editedAt: Self.now)
+    /// `mentions`: the JIDs the edited text's "@<number>"s stand for.
+    public func edit(_ key: BridgeMessageKey, text: String, mentions: [String] = []) async throws {
+        try await ingest.localEdit(key, text: text, mentions: mentions, editedAt: Self.now)
         await outbox.schedule()
     }
 

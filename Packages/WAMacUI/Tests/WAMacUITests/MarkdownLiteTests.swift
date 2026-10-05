@@ -86,6 +86,15 @@ import WAKit
         return out
     }
 
+    /// Previews read like the bubble: formatted, mentions by name, one line, nothing clickable.
+    @Test func previewsRenderLikeTheBubble() {
+        let mentions = ["15550000001": Mention(name: "Sam", jid: "15550000001@s.whatsapp.net", phone: nil)]
+        let p = MarkdownLite.preview("*hi* @15550000001\nsee https://x.com", mentions: mentions, font: .systemFont(ofSize: 12), color: .secondaryLabelColor)
+        #expect(p.string == "hi @Sam see https://x.com")
+        #expect(runs(of: .link, in: p) { $0 != nil }.isEmpty)
+        #expect(runs(of: .mention, in: p) { $0 != nil }.isEmpty)
+    }
+
     @Test func emojiOnly() {
         #expect(MarkdownLite.isEmojiOnly("👍"))
         #expect(MarkdownLite.isEmojiOnly("😂😂🔥"))

@@ -123,6 +123,8 @@ final class FakeBridge: WaBridgeProtocol, @unchecked Sendable {
         var downloads = 0
         var overviews: [[String]] = []
         var sentTexts: [String] = []
+        var textMentions: [[String]] = []
+        var editMentions: [[String]] = []
         /// Every text send: the id it was asked to reuse and the quoted key.
         var textSends: [(messageId: String?, replyTo: BridgeMessageKey?)] = []
         var mediaSends: [(path: String, messageId: String?)] = []
@@ -162,8 +164,8 @@ final class FakeBridge: WaBridgeProtocol, @unchecked Sendable {
         try Data("payload".utf8).write(to: URL(filePath: destPath))
         progress?.onProgress(done: 100, total: 100)
     }
-    func editMessage(target: BridgeMessageKey, text: String) async throws {
-        calls.withLock { $0.edits.append((target.id, text)) }
+    func editMessage(target: BridgeMessageKey, text: String, mentions: [String]) async throws {
+        calls.withLock { $0.edits.append((target.id, text)); $0.editMentions.append(mentions) }
         try actionResult()
     }
     var metadataJoinedAt: Int64?
@@ -227,9 +229,10 @@ final class FakeBridge: WaBridgeProtocol, @unchecked Sendable {
         calls.withLock { $0.reactions.append((target.id, emoji)) }
         try actionResult()
     }
-    func sendText(chat: String, text: String, replyTo: BridgeMessageKey?, messageId: String?) async throws -> BridgeSendResult {
+    func sendText(chat: String, text: String, mentions: [String], replyTo: BridgeMessageKey?, messageId: String?) async throws -> BridgeSendResult {
         calls.withLock {
             $0.sentTexts.append(text)
+            $0.textMentions.append(mentions)
             $0.textSends.append((messageId, replyTo))
         }
         if sendFails { throw BridgeError.Network("offline") }

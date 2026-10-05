@@ -128,7 +128,7 @@ final class HarnessBridge: WaBridgeProtocol, @unchecked Sendable {
         }
         try FileManager.default.copyItem(at: src, to: URL(filePath: destPath))
     }
-    func editMessage(target: BridgeMessageKey, text: String) async throws {}
+    func editMessage(target: BridgeMessageKey, text: String, mentions: [String]) async throws {}
     func listParticipatingGroups() async throws -> [String] { [] }
     func fetchGroupMetadata(jid: String) async throws -> BridgeGroup { BridgeGroup(jid: jid, subject: "Design Team", participantCount: 4, participants: []) }
     func fetchGroupOverviews(jids: [String]) async throws -> [BridgeGroup] { [] }
@@ -184,7 +184,7 @@ final class HarnessBridge: WaBridgeProtocol, @unchecked Sendable {
         }
     }
     func sendReaction(target: BridgeMessageKey, emoji: String) async throws {}
-    func sendText(chat: String, text: String, replyTo: BridgeMessageKey?, messageId: String?) async throws -> BridgeSendResult {
+    func sendText(chat: String, text: String, mentions: [String], replyTo: BridgeMessageKey?, messageId: String?) async throws -> BridgeSendResult {
         try await Task.sleep(for: .milliseconds(700))
         if text.localizedCaseInsensitiveContains("fail") { throw BridgeError.Network("harness: simulated failure") }
         let ts = Int64(Date().timeIntervalSince1970)

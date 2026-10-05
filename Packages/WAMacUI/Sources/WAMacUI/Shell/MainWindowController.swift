@@ -176,7 +176,7 @@ public final class MainWindowController: NSWindowController, NSWindowDelegate, N
         case .group:
             subtitle = item.chat.participantCount.map { "\($0) participants" } ?? "Group"
         case .dm:
-            let phone = item.contact?.phone.map { "+" + $0 } ?? JID.phoneDisplay(item.chat.jid)
+            let phone = item.contact?.phone.map(PhoneFormat.display) ?? JID.phoneDisplay(item.chat.jid)
             subtitle = phone != item.title ? (phone ?? "") : ""
         default:
             break

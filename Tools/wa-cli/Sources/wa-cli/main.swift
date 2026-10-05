@@ -244,7 +244,7 @@ func cmdSendSelf(_ args: [String]) async throws {
     let bridge = try makeBridge(sink)
     try await connectAndWait(bridge, sink)
     guard let me = sink.ownPn else { throw CLIError("own JID unknown") }
-    let result = try await bridge.sendText(chat: me, text: text, replyTo: nil)
+    let result = try await bridge.sendText(chat: me, text: text, mentions: [], replyTo: nil, messageId: nil)
     err("sent \(result.messageId) to \(me)")
     try? await Task.sleep(for: .seconds(5))
     try await bridge.disconnect()
@@ -331,7 +331,7 @@ func cmdSendMediaSelf(_ args: [String]) async throws {
         o.caption = n == 0 ? caption : nil
         let progress = PercentPrinter("upload \(p.fileURL.lastPathComponent)")
         let start = Date()
-        let result = try await bridge.sendMedia(chat: me, media: o, replyTo: nil, progress: progress)
+        let result = try await bridge.sendMedia(chat: me, media: o, replyTo: nil, messageId: nil, progress: progress)
         sentIds.add(result.messageId)
         guard let m = result.message.media else { throw CLIError("send result has no media") }
         err("sent \(result.messageId) kind=\(result.message.kind) in \(String(format: "%.1f", Date().timeIntervalSince(start)))s, "

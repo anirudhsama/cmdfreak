@@ -904,3 +904,17 @@ mod ack_waiters {
         assert!(pending.wait(WAIT).await.is_ok());
     }
 }
+
+#[test]
+fn mentions_switch_to_their_lid_in_the_text() {
+    use crate::bridge::replace_mentions;
+    use std::collections::HashMap;
+    let renamed = HashMap::from([("15551110000".to_string(), "99887766".to_string())]);
+    assert_eq!(replace_mentions("@15551110000 hi @155511100001 @15551110000", &renamed),
+               "@99887766 hi @155511100001 @99887766");
+    assert_eq!(replace_mentions("no mention, a@ @", &renamed), "no mention, a@ @");
+    // A new number that is also an old one is renamed once.
+    let swapped = HashMap::from([("15551110000".to_string(), "919876543210".to_string()),
+                                 ("919876543210".to_string(), "99887766".to_string())]);
+    assert_eq!(replace_mentions("@15551110000 @919876543210", &swapped), "@919876543210 @99887766");
+}
