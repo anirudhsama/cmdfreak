@@ -657,10 +657,12 @@ impl WaBridge {
 
     // Sending
 
+    /// `mentions` are the JIDs the text's "@<number>"s stand for, in our frame.
     pub async fn send_text(
         &self,
         chat: String,
         text: String,
+        mentions: Vec<String>,
         reply_to: Option<BridgeMessageKey>,
         message_id: Option<String>,
     ) -> R<BridgeSendResult> {
@@ -668,9 +670,14 @@ impl WaBridge {
         self.run(async move {
             let client = shared.require_client()?;
             let to = parse_jid(&chat)?;
-            let mut msg = match &reply_to {
-                Some(key) => wa::Message::text_with_context(text.clone(), quote_context(&shared, &client, &to, key).await?),
-                None => wa::Message::text(text.clone()),
+            let ctx = match &reply_to {
+                Some(key) => Some(quote_context(&shared, &client, &to, key).await?),
+                None => None,
+            };
+            let (wire_text, ctx) = mention_context(&shared, &client, &to, &text, &mentions, ctx).await;
+            let mut msg = match ctx {
+                Some(ctx) => wa::Message::text_with_context(wire_text, ctx),
+                None => wa::Message::text(wire_text),
             };
             keep_original_secret(&shared, &client, &to, message_id.as_deref(), &mut msg).await;
             let sent = client.send_message_with_options(to.clone(), msg, send_options(message_id)).await.map_err(net)?;
@@ -708,14 +715,19 @@ impl WaBridge {
         .await
     }
 
-    pub async fn edit_message(&self, target: BridgeMessageKey, text: String) -> R<()> {
+    pub async fn edit_message(&self, target: BridgeMessageKey, text: String, mentions: Vec<String>) -> R<()> {
         let shared = self.shared.clone();
         self.run(async move {
             let client = shared.require_client()?;
             let chat = wire_chat(&client, &target.chat_jid).await?;
+            let (text, ctx) = mention_context(&shared, &client, &chat, &text, &mentions, None).await;
+            let msg = match ctx {
+                Some(ctx) => wa::Message::text_with_context(text, ctx),
+                None => wa::Message::text(text),
+            };
             let epoch = shared.acks.epoch();
             // The edit is a message of its own, under a fresh id.
-            let sent = client.edit_message(chat, target.id.clone(), wa::Message::text(text)).await.map_err(net)?;
+            let sent = client.edit_message(chat, target.id.clone(), msg).await.map_err(net)?;
             shared.acks.expect(AckClass::Message, &sent.message_id, epoch).wait(ACK_TIMEOUT).await
         })
         .await
@@ -1187,6 +1199,56 @@ pub(crate) async fn quote_context(
         }),
         ..Default::default()
     })
+}
+
+/// Adds `mentions` to `ctx` (made if needed) and returns the text to send. A LID-addressed group
+/// mentions members by LID, so phone-number mentions whose LID is known switch to it, in the text too.
+pub(crate) async fn mention_context(
+    shared: &Shared,
+    client: &Client,
+    chat: &Jid,
+    text: &str,
+    mentions: &[String],
+    ctx: Option<wa::ContextInfo>,
+) -> (String, Option<wa::ContextInfo>) {
+    use whatsapp_rust::wacore::types::message::AddressingMode;
+    let jids: Vec<Jid> = mentions.iter().filter_map(|m| parse_jid(m).ok()).collect();
+    if jids.is_empty() {
+        return (text.to_string(), ctx);
+    }
+    let lid_addressed = chat.is_group()
+        && client.groups().routing_info(chat).await.is_ok_and(|info| info.addressing_mode == AddressingMode::Lid);
+    let mut renamed = HashMap::new();
+    let mut wire = Vec::with_capacity(jids.len());
+    for jid in jids {
+        let jid = match shared.canon.alternate(&jid) {
+            Some(lid) if lid_addressed && jid.is_pn() => {
+                renamed.insert(jid.user.to_string(), lid.user.to_string());
+                lid
+            }
+            _ => jid,
+        };
+        wire.push(jid.to_string());
+    }
+    let mut ctx = ctx.unwrap_or_default();
+    ctx.mentioned_jid = wire;
+    (replace_mentions(text, &renamed), Some(ctx))
+}
+
+/// `text` with each "@<number>" token in `renamed` spelled "@<its new number>", in one pass, so a
+/// new number that is also an old one isn't renamed twice.
+pub(crate) fn replace_mentions(text: &str, renamed: &HashMap<String, String>) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(i) = rest.find('@') {
+        out.push_str(&rest[..=i]);
+        let after = &rest[i + 1..];
+        let digits = after.find(|c: char| !c.is_ascii_digit()).unwrap_or(after.len());
+        out.push_str(renamed.get(&after[..digits]).map_or(&after[..digits], String::as_str));
+        rest = &after[digits..];
+    }
+    out.push_str(rest);
+    out
 }
 
 /// A resend carries the original's message secret (else the library mints a new one): recipients

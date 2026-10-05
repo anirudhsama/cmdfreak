@@ -98,6 +98,14 @@ public enum Mentions {
             return out
         }
 
+        /// How a mention of `jid` reads, as `mentions(in:jids:)` would resolve it.
+        mutating func mention(of jid: String) throws -> Mention? {
+            let jid = Self.bare(jid)
+            let key = JID.user(jid) + " " + jid
+            if cache[key] == nil { cache[key] = .some(try resolve(JID.user(jid), jid: jid)) }
+            return cache[key] ?? nil
+        }
+
         /// "<user>@<server>" without a device or agent suffix, as contacts and aliases are keyed.
         static func bare(_ jid: String) -> String {
             guard let at = jid.firstIndex(of: "@") else { return jid }

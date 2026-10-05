@@ -1,5 +1,6 @@
 import AppKit
 import Quartz
+import SwiftUI
 import WAKit
 import os
 
@@ -21,7 +22,10 @@ public final class ChatViewController: NSViewController {
     private let emptyLabel = NSTextField(labelWithString: "Select a chat")
     private var replyTarget: MessageItem?
     private var editTarget: MessageItem?
-    private var drafts: [String: String] = [:]
+    private var drafts: [String: NSAttributedString] = [:]
+    private let mentionPicker = MentionPickerModel()
+    private lazy var mentionPickerView = NSHostingView(rootView: MentionPickerView(model: mentionPicker))
+    private var mentionPickerHeight: NSLayoutConstraint!
     private var lastComposingSent: Date = .distantPast
     private var pausedTimer: Timer?
     private var keyObservers: [NSObjectProtocol] = []
@@ -67,7 +71,15 @@ public final class ChatViewController: NSViewController {
         root.addSubview(emptyLabel)
 
         root.addSubview(compose)
+        mentionPickerView.translatesAutoresizingMaskIntoConstraints = false
+        mentionPickerView.isHidden = true
+        root.addSubview(mentionPickerView)
+        mentionPickerHeight = mentionPickerView.heightAnchor.constraint(equalToConstant: 0)
         NSLayoutConstraint.activate([
+            mentionPickerView.leadingAnchor.constraint(equalTo: compose.leadingAnchor, constant: ComposeView.outerInsets.left),
+            mentionPickerView.bottomAnchor.constraint(equalTo: compose.topAnchor),
+            mentionPickerView.widthAnchor.constraint(equalToConstant: MentionPickerView.width),
+            mentionPickerHeight,
 
             list.view.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             list.view.trailingAnchor.constraint(equalTo: root.trailingAnchor),
@@ -82,7 +94,10 @@ public final class ChatViewController: NSViewController {
         ])
 
         compose.onHeightChange = { [weak self] h in self?.list.setBottomInset(h) }
-        compose.onSend = { [weak self] text in self?.send(text) }
+        compose.onSend = { [weak self] composed in self?.send(composed) }
+        compose.onMentionQuery = { [weak self] query in self?.mentionQueryChanged(query) }
+        compose.onMentionKey = { [weak self] key in self?.handleMentionKey(key) ?? false }
+        mentionPicker.onPick = { [weak self] member in self?.insertMention(member) }
         compose.onTyping = { [weak self] in self?.noteTyping() }
         compose.onEscape = { [weak self] in self?.clearStaged() }
         compose.onArrowUpEmpty = { [weak self] in self?.list.selectNewestMessage() }
@@ -93,6 +108,7 @@ public final class ChatViewController: NSViewController {
         compose.onCancelBar = { [weak self] in
             self?.replyTarget = nil
             self?.editTarget = nil
+            self?.updateMentionsEnabled()
         }
         setChatVisible(false)
     }
@@ -164,13 +180,16 @@ public final class ChatViewController: NSViewController {
             if chatJid != nil { reportFocus() }
             return
         }
-        if let old = self.chatJid { drafts[old] = compose.text }
+        if let old = self.chatJid { drafts[old] = compose.draft }
         self.chatJid = chatJid
         replyTarget = nil
         editTarget = nil
         clearStaged()
         compose.setBar(nil)
-        compose.text = chatJid.flatMap { drafts[$0] } ?? ""
+        mentionPicker.members = []
+        updateMentionsEnabled()
+        compose.draft = chatJid.flatMap { drafts[$0] } ?? NSAttributedString()
+        if let chatJid, ChatKind(jid: chatJid) == .group { loadMembers(chatJid) }
         pausedTimer?.invalidate()
         displayedChatJid = nil
         reportFocus()
@@ -246,9 +265,10 @@ public final class ChatViewController: NSViewController {
         return compose.handleEscape() || clearStaged()
     }
 
-    /// Esc menu title while a reply or edit is pending.
+    /// Esc menu title while the mention picker, a reply or an edit is pending.
     public var transientStateTitle: String? {
         if list.hasKeyboardFocus { return "Back to Compose" }
+        if mentionPicker.isShowing { return "Close Mentions" }
         if editTarget != nil { return "Cancel Edit" }
         if replyTarget != nil { return "Cancel Reply" }
         return nil
@@ -325,21 +345,30 @@ public final class ChatViewController: NSViewController {
 
     // Internal hooks for the debug harness.
     var listController: MessageListController { list }
-    func debugSend() { send(compose.text.trimmingCharacters(in: .whitespacesAndNewlines)) }
+    func debugSend() { send(compose.composed) }
     func debugArrowUp() { list.selectNewestMessage() }
     var debugBar: ComposeView.Bar? { compose.bar }
     var debugComposeText: String { compose.text }
+    func debugComposeKey(_ key: String) {
+        let selectors = ["down": #selector(NSResponder.moveDown(_:)), "up": #selector(NSResponder.moveUp(_:)),
+                         "enter": #selector(NSResponder.insertNewline(_:)), "tab": #selector(NSResponder.insertTab(_:)),
+                         "esc": #selector(NSResponder.cancelOperation(_:)), "delete": #selector(NSResponder.deleteBackward(_:))]
+        guard let selector = selectors[key] else { return }
+        if !compose.textView(compose.textView, doCommandBy: selector) { compose.textView.doCommand(by: selector) }
+    }
 
     // MARK: - Sending
 
-    private func send(_ text: String) {
+    private func send(_ composed: ComposedText) {
         guard let chatJid else { return }
+        let text = composed.text, mentions = composed.mentions
         let state = Signposts.poi.beginInterval("Send", id: Signposts.poi.makeSignpostID())
         if let edit = editTarget {
             editTarget = nil
+            updateMentionsEnabled()
             compose.clearAfterSend()
             Task {
-                do { try await client.edit(edit.message.key, text: text) } catch { Signposts.log.error("edit failed: \(error)") }
+                do { try await client.edit(edit.message.key, text: text, mentions: mentions) } catch { Signposts.log.error("edit failed: \(error)") }
                 Signposts.poi.endInterval("Send", state, "edit")
             }
         } else if !staged.isEmpty {
@@ -357,7 +386,7 @@ public final class ChatViewController: NSViewController {
                 for item in items {
                     if let p = try? await item.task.value { prepared.append(p) }
                 }
-                do { try await client.sendAttachments(prepared, caption: text, to: chatJid, replyTo: reply) }
+                do { try await client.sendAttachments(prepared, caption: text, mentions: mentions, to: chatJid, replyTo: reply) }
                 catch { Signposts.log.error("media send failed: \(error)") }
                 Signposts.poi.endInterval("Send", state, "media")
             }
@@ -367,7 +396,7 @@ public final class ChatViewController: NSViewController {
             replyTarget = nil
             compose.clearAfterSend()
             Task {
-                do { try await client.sendText(text, to: chatJid, replyTo: reply) } catch { Signposts.log.error("send failed: \(error)") }
+                do { try await client.sendText(text, mentions: mentions, to: chatJid, replyTo: reply) } catch { Signposts.log.error("send failed: \(error)") }
                 Signposts.poi.endInterval("Send", state, "text")
             }
         }
@@ -381,6 +410,50 @@ public final class ChatViewController: NSViewController {
             return
         }
         reply(to: item)
+    }
+
+    // MARK: - Mentions
+
+    /// Mentions are offered in groups, and not while editing: an edit keeps the message's mention list.
+    private func updateMentionsEnabled() {
+        compose.mentionsEnabled = chatJid.map { ChatKind(jid: $0) == .group } == true && editTarget == nil
+    }
+
+    private func loadMembers(_ chatJid: String) {
+        Task { [weak self, client] in
+            let members = await client.groupMembers(chatJid)
+            guard let self, self.chatJid == chatJid else { return }
+            mentionPicker.members = members
+            updateMentionPicker()
+        }
+    }
+
+    private func mentionQueryChanged(_ query: String?) {
+        // Each new "@" reloads the members, so a membership change shows without reopening the chat.
+        if mentionPicker.query == nil, query != nil, let chatJid { loadMembers(chatJid) }
+        mentionPicker.query = query
+        updateMentionPicker()
+    }
+
+    private func updateMentionPicker() {
+        mentionPickerView.isHidden = !mentionPicker.isShowing
+        mentionPickerHeight.constant = MentionPickerView.height(rows: mentionPicker.results.count)
+    }
+
+    private func handleMentionKey(_ key: ComposeView.MentionKey) -> Bool {
+        guard mentionPicker.isShowing else { return false }
+        switch key {
+        case .up: mentionPicker.move(-1)
+        case .down: mentionPicker.move(1)
+        case .accept: if let member = mentionPicker.selected { insertMention(member) }
+        case .dismiss: break
+        }
+        return true
+    }
+
+    private func insertMention(_ member: GroupMember) {
+        compose.insertMention(ComposeMention(name: member.name, user: JID.user(member.jid), jid: member.jid))
+        compose.focus()
     }
 
     // MARK: - Typing state
@@ -431,30 +504,15 @@ extension ChatViewController: MessageListActions {
         if item.message.fromMe { name = "You" }
         else if list.rows.isGroupChat { name = item.senderName ?? peerDisplayName() }
         else { name = list.chatName ?? item.senderName ?? peerDisplayName() }
-        let snippet = item.displayText.flatMap { $0.isEmpty ? nil : $0 } ?? kindLabel(item.message.kind)
-        compose.setBar(.reply(name: name, snippet: snippet.replacingOccurrences(of: "\n", with: " "),
+        // Read as the message's own bubble reads, and as the quote in the sent reply will.
+        let snippet = LayoutPlanner.quotePreview(item.message.text, kind: item.message.kind, mentions: item.mentions)
+        compose.setBar(.reply(name: name, snippet: snippet,
                               color: item.message.fromMe ? Palette.green : MessageTextConfiguration.senderColor(for: item.message.senderJid)))
         compose.focus()
     }
 
     private func peerDisplayName() -> String {
         chatJid.map { LayoutPlanner.phoneDisplay($0) } ?? ""
-    }
-
-    private func kindLabel(_ kind: MessageKind) -> String {
-        switch kind {
-        case .image: "Photo"
-        case .video: "Video"
-        case .gif: "GIF"
-        case .sticker: "Sticker"
-        case .document: "Document"
-        case .audio: "Audio"
-        case .voice: "Voice message"
-        case .location: "Location"
-        case .contact: "Contact"
-        case .poll: "Poll"
-        default: "Message"
-        }
     }
 
     func toggleReaction(_ emoji: String, on item: MessageItem) {
@@ -469,8 +527,9 @@ extension ChatViewController: MessageListActions {
         guard item.message.fromMe, item.message.kind == .text, let original = item.message.text else { return }
         replyTarget = nil
         editTarget = item
+        updateMentionsEnabled()
         compose.setBar(.edit(original: original))
-        compose.text = original
+        compose.draft = ComposeView.editable(original, mentions: item.mentions)
         compose.focus()
     }
 

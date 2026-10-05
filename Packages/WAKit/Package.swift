@@ -8,6 +8,7 @@ let package = Package(
     dependencies: [
         .package(path: "../WACoreFFI"),
         .package(url: "https://github.com/groue/GRDB.swift", from: "7.0.0"),
+        .package(url: "https://github.com/marmelroy/PhoneNumberKit", from: "4.3.0"),
     ],
     targets: [
         .target(
@@ -15,6 +16,7 @@ let package = Package(
             dependencies: [
                 "WACoreFFI",
                 .product(name: "GRDB", package: "GRDB.swift"),
+                .product(name: "PhoneNumberKit", package: "PhoneNumberKit"),
             ]
         ),
         .testTarget(name: "WAKitTests", dependencies: ["WAKit"]),

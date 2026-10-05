@@ -190,6 +190,24 @@ enum MarkdownLite {
         return result
     }
 
+    /// A message's text as its previews show it (a reply's quote, the compose reply bar): rendered as
+    /// the bubble renders it, on one line, at `font` in `color`, with nothing clickable.
+    static func preview(_ source: String, mentions: [String: Mention], font: NSFont, color: NSColor) -> NSAttributedString {
+        let s = NSMutableAttributedString(attributedString: attributedString(
+            source, mentions: mentions, base: [.font: font, .foregroundColor: color], baseFont: font))
+        let full = NSRange(location: 0, length: s.length)
+        s.removeAttribute(.link, range: full)
+        s.removeAttribute(.mention, range: full)
+        s.addAttribute(.foregroundColor, value: color, range: full)
+        s.enumerateAttribute(.font, in: full) { value, range, _ in
+            if let f = value as? NSFont, f.isFixedPitch {
+                s.addAttribute(.font, value: NSFont.monospacedSystemFont(ofSize: font.pointSize, weight: .regular), range: range)
+            }
+        }
+        for r in (s.string as NSString).ranges(of: "\n").reversed() { s.replaceCharacters(in: r, with: " ") }
+        return s
+    }
+
     /// Replaces each "@<number>" in `mentions` (keyed by user number) with "@<name>" in semibold, keeping the
     /// token's other attributes. The name goes in as literal text, so formatting characters in it stay as
     /// written. `linked` also tints it and, when the mention has a JID, makes it a link carrying `.mention`
@@ -251,4 +269,18 @@ enum MarkdownLite {
 extension NSAttributedString.Key {
     /// The `Mention` behind a clickable "@<name>".
     static let mention = NSAttributedString.Key("CmdFreakMention")
+}
+
+private extension NSString {
+    func ranges(of needle: String) -> [NSRange] {
+        var out: [NSRange] = []
+        var from = 0
+        while from < length {
+            let r = range(of: needle, range: NSRange(location: from, length: length - from))
+            guard r.location != NSNotFound else { break }
+            out.append(r)
+            from = r.upperBound
+        }
+        return out
+    }
 }

@@ -1,16 +1,29 @@
 import AppKit
+import WAKit
 
 /// Liquid-glass compose pill: reply/edit bar, attachment tray, TextKit 2 editor, send button.
 /// With attachments staged, the editor text is their caption and Enter sends even when it's empty.
 /// Enter sends, ⇧Enter inserts a newline, ↑ in an empty editor moves into the message list, ⌘R
 /// replies to the newest incoming message, Esc clears the bar first and then escalates to `onEscape`.
+///
+/// Mentions are "@<name>" runs carrying `.composeMention`; they go out as "@<number>" (see `composed`).
+/// While `mentionsEnabled`, an "@" starting a word reports the name typed after it to `onMentionQuery`,
+/// and `onMentionKey` gets first refusal of ↑, ↓, Enter, Tab and Esc.
 final class ComposeView: NSView, NSTextViewDelegate {
     enum Bar: Equatable {
-        case reply(name: String, snippet: String, color: NSColor)
+        case reply(name: String, snippet: NSAttributedString, color: NSColor)
         case edit(original: String)
     }
 
-    var onSend: ((String) -> Void)?
+    enum MentionKey { case up, down, accept, dismiss }
+
+    var onSend: ((ComposedText) -> Void)?
+    var onMentionQuery: ((String?) -> Void)?
+    /// Returns true when the mention picker handled the key.
+    var onMentionKey: ((MentionKey) -> Bool)?
+    var mentionsEnabled = false {
+        didSet { if !mentionsEnabled { reportMentionQuery() } }
+    }
     var onTyping: (() -> Void)?
     var onEscape: (() -> Void)?
     var onArrowUpEmpty: (() -> Void)?
@@ -128,6 +141,7 @@ final class ComposeView: NSView, NSTextViewDelegate {
         scroll.documentView = textView
         scroll.verticalScrollElasticity = .none
         textView.delegate = self
+        textView.willSetMarkedText = { [weak self] in self?.plainMentions(touching: $0) }
         textView.onPasteFiles = { [weak self] urls in self?.onPasteFiles?(urls) }
         pillContent.addSubview(scroll)
 
@@ -211,11 +225,73 @@ final class ComposeView: NSView, NSTextViewDelegate {
     /// Programmatic (draft restore, edit prefill): does not count as typing, so no `composing` presence.
     var text: String {
         get { textView.string }
+        set { draft = NSAttributedString(string: newValue) }
+    }
+
+    /// The editor's text with its mention runs, for drafts. Setting it is programmatic, like `text`.
+    var draft: NSAttributedString {
+        get { NSAttributedString(attributedString: textView.textStorage ?? NSTextStorage()) }
         set {
-            textView.string = newValue
-            textView.setSelectedRange(NSRange(location: (newValue as NSString).length, length: 0))
+            let styled = NSMutableAttributedString(string: newValue.string, attributes: Self.plainAttributes)
+            newValue.enumerateAttribute(.composeMention, in: NSRange(location: 0, length: newValue.length)) { value, range, _ in
+                if let mention = value as? ComposeMention { styled.addAttributes(Self.mentionAttributes(mention), range: range) }
+            }
+            textView.textStorage?.setAttributedString(styled)
+            dismissedMentionAt = nil
+            textView.typingAttributes = Self.plainAttributes
+            textView.setSelectedRange(NSRange(location: styled.length, length: 0))
+            textView.needsDisplay = true
             contentDidChange()
+            reportMentionQuery()
         }
+    }
+
+    /// What Enter sends: mentions as "@<number>", with the JIDs they stand for, trimmed.
+    var composed: ComposedText {
+        let storage = draft
+        var text = ""
+        var mentions: [String] = []
+        storage.enumerateAttribute(.composeMention, in: NSRange(location: 0, length: storage.length)) { value, range, _ in
+            if let mention = value as? ComposeMention, storage.attributedSubstring(from: range).string == "@" + mention.name {
+                text += "@" + mention.user
+                if let jid = mention.jid, !mentions.contains(jid) { mentions.append(jid) }
+            } else {
+                text += storage.attributedSubstring(from: range).string
+            }
+        }
+        return ComposedText(text: text.trimmingCharacters(in: .whitespacesAndNewlines), mentions: mentions)
+    }
+
+    /// `text` (wire form) for editing: its mentions by name, going out as the numbers they came as.
+    static func editable(_ text: String, mentions: [String: Mention]) -> NSAttributedString {
+        let s = NSMutableAttributedString(string: text)
+        for token in Mentions.ranges(in: text).reversed() {
+            guard let mention = mentions[token.user] else { continue }
+            s.replaceCharacters(in: token.range, with: NSAttributedString(
+                string: "@" + mention.name, attributes: [.composeMention: ComposeMention(name: mention.name, user: token.user, jid: mention.jid)]))
+        }
+        return s
+    }
+
+    /// Replaces the "@<query>" being typed with a mention of `name`, and a space.
+    func insertMention(_ mention: ComposeMention) {
+        guard let query = activeMentionQuery() else { return }
+        let token = NSMutableAttributedString(string: "@" + mention.name, attributes: Self.plainAttributes)
+        token.addAttributes(Self.mentionAttributes(mention), range: NSRange(location: 0, length: token.length))
+        token.append(NSAttributedString(string: " ", attributes: Self.plainAttributes))
+        guard textView.shouldChangeText(in: query.range, replacementString: token.string) else { return }
+        textView.textStorage?.replaceCharacters(in: query.range, with: token)
+        textView.didChangeText()
+        textView.setSelectedRange(NSRange(location: query.range.location + token.length, length: 0))
+        textView.typingAttributes = Self.plainAttributes
+    }
+
+    private static var plainAttributes: [NSAttributedString.Key: Any] {
+        [.font: MessageTextConfiguration.body, .foregroundColor: NSColor.labelColor]
+    }
+
+    private static func mentionAttributes(_ mention: ComposeMention) -> [NSAttributedString.Key: Any] {
+        [.composeMention: mention, .foregroundColor: MarkdownLite.linkColor]
     }
 
     func focus() {
@@ -233,7 +309,7 @@ final class ComposeView: NSView, NSTextViewDelegate {
         case .reply(let name, let snippet, let color):
             barTitle.stringValue = name
             barTitle.textColor = color
-            barSnippet.stringValue = snippet
+            barSnippet.attributedStringValue = snippet
             barAccent.layer?.backgroundColor = color.cgColor
         case .edit:
             barTitle.stringValue = "Edit message"
@@ -261,9 +337,15 @@ final class ComposeView: NSView, NSTextViewDelegate {
         updateHeight()
     }
 
-    /// Esc: clears the bar (and edit text) first; returns false when there was nothing to clear.
+    /// Esc: closes the mention picker, else clears the bar (and edit text); returns false when there
+    /// was nothing to clear.
     @discardableResult
     func handleEscape() -> Bool {
+        mentionKey(.dismiss) || clearBar()
+    }
+
+    @discardableResult
+    private func clearBar() -> Bool {
         guard bar != nil else { return false }
         if case .edit = bar { text = "" }
         setBar(nil)
@@ -275,12 +357,12 @@ final class ComposeView: NSView, NSTextViewDelegate {
 
     @objc private func sendTapped() { send() }
     @objc private func attachTapped() { onAttach?() }
-    @objc private func cancelBar() { handleEscape() }
+    @objc private func cancelBar() { clearBar() }
 
     private func send() {
-        let t = textView.string.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !t.isEmpty || hasAttachments else { return }
-        onSend?(t)
+        let composed = composed
+        guard !composed.text.isEmpty || hasAttachments else { return }
+        onSend?(composed)
     }
 
     /// Called by the owner after a successful send/edit hand-off.
@@ -297,6 +379,120 @@ final class ComposeView: NSView, NSTextViewDelegate {
     func textDidChange(_ notification: Notification) {
         contentDidChange()
         onTyping?()
+        reportMentionQuery()
+    }
+
+    func textViewDidChangeSelection(_ notification: Notification) {
+        reportMentionQuery()
+    }
+
+    /// Text typed next to a mention is plain.
+    func textView(_ textView: NSTextView, shouldChangeTypingAttributes oldTypingAttributes: [String: Any] = [:],
+                  toAttributes newTypingAttributes: [NSAttributedString.Key: Any] = [:]) -> [NSAttributedString.Key: Any] {
+        newTypingAttributes[.composeMention] == nil ? newTypingAttributes : Self.plainAttributes
+    }
+
+    private var rewritingMention = false
+
+    /// Deleting into a mention deletes all of it; typing inside one turns it into plain text. Either
+    /// is a single text change, so undo brings the mention back whole.
+    func textView(_ textView: NSTextView, shouldChangeTextIn range: NSRange, replacementString: String?) -> Bool {
+        guard !rewritingMention, !textView.hasMarkedText(), let replacement = replacementString,
+              let expanded = mentionsTouched(by: range) else { return true }
+        let deleting = replacement.isEmpty
+        var text = ""
+        if !deleting, let storage = textView.textStorage {
+            let plain = NSMutableString(string: storage.attributedSubstring(from: expanded).string)
+            plain.replaceCharacters(in: NSRange(location: range.location - expanded.location, length: range.length), with: replacement)
+            text = plain as String
+        }
+        guard rewrite(expanded, as: text) else { return false }
+        let caret = deleting ? expanded.location : range.location + (replacement as NSString).length
+        textView.setSelectedRange(NSRange(location: caret, length: 0))
+        return false
+    }
+
+    /// An input method composing inside a mention: the mention turns plain first, as its own change,
+    /// and the composition then proceeds as usual.
+    private func plainMentions(touching range: NSRange) {
+        guard let expanded = mentionsTouched(by: range), let storage = textView.textStorage else { return }
+        let selection = textView.selectedRange()
+        guard rewrite(expanded, as: storage.attributedSubstring(from: expanded).string) else { return }
+        textView.setSelectedRange(selection)
+    }
+
+    /// `range` grown to the whole of each mention it overlaps (or, empty, falls strictly inside); nil
+    /// when it touches none.
+    private func mentionsTouched(by range: NSRange) -> NSRange? {
+        guard let storage = textView.textStorage else { return nil }
+        var expanded = range
+        storage.enumerateAttribute(.composeMention, in: NSRange(location: 0, length: storage.length)) { value, run, _ in
+            let touched = range.length > 0 ? NSIntersectionRange(run, range).length > 0
+                                           : run.location < range.location && range.location < NSMaxRange(run)
+            if value != nil, touched { expanded = NSUnionRange(expanded, run) }
+        }
+        return expanded == range ? nil : expanded
+    }
+
+    /// Replaces `range` with plain `text` as one undoable change.
+    private func rewrite(_ range: NSRange, as text: String) -> Bool {
+        rewritingMention = true
+        defer { rewritingMention = false }
+        textView.breakUndoCoalescing()
+        guard textView.shouldChangeText(in: range, replacementString: text) else { return false }
+        textView.textStorage?.replaceCharacters(in: range, with: NSAttributedString(string: text, attributes: Self.plainAttributes))
+        textView.didChangeText()
+        textView.typingAttributes = Self.plainAttributes
+        return true
+    }
+
+    // MARK: - Mention query
+
+    /// Where Esc closed the picker; it stays closed for that "@".
+    private var dismissedMentionAt: Int?
+    private var lastMentionQuery: String?
+
+    /// The "@<query>" before the caret: "@" starts a word, and the query is one line of at most 40
+    /// characters that doesn't start with a space.
+    private func activeMentionQuery() -> (range: NSRange, query: String)? {
+        guard mentionsEnabled, let storage = textView.textStorage else { return nil }
+        let selection = textView.selectedRange()
+        guard selection.length == 0 else { return nil }
+        let ns = storage.string as NSString
+        let cursor = selection.location
+        var i = cursor - 1
+        while i >= 0, cursor - i <= 41 {
+            let c = ns.character(at: i)
+            if c == 0x0A { return nil }
+            if c == 0x40 /* @ */ {
+                if i > 0, let prev = Unicode.Scalar(ns.character(at: i - 1)), !CharacterSet.whitespacesAndNewlines.contains(prev),
+                   !"([{\"'".unicodeScalars.contains(prev) { return nil }
+                if storage.attribute(.composeMention, at: i, effectiveRange: nil) != nil { return nil }
+                let range = NSRange(location: i, length: cursor - i)
+                let query = ns.substring(with: NSRange(location: i + 1, length: cursor - i - 1))
+                return query.hasPrefix(" ") ? nil : (range, query)
+            }
+            i -= 1
+        }
+        return nil
+    }
+
+    private func reportMentionQuery() {
+        let active = activeMentionQuery()
+        if active?.range.location != dismissedMentionAt { dismissedMentionAt = nil }
+        let query = dismissedMentionAt == nil ? active?.query : nil
+        guard query != lastMentionQuery else { return }
+        lastMentionQuery = query
+        onMentionQuery?(query)
+    }
+
+    private func mentionKey(_ key: MentionKey) -> Bool {
+        guard lastMentionQuery != nil, onMentionKey?(key) == true else { return false }
+        if key == .dismiss {
+            dismissedMentionAt = activeMentionQuery()?.range.location
+            reportMentionQuery()
+        }
+        return true
     }
 
     /// Chat isn't prose: skip the system "Capitalize words automatically" pass, keep spelling fixes.
@@ -317,9 +513,15 @@ final class ComposeView: NSView, NSTextViewDelegate {
         switch selector {
         case #selector(NSResponder.insertNewline(_:)):
             if NSApp.currentEvent?.modifierFlags.contains(.shift) == true { return false }
+            if mentionKey(.accept) { return true }
             send()
             return true
+        case #selector(NSResponder.insertTab(_:)):
+            return mentionKey(.accept)
+        case #selector(NSResponder.moveDown(_:)):
+            return mentionKey(.down)
         case #selector(NSResponder.moveUp(_:)):
+            if mentionKey(.up) { return true }
             if textView.string.isEmpty, bar == nil {
                 onArrowUpEmpty?()
                 return true
@@ -342,4 +544,29 @@ final class ComposeView: NSView, NSTextViewDelegate {
         let total = Self.outerInsets.top + Self.outerInsets.bottom + pill
         onHeightChange?(ceil(total))
     }
+}
+
+/// A message as composed: mentions as "@<number>", and the JIDs they stand for.
+struct ComposedText: Equatable {
+    var text: String
+    var mentions: [String] = []
+}
+
+/// A mention in the compose editor. `user` is the number its "@<number>" goes out as.
+final class ComposeMention: NSObject {
+    let name: String
+    let user: String
+    /// The JID a sent message lists; nil for a mention kept from an edited message without one.
+    let jid: String?
+
+    init(name: String, user: String, jid: String?) {
+        self.name = name
+        self.user = user
+        self.jid = jid
+    }
+}
+
+extension NSAttributedString.Key {
+    /// The `ComposeMention` behind an "@<name>" in the compose editor.
+    static let composeMention = NSAttributedString.Key("CmdFreakComposeMention")
 }

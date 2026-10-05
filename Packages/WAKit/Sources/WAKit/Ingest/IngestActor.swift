@@ -28,7 +28,10 @@ enum MessageMutation: Codable, Hashable, Sendable {
 enum OutboxChange: Codable, Hashable, Sendable {
     case receipt
     case reaction(fromMe: Bool, participant: String?, emoji: String, timestamp: Int64, previous: OwnReaction?)
-    case edit(text: String, editedAt: Int64, previousText: String?, previousEditedAt: Int64?)
+    /// `mentions`: the JIDs the edited text's "@<number>"s stand for, and `previousMentions` the list a
+    /// give-up restores. Rows queued before these existed decode `mentions` as nil and keep the list.
+    case edit(text: String, editedAt: Int64, previousText: String?, previousEditedAt: Int64?,
+              mentions: [String]? = nil, previousMentions: [String]? = nil)
     case revoke(fromMe: Bool, participant: String?, previousText: String?, previousMedia: MediaRecord?)
     case pin(pinnedAt: Int64?, previous: Int64?)
     case mute(until: Int64?, previous: Int64?)
@@ -76,8 +79,10 @@ enum OutboxChange: Codable, Hashable, Sendable {
         case let (.reaction(fromMe, participant, emoji, ts, _), .reaction(_, _, sentEmoji, sentTs, _)):
             .reaction(fromMe: fromMe, participant: participant, emoji: emoji, timestamp: ts,
                       previous: sentEmoji.isEmpty ? nil : OwnReaction(senderJid: ownSender, emoji: sentEmoji, timestamp: sentTs))
-        case let (.edit(text, editedAt, _, _), .edit(sentText, sentAt, _, _)):
-            .edit(text: text, editedAt: editedAt, previousText: sentText, previousEditedAt: sentAt)
+        case let (.edit(text, editedAt, _, _, mentions, previousMentions), .edit(sentText, sentAt, _, _, sentMentions, _)):
+            // A row queued before mention lists left the message's list as it was.
+            .edit(text: text, editedAt: editedAt, previousText: sentText, previousEditedAt: sentAt,
+                  mentions: mentions, previousMentions: sentMentions ?? previousMentions)
         case let (.pin(pinnedAt, _), .pin(sent, _)): .pin(pinnedAt: pinnedAt, previous: sent)
         case let (.mute(until, _), .mute(sent, _)): .mute(until: until, previous: sent)
         case let (.archive(archived, _), .archive(sent, _)): .archive(archived: archived, previous: sent)
@@ -92,8 +97,9 @@ enum OutboxChange: Codable, Hashable, Sendable {
         switch (self, older) {
         case let (.reaction(fromMe, participant, emoji, ts, _), .reaction(_, _, _, _, previous)):
             .reaction(fromMe: fromMe, participant: participant, emoji: emoji, timestamp: ts, previous: previous)
-        case let (.edit(text, editedAt, _, _), .edit(_, _, previousText, previousEditedAt)):
-            .edit(text: text, editedAt: editedAt, previousText: previousText, previousEditedAt: previousEditedAt)
+        case let (.edit(text, editedAt, _, _, mentions, ownPrevious), .edit(_, _, previousText, previousEditedAt, olderMentions, previousMentions)):
+            .edit(text: text, editedAt: editedAt, previousText: previousText, previousEditedAt: previousEditedAt,
+                  mentions: mentions, previousMentions: olderMentions == nil ? ownPrevious : previousMentions)
         case let (.pin(pinnedAt, _), .pin(_, previous)): .pin(pinnedAt: pinnedAt, previous: previous)
         case let (.mute(until, _), .mute(_, previous)): .mute(until: until, previous: previous)
         case let (.archive(archived, _), .archive(_, previous)): .archive(archived: archived, previous: previous)
@@ -297,17 +303,22 @@ public actor IngestActor {
         return jid
     }
 
-    /// Our own edit of `key`, queued for the server. We send no mention list, so the message keeps the
-    /// one it had: mentions the new text still has resolve as before.
-    public func localEdit(_ key: BridgeMessageKey, text: String, editedAt: Int64) throws {
+    /// Our own edit of `key`, queued for the server. `mentions` are the JIDs the edit names; those of the
+    /// message's own mentions still in the new text are kept, so they resolve as before.
+    public func localEdit(_ key: BridgeMessageKey, text: String, mentions: [String] = [], editedAt: Int64) throws {
         try perform { db, cs in
             let jid = self.canon(key.chatJid)
             let old = try Row.fetchOne(db, sql: """
                 SELECT text, editedAt, json_extract(extra, '$.mentions') AS mentions FROM message WHERE chatJid = ? AND id = ?
                 """, arguments: [jid, key.id])
-            let mentions = try (old?["mentions"] as String?).map { try JSONDecoder().decode([String].self, from: Data($0.utf8)) }
-            try self.applyOrPark(db, key, .edit(text: text, mentions: mentions, editedAt: editedAt), &cs)
-            try self.enqueue(db, jid, key.id, .edit(text: text, editedAt: editedAt, previousText: old?["text"], previousEditedAt: old?["editedAt"]))
+            let previous = try (old?["mentions"] as String?).map { try JSONDecoder().decode([String].self, from: Data($0.utf8)) }
+            let users = Set(Mentions.ranges(in: text).map(\.user))
+            var kept = mentions
+            for m in previous ?? [] where users.contains(JID.user(m)) && !kept.contains(m) { kept.append(m) }
+            try self.applyOrPark(db, key, .edit(text: text, mentions: Mentions.stored(kept, text: text), editedAt: editedAt), &cs)
+            try self.enqueue(db, jid, key.id, .edit(text: text, editedAt: editedAt, previousText: old?["text"],
+                                                   previousEditedAt: old?["editedAt"], mentions: kept,
+                                                   previousMentions: previous))
         }
     }
 
@@ -366,7 +377,7 @@ public actor IngestActor {
 
     /// Inserts an optimistic outgoing message (status `pending`) and returns it.
     public func insertOutgoing(
-        chatJid: String, text: String?, kind: MessageKind = .text,
+        chatJid: String, text: String?, mentions: [String] = [], kind: MessageKind = .text,
         quoted: BridgeQuoted? = nil, media: BridgeOutgoingMedia? = nil, ownJid: String? = nil
     ) throws -> MessageItem {
         let jid = canon(chatJid)
@@ -379,7 +390,8 @@ public actor IngestActor {
                 localId: nil, chatJid: jid, id: localId, senderJid: ownJid ?? "", participant: nil, fromMe: true,
                 timestamp: now, sortKey: SortKey.make(timestamp: now, seq: self.ingestSeq), kind: kind, text: text,
                 quotedId: quoted?.id, quotedSenderJid: quoted?.senderJid, quotedKind: quoted?.kind, quotedSnippet: quoted?.snippet,
-                status: .pending, editedAt: nil, revoked: false, isForwarded: false, typeName: nil, pushName: nil, extra: nil
+                status: .pending, editedAt: nil, revoked: false, isForwarded: false, typeName: nil, pushName: nil,
+                extra: Self.outgoingExtra(text: text, mentions: mentions, quoted: quoted)
             )
             try rec.insert(db)
             try db.execute(sql: "UPDATE message SET sentHere = 1 WHERE chatJid = ? AND id = ?", arguments: [jid, localId])
@@ -671,7 +683,7 @@ public actor IngestActor {
             guard try Bool.fetchOne(db, sql: "SELECT 1 FROM message WHERE chatJid = ? AND id = ?", arguments: [e.chatJid, e.messageId]) == true
             else { return true }
             return try (ownReaction(db, e.chatJid, e.messageId)?.emoji ?? "") != emoji
-        case .edit(let text, let editedAt, _, _):
+        case .edit(let text, let editedAt, _, _, _, _):
             return try Bool.fetchOne(db, sql: """
                 SELECT 1 FROM message WHERE chatJid = ? AND id = ? AND revoked = 0 AND text IS ? AND editedAt IS ?
                 """, arguments: [e.chatJid, e.messageId, text, editedAt]) != true
@@ -785,10 +797,12 @@ public actor IngestActor {
                     """, arguments: key + [p.senderJid, p.emoji, p.timestamp])
             }
             cs.update(chatJid, messageId)
-        case .edit(let text, let editedAt, let previousText, let previousEditedAt):
+        case .edit(let text, let editedAt, let previousText, let previousEditedAt, let mentions, let previousMentions):
+            let restore = mentions == nil ? "" : ", " + Self.setMentionsSQL
+            let previousJSON = try Self.mentionsJSON(previousMentions)
             try db.execute(sql: """
-                UPDATE message SET text = ?, editedAt = ? WHERE chatJid = ? AND id = ? AND revoked = 0 AND text IS ? AND editedAt IS ?
-                """, arguments: [previousText, previousEditedAt] + key + [text, editedAt])
+                UPDATE message SET text = ?, editedAt = ?\(restore) WHERE chatJid = ? AND id = ? AND revoked = 0 AND text IS ? AND editedAt IS ?
+                """, arguments: [previousText, previousEditedAt] + (mentions == nil ? [] : [previousJSON, previousJSON]) + key + [text, editedAt])
             if db.changesCount > 0 { cs.update(chatJid, messageId) }
         case .revoke(_, _, let previousText, let previousMedia):
             try db.execute(sql: "UPDATE message SET revoked = 0, text = ? WHERE chatJid = ? AND id = ? AND revoked = 1",
@@ -1128,6 +1142,13 @@ public actor IngestActor {
         var e = extra ?? MessageExtra()
         e.mentions = mentions
         return e.isEmpty ? nil : e
+    }
+
+    /// The quote keeps the list its target was shown with, so it reads the same as the target.
+    private static func outgoingExtra(text: String?, mentions: [String], quoted: BridgeQuoted?) -> MessageExtra? {
+        let extra = MessageExtra(location: nil, contact: nil, poll: nil, mentions: Mentions.stored(mentions, text: text),
+                                 quotedMentions: quoted.flatMap { $0.mentions.isEmpty ? nil : $0.mentions })
+        return extra.isEmpty ? nil : extra
     }
 
     private static func extra(_ m: BridgeMessage) -> MessageExtra? {

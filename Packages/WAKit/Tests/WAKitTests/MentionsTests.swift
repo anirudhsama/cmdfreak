@@ -8,6 +8,13 @@ import Testing
         #expect(Mentions.apply("mail a@99887766x or @1234", names) == "mail a@99887766x or @1234")
     }
 
+    @Test func phoneNumbersAreGroupedLikeTheirCountry() {
+        #expect(PhoneFormat.display("447700900208") == "+44 7700 900208")
+        #expect(PhoneFormat.display("919876543210") == "+91 98765 43210")
+        #expect(JID.phoneDisplay("14155550123@s.whatsapp.net") == "+1 415-555-0123")
+        #expect(PhoneFormat.display("999") == "+999")
+    }
+
     private func seeded() async throws -> (AppDatabase, IngestActor) {
         let db = try F.tempDB()
         let ingest = try IngestActor(database: db)
@@ -24,7 +31,7 @@ import Testing
         try await ingest.apply([F.live(F.message("a", chat: F.group, sender: F.bob, text: "@99887766 @11112222 @15552220000 @55554444",
                                                  mentions: [F.aliceLID, "11112222@lid", F.bob, "55554444@lid"]))])
         let page = try await ChatWindowLoader(database: db, chatJid: F.group).initial()
-        #expect(page.items.first?.displayText == "@Alice Example @You @+15552220000 @55554444")
+        #expect(page.items.first?.displayText == "@Alice Example @You @+1 555-222-0000 @55554444")
         #expect(page.items.first?.message.text == "@99887766 @11112222 @15552220000 @55554444")
         let mentions = page.items.first?.mentions ?? [:]
         #expect(mentions["99887766"] == Mention(name: "Alice Example", jid: F.alicePN, phone: JID.phoneDisplay(F.alicePN)))
@@ -99,5 +106,40 @@ import Testing
         try await db.pool.write { try $0.execute(sql: "UPDATE message SET extra = NULL") }
         let item = try await ChatWindowLoader(database: db, chatJid: F.group).initial().items.first
         #expect(item?.displayText == "@Alice Example @55554444")
+    }
+
+    /// A sent message keeps its mention list, and its quote the target's: the quote reads like the
+    /// target did on screen, even once the target is gone.
+    @Test func sentMessagesAndTheirQuotesKeepTheirLists() async throws {
+        let db = try F.tempDB()
+        let bridge = FakeBridge()
+        let client = try await WAClient(database: db) { _ in bridge }
+        try await client.ingest.apply([
+            .ownJid(pn: F.me, lid: "11112222@lid"),
+            F.history(contacts: [BridgeContact(jid: F.alicePN, fullName: "Alice Example", firstName: nil, pushName: nil, phone: nil)],
+                      aliases: [BridgeJidAlias(lid: F.aliceLID, pn: F.alicePN)]),
+            F.live(F.message("T", chat: F.group, sender: F.bob, text: "hey @99887766", mentions: [F.aliceLID])),
+        ])
+        let target = try #require(try await client.windowLoader(for: F.group).items(ids: ["T"]).first)
+        try await client.sendText("@15551110000 look", mentions: [F.alicePN], to: F.group, replyTo: target)
+        #expect(bridge.calls.withLock { $0.textMentions } == [[F.alicePN]])
+        try await db.pool.write { try $0.execute(sql: "DELETE FROM message WHERE id = 'T'") }
+        let sent = try #require(try await client.windowLoader(for: F.group).initial().items.first { $0.message.fromMe })
+        #expect(sent.displayText == "@Alice Example look")
+        #expect(sent.displayQuotedSnippet == "hey @Alice Example")
+    }
+
+    @Test func groupMembersAreNamedLikeTheirMentions() async throws {
+        let db = try F.tempDB()
+        let client = try await WAClient(database: db) { _ in FakeBridge() }
+        try await client.ingest.apply([
+            .ownJid(pn: F.me, lid: "11112222@lid"),
+            F.history(contacts: [BridgeContact(jid: F.alicePN, fullName: "Alice Example", firstName: nil, pushName: nil, phone: nil)],
+                      aliases: [BridgeJidAlias(lid: F.aliceLID, pn: F.alicePN)]),
+            F.live(F.message("a", chat: F.group, sender: F.bob, text: "hi")),
+        ])
+        let members = await client.groupMembers(F.group)
+        #expect(members.map(\.name) == ["+1 555-222-0000", "Alice Example"])
+        #expect(members.map(\.jid) == [F.bob, F.alicePN])
     }
 }

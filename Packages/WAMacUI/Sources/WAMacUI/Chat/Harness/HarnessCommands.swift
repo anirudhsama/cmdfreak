@@ -12,6 +12,7 @@ import UniformTypeIdentifiers
 ///   open dm|group        switch chats
 ///   send TEXT            put TEXT in compose and send
 ///   type TEXT            insert into compose (keeps focus)
+///   key K                press K in compose: down, up, enter, tab, esc, delete
 ///   attach P1|P2         stage files in the attachment tray
 ///   sendstaged           send the tray with the compose text as caption ("fail" in it fails the upload once)
 ///   retry N              retry the failed send at row N
@@ -57,6 +58,7 @@ enum HarnessCommands {
             controller.insertComposeText(arg)
             controller.debugSend()
         case "type": controller.insertComposeText(arg)
+        case "key": controller.debugComposeKey(arg)
         case "attach": controller.attach(arg.split(separator: "|").map { URL(filePath: String($0)) })
         case "sendstaged": controller.debugSend()
         case "retry": if let n = Int(arg), let item = list.rows.item(atRow: n) { controller.retry(item) }

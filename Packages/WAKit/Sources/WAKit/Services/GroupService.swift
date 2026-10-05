@@ -19,6 +19,9 @@ public actor GroupService {
     /// Loaded this session: one without a join or creation time stays unlisted, and is not
     /// fetched again on every retry.
     private var joinsLoaded: Set<String> = []
+    private var membersLoaded: Set<String> = []
+    /// Bumped by a membership change, so a fetch that started before it doesn't count as loaded.
+    private var membersGeneration: [String: Int] = [:]
 
     public init(bridge: any WaBridgeProtocol, ingest: IngestActor, batchInterval: Duration = .seconds(2)) {
         self.bridge = bridge
@@ -31,6 +34,8 @@ public actor GroupService {
     /// membership changed). Safe to call repeatedly: a call during a run schedules one more pass.
     public func fillMissing(stale: [String] = []) async {
         attempted.subtract(stale)
+        membersLoaded.subtract(stale)
+        for jid in stale { membersGeneration[jid, default: 0] += 1 }
         guard !filling else { rerun = true; return }
         filling = true
         defer { filling = false }
@@ -99,6 +104,79 @@ public actor GroupService {
     public func loadMetadata(jid: String) async throws {
         let group = try await bridge.fetchGroupMetadata(jid: jid)
         try await ingest.applyGroups([group])
+    }
+
+    /// The group's other members, by name. Participants are fetched once per session, and again after
+    /// a membership change; until that succeeds, the people who have written in the group stand in.
+    public func members(of groupJid: String) async -> [GroupMember] {
+        if !membersLoaded.contains(groupJid) {
+            let generation = membersGeneration[groupJid, default: 0]
+            do {
+                let group = try await bridge.fetchGroupMetadata(jid: groupJid)
+                // A membership change during the fetch outdates it; a later fetch has the members.
+                if membersGeneration[groupJid, default: 0] == generation {
+                    try await ingest.applyGroups([group])
+                    if membersGeneration[groupJid, default: 0] == generation { membersLoaded.insert(groupJid) }
+                }
+            } catch {
+                WAKit.log.error("group members \(groupJid, privacy: .private) failed: \(error)")
+            }
+        }
+        do {
+            return try await ingest.database.reader.read { try GroupMember.fetchAll($0, group: groupJid) }
+        } catch {
+            WAKit.log.error("group members read failed: \(error)")
+            return []
+        }
+    }
+}
+
+/// Someone a message in a group can mention.
+public struct GroupMember: Hashable, Sendable, Identifiable {
+    /// The JID a mention lists: the phone-number form when known, else the LID.
+    public var jid: String
+    public var name: String
+    /// "+<digits>" when the phone number is known.
+    public var phone: String?
+    public var hasAvatar: Bool
+
+    public var id: String { jid }
+    public var avatarURL: URL? { hasAvatar ? AvatarService.fileURL(for: jid) : nil }
+
+    public init(jid: String, name: String, phone: String? = nil, hasAvatar: Bool = false) {
+        self.jid = jid
+        self.name = name
+        self.phone = phone
+        self.hasAvatar = hasAvatar
+    }
+
+    /// Named as their mentions are (see `Mentions.Resolver`), else by their latest push name here.
+    static func fetchAll(_ db: Database, group: String) throws -> [GroupMember] {
+        var jids = try String.fetchAll(db, sql: "SELECT jid FROM group_participant WHERE groupJid = ?", arguments: [group])
+        if jids.isEmpty {
+            jids = try String.fetchAll(db, sql: "SELECT DISTINCT senderJid FROM message WHERE chatJid = ? AND fromMe = 0 AND senderJid != ''",
+                                       arguments: [group])
+        }
+        let pushNames = Dictionary(try Row.fetchAll(db, sql: """
+            SELECT senderJid, pushName FROM message WHERE chatJid = ? AND fromMe = 0 AND pushName IS NOT NULL AND pushName != ''
+            ORDER BY sortKey
+            """, arguments: [group]).map { ($0["senderJid"] as String, $0["pushName"] as String) }, uniquingKeysWith: { _, b in b })
+        var resolver = try Mentions.Resolver(db)
+        var seen: Set<String> = []
+        var out: [GroupMember] = []
+        for jid in jids {
+            let mention = try resolver.mention(of: jid)
+            // Ourselves: never offered.
+            if mention != nil, mention?.jid == nil { continue }
+            let target = mention?.jid ?? Mentions.Resolver.bare(jid)
+            guard seen.insert(target).inserted else { continue }
+            let name = mention?.name ?? pushNames[jid] ?? JID.user(jid)
+            out.append(GroupMember(jid: target, name: name, phone: mention?.phone))
+        }
+        let avatars = try Set(String.fetchAll(db, sql: "SELECT jid FROM contact WHERE hasAvatar AND jid IN (\(placeholders(out.count)))",
+                                              arguments: StatementArguments(out.map(\.jid))))
+        for i in out.indices { out[i].hasAvatar = avatars.contains(out[i].jid) }
+        return out.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
     }
 }
 

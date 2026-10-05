@@ -194,7 +194,8 @@ struct CommandBarRow: View {
     private var leading: some View {
         switch result {
         case .chat(let r):
-            CommandBarAvatar(candidate: r.candidate)
+            ContactAvatar(jid: r.candidate.jid, title: r.candidate.title, isGroup: r.candidate.kind == .group,
+                          url: r.candidate.avatarURL)
         case .action(let a):
             RoundedRectangle(cornerRadius: 7, style: .continuous)
                 .fill(isSelected ? AnyShapeStyle(Color.white.opacity(0.22)) : AnyShapeStyle(.quaternary))
@@ -217,7 +218,7 @@ struct CommandBarRow: View {
         switch result {
         case .chat(let r):
             let c = r.candidate
-            let phone = c.phone.flatMap { $0.isEmpty ? nil : "+" + $0 }
+            let phone = c.phone.flatMap { $0.isEmpty ? nil : PhoneFormat.display($0) }
             switch c.kind {
             case .group: return "Group"
             case .broadcast: return "Broadcast list"
@@ -240,37 +241,42 @@ struct CommandBarRow: View {
 }
 
 /// Cached avatar when one is on disk; initials on the chat's tint otherwise (same as the list).
-private struct CommandBarAvatar: View {
-    let candidate: QuickSearchCandidate
+/// A person's or group's avatar, else their initials on their tint.
+struct ContactAvatar: View {
+    let jid: String
+    let title: String
+    var isGroup = false
+    let url: URL?
+    var size: CGFloat = CommandBarMetrics.avatarSize
     @State private var image: CGImage?
 
-    private static var pixelSize: Int { Int(CommandBarMetrics.avatarSize) * 2 }
+    private var pixelSize: Int { Int(size) * 2 }
 
     var body: some View {
         Group {
             if let image {
                 Image(decorative: image, scale: 2).resizable().aspectRatio(contentMode: .fill).clipShape(Circle())
-            } else if candidate.kind == .group {
+            } else if isGroup {
                 Circle().fill(.quaternary).overlay {
-                    Image(systemName: "person.2.fill").font(.system(size: 12)).foregroundStyle(.secondary)
+                    Image(systemName: "person.2.fill").font(.system(size: size * 0.4)).foregroundStyle(.secondary)
                 }
             } else {
-                Circle().fill(AvatarTint.color(for: candidate.jid)).overlay {
-                    if Initials.from(candidate.title).isEmpty {
-                        Image(systemName: "person.fill").font(.system(size: 14)).foregroundStyle(.white)
+                Circle().fill(AvatarTint.color(for: jid)).overlay {
+                    if Initials.from(title).isEmpty {
+                        Image(systemName: "person.fill").font(.system(size: size * 0.47)).foregroundStyle(.white)
                     } else {
-                        Text(Initials.from(candidate.title)).font(.system(size: 12, weight: .medium)).foregroundStyle(.white)
+                        Text(Initials.from(title)).font(.system(size: size * 0.4, weight: .medium)).foregroundStyle(.white)
                     }
                 }
             }
         }
-        .task(id: candidate.avatarURL) {
-            guard let url = candidate.avatarURL, let key = ThumbnailCache.fileKey(url) else { image = nil; return }
-            if let hit = ThumbnailCache.shared.cached(key: key, maxPixelSize: Self.pixelSize) {
+        .task(id: url) {
+            guard let url, let key = ThumbnailCache.fileKey(url) else { image = nil; return }
+            if let hit = ThumbnailCache.shared.cached(key: key, maxPixelSize: pixelSize) {
                 image = hit
                 return
             }
-            image = await ThumbnailCache.shared.image(key: key, source: .file(url), maxPixelSize: Self.pixelSize)
+            image = await ThumbnailCache.shared.image(key: key, source: .file(url), maxPixelSize: pixelSize)
         }
     }
 }

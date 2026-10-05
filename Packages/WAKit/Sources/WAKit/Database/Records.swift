@@ -74,7 +74,7 @@ public struct ContactRecord: Codable, Hashable, Sendable, FetchableRecord, Persi
 
     /// Saved name first, then a business's verified name, then the sender's push name, then the phone number.
     public var displayName: String? {
-        fullName.nonEmpty ?? firstName.nonEmpty ?? verifiedName.nonEmpty ?? pushName.nonEmpty ?? phone.nonEmpty.map { "+" + $0 }
+        fullName.nonEmpty ?? firstName.nonEmpty ?? verifiedName.nonEmpty ?? pushName.nonEmpty ?? phone.nonEmpty.map(PhoneFormat.display)
     }
 }
 
