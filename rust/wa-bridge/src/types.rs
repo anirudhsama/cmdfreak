@@ -263,6 +263,15 @@ pub enum MessageStatus {
     Failed,
 }
 
+/// An update's own message, which is never stored as one: our other devices' read-self receipts
+/// can list it in place of the message it changed.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, uniffi::Record)]
+pub struct BridgeStanza {
+    pub id: String,
+    /// Server time, comparable with `BridgeMessage::timestamp`.
+    pub timestamp: i64,
+}
+
 /// Mutations of an existing message. They can arrive before the target (history sync, retries),
 /// so the app parks them until the target row exists.
 #[derive(Debug, Clone, serde::Serialize, uniffi::Enum)]
@@ -273,11 +282,15 @@ pub enum BridgeMessageUpdate {
         /// JIDs mentioned in the new text.
         mentions: Vec<String>,
         edited_at: i64,
+        #[uniffi(default)]
+        stanza: Option<BridgeStanza>,
     },
     Revoke {
         target: BridgeMessageKey,
         revoked_by: String,
         timestamp: i64,
+        #[uniffi(default)]
+        stanza: Option<BridgeStanza>,
     },
     /// Empty `emoji` removes the sender's reaction.
     Reaction {

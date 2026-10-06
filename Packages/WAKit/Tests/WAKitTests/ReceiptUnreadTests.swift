@@ -235,6 +235,28 @@ import Testing
         #expect(try db.chat(F.alicePN)?.unreadCount == 0)
     }
 
+    @Test func readSelfListingAnEditReadsUpToIt() async throws {
+        let db = try F.tempDB()
+        let ingest = try IngestActor(database: db)
+        func edit(_ target: String, _ stanza: String, at ts: Int64) -> BridgeEvent {
+            F.live(updates: [.edit(target: F.key(target, chat: F.group, participant: F.bob), text: "edited", mentions: [],
+                                   editedAt: ts, stanza: BridgeStanza(id: stanza, timestamp: ts))])
+        }
+        // The phone lists the edit, not the message it changed; a message after the edit stays unread.
+        try await ingest.apply([F.live(F.message("1", chat: F.group, sender: F.bob, ts: 100))])
+        try await ingest.apply([edit("1", "E1", at: 200)])
+        try await ingest.apply([F.live(F.message("2", chat: F.group, sender: F.bob, ts: 300))])
+        try await ingest.apply([F.receipt(["E1"], chat: F.group, kind: .readSelf, from: F.me)])
+        #expect(try db.chat(F.group)?.unreadCount == 1)
+        #expect(try db.count("SELECT COUNT(*) FROM pending_mutation") == 0)
+
+        // The read can land before the edit it lists.
+        try await ingest.apply([F.receipt(["E2"], chat: F.group, kind: .readSelf, from: F.me)])
+        try await ingest.apply([edit("2", "E2", at: 400)])
+        #expect(try db.chat(F.group)?.unreadCount == 0)
+        #expect(try db.count("SELECT COUNT(*) FROM pending_mutation") == 0)
+    }
+
     @Test func snapshotCountWithoutMessagesStaysUntilRead() async throws {
         let db = try F.tempDB()
         let ingest = try IngestActor(database: db)

@@ -190,6 +190,7 @@ fn map_protocol(pm: &wa::message::ProtocolMessage, env: &Envelope, canon: &Canon
                 target: target_key(key, env, canon),
                 revoked_by: env.sender.to_string(),
                 timestamp: env.timestamp,
+                stanza: Some(stanza(env)),
             })
         }
         Some(Type::MESSAGE_EDIT) | None if pm.edited_message.is_set() => {
@@ -199,6 +200,7 @@ fn map_protocol(pm: &wa::message::ProtocolMessage, env: &Envelope, canon: &Canon
                 text: edited.and_then(message_text),
                 mentions: edited.map(mentioned).unwrap_or_default(),
                 edited_at: pm.timestamp_ms.map(|ms| ms / 1000).unwrap_or(env.timestamp),
+                stanza: Some(stanza(env)),
             })
         }
         Some(Type::EPHEMERAL_SETTING) => Mapped::Message(Box::new(system_message(
@@ -208,6 +210,10 @@ fn map_protocol(pm: &wa::message::ProtocolMessage, env: &Envelope, canon: &Canon
         ))),
         _ => Mapped::Skip,
     }
+}
+
+fn stanza(env: &Envelope) -> BridgeStanza {
+    BridgeStanza { id: env.id.clone(), timestamp: env.timestamp }
 }
 
 fn system_message(env: &Envelope, type_name: &str, text: Option<String>) -> BridgeMessage {

@@ -238,7 +238,7 @@ fn history_maps_chats_messages_and_updates() {
         .updates
         .iter()
         .find_map(|u| match u {
-            BridgeMessageUpdate::Edit { target, text, edited_at, .. } => Some((target, text, edited_at)),
+            BridgeMessageUpdate::Edit { target, text, edited_at, stanza, .. } => Some((target, text, edited_at, stanza)),
             _ => None,
         })
         .unwrap();
@@ -246,6 +246,7 @@ fn history_maps_chats_messages_and_updates() {
     assert!(!edit.0.from_me, "Bob edited his own message");
     assert_eq!(edit.1.as_deref(), Some("hello, edited"));
     assert_eq!(*edit.2, 1_700_000_400);
+    assert_eq!(edit.3, &Some(BridgeStanza { id: "E1".into(), timestamp: 1_700_000_400 }));
 
     let poll = msg("P1");
     assert_eq!(poll.kind, MessageKind::Poll);

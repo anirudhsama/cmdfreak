@@ -550,8 +550,8 @@ public actor IngestActor {
         }
     }
 
-    /// Drops reaction/vote removal tombstones older than `cutoff`. Stale copies that could revive
-    /// those come from history sync around the removal; delete-for-me tombstones are kept for good,
+    /// Drops reaction/vote removal and add-on tombstones older than `cutoff`. Stale copies that could
+    /// revive those come from history sync around the removal; delete-for-me tombstones are kept for good,
     /// since on-demand history can bring back a message of any age (and there are few of them).
     public func pruneTombstones(olderThan cutoff: Int64) throws {
         try perform { db, _ in
@@ -1209,10 +1209,12 @@ public actor IngestActor {
 
     private func applyUpdate(_ u: BridgeMessageUpdate, _ db: Database, _ cs: inout ChangeSet) throws {
         switch u {
-        case .edit(let target, let text, let mentions, let editedAt):
+        case .edit(let target, let text, let mentions, let editedAt, let stanza):
             try applyOrPark(db, target, .edit(text: text, mentions: Mentions.stored(mentions, text: text), editedAt: editedAt), &cs)
-        case .revoke(let target, _, let timestamp):
+            try recordStanza(db, canon(target.chatJid), stanza, &cs)
+        case .revoke(let target, _, let timestamp, let stanza):
             try applyOrPark(db, target, .revoke(timestamp: timestamp), &cs)
+            try recordStanza(db, canon(target.chatJid), stanza, &cs)
         case .reaction(let target, let r):
             try applyOrPark(db, target, .reaction(senderJid: canon(r.senderJid), fromMe: r.fromMe, emoji: r.emoji, timestamp: r.timestamp), &cs)
         case .pollVote(let target, let voter, let selected, let timestamp):
@@ -1237,6 +1239,20 @@ public actor IngestActor {
         if try !applyMutation(db, chatJid, target.id, mutation, &cs) {
             try park(db, chatJid, target.id, mutation)
         }
+    }
+
+    /// An edit or revoke's own message id, which a read-self receipt can list in place of its
+    /// target. Remembered for a receipt still to come; one that came first reads the chat now.
+    private func recordStanza(_ db: Database, _ chatJid: String, _ stanza: BridgeStanza?, _ cs: inout ChangeSet) throws {
+        guard let stanza else { return }
+        try Self.recordTombstone(db, chatJid, stanza.id, .addon, "", stanza.timestamp)
+        guard pendingCount > 0 else { return }
+        try db.execute(sql: """
+            DELETE FROM pending_mutation WHERE chatJid = ? AND messageId = ? AND payload LIKE '{"readElsewhere"%'
+            """, arguments: [chatJid, stanza.id])
+        guard db.changesCount > 0 else { return }
+        pendingCount = max(0, pendingCount - db.changesCount)
+        try readMessages(db, chatJid, where: "timestamp <= ?", [stanza.timestamp], readAt: stanza.timestamp, &cs)
     }
 
     private func park(_ db: Database, _ chatJid: String, _ messageId: String, _ mutation: MessageMutation) throws {
@@ -1336,6 +1352,8 @@ public actor IngestActor {
         case message
         /// A sender removed their reaction / cleared their vote at `timestamp`.
         case reaction, vote
+        /// An edit or revoke's own message id (never stored as a message), sent at `timestamp`.
+        case addon
     }
 
     /// The tombstone's timestamp, if there is one.
@@ -1480,17 +1498,20 @@ public actor IngestActor {
         case .read, .played: status = .read
         case .readSelf, .playedSelf:
             // Reading the listed messages read the chat up to them; newer ones stay unread. Listed
-            // messages not here yet (offline delivery can bring the read first) arrive read.
-            var newest = Int64.min
+            // messages not here yet (offline delivery can bring the read first) arrive read. A listed
+            // edit or revoke reads up to when it was sent.
+            var newest = Int64.min, newestStanza = Int64.min
             for id in r.messageIds {
                 if let key = try Int64.fetchOne(db, sql: "SELECT sortKey FROM message WHERE chatJid = ? AND id = ?",
                                                 arguments: [chatJid, id]) {
                     newest = max(newest, key)
+                } else if let at = try Self.tombstone(db, chatJid, id, .addon) {
+                    newestStanza = max(newestStanza, at)
                 } else {
                     try park(db, chatJid, id, .readElsewhere)
                 }
             }
-            try readMessages(db, chatJid, where: "sortKey <= ?", [newest], readAt: r.timestamp, &cs)
+            try readMessages(db, chatJid, where: "sortKey <= ? OR timestamp <= ?", [newest, newestStanza], readAt: r.timestamp, &cs)
             try db.execute(sql: "UPDATE chat SET stateAt = ? WHERE jid = ?", arguments: [Self.now, chatJid])
             return
         case .retry, .other:
