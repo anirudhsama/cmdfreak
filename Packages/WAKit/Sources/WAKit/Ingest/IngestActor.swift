@@ -550,8 +550,8 @@ public actor IngestActor {
         }
     }
 
-    /// Drops reaction/vote removal tombstones older than `cutoff`. Stale copies that could revive
-    /// those come from history sync around the removal; delete-for-me tombstones are kept for good,
+    /// Drops reaction/vote removal and stanza tombstones older than `cutoff`. Stale copies that could
+    /// revive those come from history sync around the removal; delete-for-me tombstones are kept for good,
     /// since on-demand history can bring back a message of any age (and there are few of them).
     public func pruneTombstones(olderThan cutoff: Int64) throws {
         try perform { db, _ in
@@ -936,9 +936,14 @@ public actor IngestActor {
 
     private func handle(_ event: BridgeEvent, _ db: Database, _ cs: inout ChangeSet) throws {
         switch event {
-        case .messages(let messages, let updates):
+        case .messages(let messages, let updates, let stanzas):
             for m in messages { try upsertMessage(m, live: true, db, &cs) }
             for u in updates { try applyUpdate(u, db, &cs) }
+            for st in stanzas {
+                let chatJid = canon(st.chatJid)
+                try Self.recordTombstone(db, chatJid, st.id, .stanza, "", st.timestamp)
+                try resolveStanzaReads(db, chatJid, &cs)
+            }
         case .receipt(let receipt):
             try handleReceipt(receipt, db, &cs)
         case .serverAck(let ack):
@@ -1277,6 +1282,24 @@ public actor IngestActor {
         }
     }
 
+    /// Reads parked on a stanza that is not a message (`BridgeStanza`): the phone had seen what was
+    /// sent before it, so that is read, and arrives read if it lands later. Sent in the same second
+    /// it may have come after: left unread.
+    private func resolveStanzaReads(_ db: Database, _ chatJid: String, _ cs: inout ChangeSet) throws {
+        guard pendingCount > 0, let at = try Int64.fetchOne(db, sql: """
+            SELECT MAX(t.timestamp) FROM pending_mutation p
+            JOIN tombstone t ON t.chatJid = p.chatJid AND t.messageId = p.messageId AND t.kind = 'stanza'
+            WHERE p.chatJid = ? AND p.payload LIKE '{"readElsewhere"%'
+            """, arguments: [chatJid]) else { return }
+        try db.execute(sql: """
+            DELETE FROM pending_mutation WHERE chatJid = ?1 AND payload LIKE '{"readElsewhere"%'
+              AND messageId IN (SELECT messageId FROM tombstone WHERE chatJid = ?1 AND kind = 'stanza')
+            """, arguments: [chatJid])
+        pendingCount = max(0, pendingCount - db.changesCount)
+        try readMessages(db, chatJid, where: "timestamp < ?", [at], readAt: at, &cs)
+        try db.execute(sql: "UPDATE chat SET readThrough = MAX(COALESCE(readThrough, 0), ?) WHERE jid = ?", arguments: [at - 1, chatJid])
+    }
+
     /// A read-self receipt listed it, or the phone marked the chat read through its timestamp.
     private func readElsewhere(_ db: Database, _ chatJid: String, _ m: BridgeMessage) throws -> Bool {
         if pendingCount > 0, try Bool.fetchOne(db, sql: """
@@ -1336,6 +1359,8 @@ public actor IngestActor {
         case message
         /// A sender removed their reaction / cleared their vote at `timestamp`.
         case reaction, vote
+        /// An inbound stanza that is not a message (`BridgeStanza`), sent at `timestamp`.
+        case stanza
     }
 
     /// The tombstone's timestamp, if there is one.
@@ -1481,16 +1506,19 @@ public actor IngestActor {
         case .readSelf, .playedSelf:
             // Reading the listed messages read the chat up to them; newer ones stay unread. Listed
             // messages not here yet (offline delivery can bring the read first) arrive read.
-            var newest = Int64.min
+            var newest = Int64.min, parked = false
             for id in r.messageIds {
                 if let key = try Int64.fetchOne(db, sql: "SELECT sortKey FROM message WHERE chatJid = ? AND id = ?",
                                                 arguments: [chatJid, id]) {
                     newest = max(newest, key)
                 } else {
                     try park(db, chatJid, id, .readElsewhere)
+                    parked = true
                 }
             }
             try readMessages(db, chatJid, where: "sortKey <= ?", [newest], readAt: r.timestamp, &cs)
+            // A listed id may be a stanza that never becomes a message (an edit, a reaction).
+            if parked { try resolveStanzaReads(db, chatJid, &cs) }
             try db.execute(sql: "UPDATE chat SET stateAt = ? WHERE jid = ?", arguments: [Self.now, chatJid])
             return
         case .retry, .other:
@@ -2059,6 +2087,7 @@ public actor IngestActor {
                 WHERE p.chatJid = ?
                 """, arguments: [pn])
             for id in targets { try applyPending(db, pn, id, &cs) }
+            try resolveStanzaReads(db, pn, &cs)
         }
     }
 

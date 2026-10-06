@@ -597,8 +597,14 @@ fn poll_vote_without_a_known_parent_secret_is_parked_and_round_trips() {
     let inbound = InboundMessage::builder().message(Arc::new(vote.clone())).info(Arc::new(info)).build();
     let ctx = crate::live::MapCtx { canon: &canon, polls: &polls, client: None };
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
-    let (messages, updates) = rt.block_on(crate::live::map_batch(&ctx, std::slice::from_ref(&inbound)));
+    let Some(BridgeEvent::Messages { messages, updates, stanzas }) =
+        rt.block_on(crate::live::map_batch(&ctx, std::slice::from_ref(&inbound)))
+    else {
+        panic!("expected a batch");
+    };
     assert!(messages.is_empty());
+    // Never stored as a message, so a read-self receipt listing it must still resolve.
+    assert_eq!(stanzas, vec![BridgeStanza { chat_jid: bob.clone(), id: "VOTE1".into(), timestamp: 1_700_000_000 }]);
     let [BridgeMessageUpdate::Encrypted { target, envelope }] = updates.as_slice() else {
         panic!("expected a parked vote, got {updates:?}");
     };

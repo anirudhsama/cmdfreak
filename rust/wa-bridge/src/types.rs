@@ -263,6 +263,17 @@ pub enum MessageStatus {
     Failed,
 }
 
+/// An inbound stanza that is not stored as a message (an edit, revoke, reaction, poll vote, other
+/// protocol message, or one that could not be opened). Our other devices' read-self receipts can
+/// list it in place of the messages it was read after.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, uniffi::Record)]
+pub struct BridgeStanza {
+    pub chat_jid: String,
+    pub id: String,
+    /// Server time, comparable with `BridgeMessage::timestamp`.
+    pub timestamp: i64,
+}
+
 /// Mutations of an existing message. They can arrive before the target (history sync, retries),
 /// so the app parks them until the target row exists.
 #[derive(Debug, Clone, serde::Serialize, uniffi::Enum)]
@@ -450,6 +461,8 @@ pub enum BridgeEvent {
     Messages {
         messages: Vec<BridgeMessage>,
         updates: Vec<BridgeMessageUpdate>,
+        #[uniffi(default)]
+        stanzas: Vec<BridgeStanza>,
     },
     Receipt { receipt: BridgeReceipt },
     /// The server accepted (`error == None`) or rejected one of our messages. Until then a sent

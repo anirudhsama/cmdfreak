@@ -44,8 +44,8 @@ enum F {
         BridgeMessageKey(chatJid: chat, id: id, fromMe: fromMe, participant: participant)
     }
 
-    static func live(_ messages: BridgeMessage..., updates: [BridgeMessageUpdate] = []) -> BridgeEvent {
-        .messages(messages: messages, updates: updates)
+    static func live(_ messages: BridgeMessage..., updates: [BridgeMessageUpdate] = [], stanzas: [BridgeStanza] = []) -> BridgeEvent {
+        .messages(messages: messages, updates: updates, stanzas: stanzas)
     }
 
     static func receipt(_ ids: [String], chat: String, kind: ReceiptKind, from: String? = nil) -> BridgeEvent {

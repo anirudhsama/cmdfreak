@@ -381,12 +381,10 @@ impl InboundDurabilityHook for DurabilityHook {
         let shared = self.shared.upgrade().ok_or_else(|| anyhow::anyhow!("bridge dropped"))?;
         shared.counters.received.fetch_add(1, Ordering::Relaxed);
         let ctx = MapCtx { canon: &shared.canon, polls: &shared.polls, client: Some(&client) };
-        let (messages, updates) = live::map_batch(&ctx, batch).await;
+        let event = live::map_batch(&ctx, batch).await;
         let mut events = Vec::new();
         live::push_aliases(&shared.canon, &mut events);
-        if !messages.is_empty() || !updates.is_empty() {
-            events.push(BridgeEvent::Messages { messages, updates });
-        }
+        events.extend(event);
         let keys = batch
             .iter()
             .map(|m| (m.info.source.chat.to_string(), m.info.source.sender.to_string(), m.info.id.to_string()))
