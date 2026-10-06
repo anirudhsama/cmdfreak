@@ -235,25 +235,41 @@ import Testing
         #expect(try db.chat(F.alicePN)?.unreadCount == 0)
     }
 
-    @Test func readSelfListingAnEditReadsUpToIt() async throws {
+    @Test func readSelfListingAStanzaReadsWhatWasSentBeforeIt() async throws {
         let db = try F.tempDB()
         let ingest = try IngestActor(database: db)
-        func edit(_ target: String, _ stanza: String, at ts: Int64) -> BridgeEvent {
-            F.live(updates: [.edit(target: F.key(target, chat: F.group, participant: F.bob), text: "edited", mentions: [],
-                                   editedAt: ts, stanza: BridgeStanza(id: stanza, timestamp: ts))])
+        func unread(_ chat: String) throws -> Set<String> {
+            try db.pool.read { try Set(String.fetchAll($0, sql: "SELECT id FROM message WHERE chatJid = ? AND unread", arguments: [chat])) }
         }
-        // The phone lists the edit, not the message it changed; a message after the edit stays unread.
+        func stanza(_ id: String, chat: String = F.group, at ts: Int64) -> BridgeEvent {
+            F.live(stanzas: [BridgeStanza(chatJid: chat, id: id, timestamp: ts)])
+        }
+        // The phone lists an edit's own id, not the message it changed. Sent in the same second or
+        // after it stays unread.
         try await ingest.apply([F.live(F.message("1", chat: F.group, sender: F.bob, ts: 100))])
-        try await ingest.apply([edit("1", "E1", at: 200)])
-        try await ingest.apply([F.live(F.message("2", chat: F.group, sender: F.bob, ts: 300))])
+        try await ingest.apply([stanza("E1", at: 200)])
+        try await ingest.apply([F.live(F.message("2", chat: F.group, sender: F.bob, ts: 200),
+                                       F.message("3", chat: F.group, sender: F.bob, ts: 300))])
         try await ingest.apply([F.receipt(["E1"], chat: F.group, kind: .readSelf, from: F.me)])
-        #expect(try db.chat(F.group)?.unreadCount == 1)
+        #expect(try unread(F.group) == ["2", "3"])
         #expect(try db.count("SELECT COUNT(*) FROM pending_mutation") == 0)
 
-        // The read can land before the edit it lists.
-        try await ingest.apply([F.receipt(["E2"], chat: F.group, kind: .readSelf, from: F.me)])
-        try await ingest.apply([edit("2", "E2", at: 400)])
-        #expect(try db.chat(F.group)?.unreadCount == 0)
+        // The read can land before the stanza; what was sent before it arrives read even when late.
+        try await ingest.apply([F.receipt(["R1"], chat: F.group, kind: .readSelf, from: F.me)])
+        try await ingest.apply([stanza("R1", at: 400)])
+        #expect(try unread(F.group).isEmpty)
+        try await ingest.apply([F.live(F.message("4", chat: F.group, sender: F.bob, ts: 350),
+                                       F.message("5", chat: F.group, sender: F.bob, ts: 450))])
+        #expect(try unread(F.group) == ["5"])
+        #expect(try db.count("SELECT COUNT(*) FROM pending_mutation") == 0)
+
+        // Parked under the LID, recorded under the phone number: resolved once the alias is known.
+        try await ingest.apply([F.live(F.message("A", chat: F.alicePN, ts: 100))])
+        try await ingest.apply([stanza("X", chat: F.alicePN, at: 200)])
+        try await ingest.apply([F.receipt(["X"], chat: F.aliceLID, kind: .readSelf, from: F.me)])
+        #expect(try db.chat(F.alicePN)?.unreadCount == 1)
+        try await ingest.apply([.jidAliases(aliases: [BridgeJidAlias(lid: F.aliceLID, pn: F.alicePN)])])
+        #expect(try db.chat(F.alicePN)?.unreadCount == 0)
         #expect(try db.count("SELECT COUNT(*) FROM pending_mutation") == 0)
     }
 

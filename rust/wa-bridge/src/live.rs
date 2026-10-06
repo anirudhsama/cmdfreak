@@ -133,19 +133,19 @@ pub async fn map_event(ctx: &MapCtx<'_>, event: &Event) -> Vec<BridgeEvent> {
             state: BridgePairing::LoggedOut { reason: failure_reason(&l.reason) },
         }),
         Event::Messages(batch) => {
-            let (messages, updates) = map_batch(ctx, batch.messages.as_ref()).await;
+            let event = map_batch(ctx, batch.messages.as_ref()).await;
             push_aliases(canon, &mut out);
-            if !messages.is_empty() || !updates.is_empty() {
-                out.push(BridgeEvent::Messages { messages, updates });
-            }
+            out.extend(event);
         }
         Event::UndecryptableMessage(u) => {
             use whatsapp_rust::wacore::types::events::DecryptFailMode;
             // Hidden failures are reactions/poll votes: nothing to show.
+            let env = envelope(ctx, &u.info).await;
+            push_aliases(canon, &mut out);
             if u.decrypt_fail_mode != DecryptFailMode::Hide {
-                let env = envelope(ctx, &u.info).await;
-                push_aliases(canon, &mut out);
-                out.push(BridgeEvent::Messages { messages: vec![map::undecryptable(&env)], updates: vec![] });
+                out.push(BridgeEvent::Messages { messages: vec![map::undecryptable(&env)], updates: vec![], stanzas: vec![] });
+            } else if let Some(s) = stanza(&env) {
+                out.push(BridgeEvent::Messages { messages: vec![], updates: vec![], stanzas: vec![s] });
             }
         }
         Event::Receipt(r) => {
@@ -429,21 +429,30 @@ pub async fn envelope(ctx: &MapCtx<'_>, info: &MessageInfo) -> Envelope {
     }
 }
 
-pub async fn map_batch(
-    ctx: &MapCtx<'_>,
-    batch: &[InboundMessage],
-) -> (Vec<BridgeMessage>, Vec<BridgeMessageUpdate>) {
+/// `None` when the batch holds nothing for the app.
+pub async fn map_batch(ctx: &MapCtx<'_>, batch: &[InboundMessage]) -> Option<BridgeEvent> {
     let mut messages = Vec::new();
     let mut updates = Vec::new();
+    let mut stanzas = Vec::new();
     for m in batch {
         let env = envelope(ctx, &m.info).await;
         match map_inbound(ctx, &env, m, true).await {
             Mapped::Message(b) => messages.push(*b),
-            Mapped::Update(u) => updates.push(u),
-            Mapped::Skip => {}
+            Mapped::Update(u) => {
+                updates.push(u);
+                stanzas.extend(stanza(&env));
+            }
+            Mapped::Skip => stanzas.extend(stanza(&env)),
         }
     }
-    (messages, updates)
+    (!messages.is_empty() || !updates.is_empty() || !stanzas.is_empty())
+        .then_some(BridgeEvent::Messages { messages, updates, stanzas })
+}
+
+/// Status updates are never read through a chat.
+fn stanza(env: &Envelope) -> Option<BridgeStanza> {
+    (!env.chat.is_status_broadcast())
+        .then(|| BridgeStanza { chat_jid: env.chat.to_string(), id: env.id.clone(), timestamp: env.timestamp })
 }
 
 /// Outcome of opening an encrypted add-on (poll vote, edit).

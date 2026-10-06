@@ -165,7 +165,7 @@ final class Counter: @unchecked Sendable {
             add("aliases", chunk.aliases.count)
             chats(chunk.chats.map(\.jid))
             chunk.messages.forEach(consider)
-        case let .messages(messages, updates):
+        case let .messages(messages, updates, _):
             add("messages", messages.count)
             add("updates", updates.count)
             messages.forEach(consider)

@@ -238,7 +238,7 @@ fn history_maps_chats_messages_and_updates() {
         .updates
         .iter()
         .find_map(|u| match u {
-            BridgeMessageUpdate::Edit { target, text, edited_at, stanza, .. } => Some((target, text, edited_at, stanza)),
+            BridgeMessageUpdate::Edit { target, text, edited_at, .. } => Some((target, text, edited_at)),
             _ => None,
         })
         .unwrap();
@@ -246,7 +246,6 @@ fn history_maps_chats_messages_and_updates() {
     assert!(!edit.0.from_me, "Bob edited his own message");
     assert_eq!(edit.1.as_deref(), Some("hello, edited"));
     assert_eq!(*edit.2, 1_700_000_400);
-    assert_eq!(edit.3, &Some(BridgeStanza { id: "E1".into(), timestamp: 1_700_000_400 }));
 
     let poll = msg("P1");
     assert_eq!(poll.kind, MessageKind::Poll);
@@ -598,8 +597,14 @@ fn poll_vote_without_a_known_parent_secret_is_parked_and_round_trips() {
     let inbound = InboundMessage::builder().message(Arc::new(vote.clone())).info(Arc::new(info)).build();
     let ctx = crate::live::MapCtx { canon: &canon, polls: &polls, client: None };
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
-    let (messages, updates) = rt.block_on(crate::live::map_batch(&ctx, std::slice::from_ref(&inbound)));
+    let Some(BridgeEvent::Messages { messages, updates, stanzas }) =
+        rt.block_on(crate::live::map_batch(&ctx, std::slice::from_ref(&inbound)))
+    else {
+        panic!("expected a batch");
+    };
     assert!(messages.is_empty());
+    // Never stored as a message, so a read-self receipt listing it must still resolve.
+    assert_eq!(stanzas, vec![BridgeStanza { chat_jid: bob.clone(), id: "VOTE1".into(), timestamp: 1_700_000_000 }]);
     let [BridgeMessageUpdate::Encrypted { target, envelope }] = updates.as_slice() else {
         panic!("expected a parked vote, got {updates:?}");
     };

@@ -263,10 +263,12 @@ pub enum MessageStatus {
     Failed,
 }
 
-/// An update's own message, which is never stored as one: our other devices' read-self receipts
-/// can list it in place of the message it changed.
+/// An inbound stanza that is not stored as a message (an edit, revoke, reaction, poll vote, other
+/// protocol message, or one that could not be opened). Our other devices' read-self receipts can
+/// list it in place of the messages it was read after.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, uniffi::Record)]
 pub struct BridgeStanza {
+    pub chat_jid: String,
     pub id: String,
     /// Server time, comparable with `BridgeMessage::timestamp`.
     pub timestamp: i64,
@@ -282,15 +284,11 @@ pub enum BridgeMessageUpdate {
         /// JIDs mentioned in the new text.
         mentions: Vec<String>,
         edited_at: i64,
-        #[uniffi(default)]
-        stanza: Option<BridgeStanza>,
     },
     Revoke {
         target: BridgeMessageKey,
         revoked_by: String,
         timestamp: i64,
-        #[uniffi(default)]
-        stanza: Option<BridgeStanza>,
     },
     /// Empty `emoji` removes the sender's reaction.
     Reaction {
@@ -463,6 +461,8 @@ pub enum BridgeEvent {
     Messages {
         messages: Vec<BridgeMessage>,
         updates: Vec<BridgeMessageUpdate>,
+        #[uniffi(default)]
+        stanzas: Vec<BridgeStanza>,
     },
     Receipt { receipt: BridgeReceipt },
     /// The server accepted (`error == None`) or rejected one of our messages. Until then a sent
