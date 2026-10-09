@@ -962,7 +962,11 @@ public actor IngestActor {
         case .historyChunk(let chunk):
             for a in chunk.aliases { try mergeAlias(lid: a.lid, pn: a.pn, db, &cs) }
             for c in chunk.contacts { try upsertContact(c, db) }
-            for c in chunk.chats { try upsertHistoryChat(c, db) }
+            for c in chunk.chats {
+                try upsertHistoryChat(c, db)
+                // The snapshot can list a DM that only holds a notice; `refreshPreview` unlists it.
+                if c.kind == .dm { cs.dirty.insert(canon(c.jid)) }
+            }
             for m in chunk.messages { try upsertMessage(m, live: false, db, &cs) }
             for u in chunk.updates { try applyUpdate(u, db, &cs) }
             for c in chunk.chats { try attributeSnapshotUnread(c, db) }
@@ -1957,7 +1961,18 @@ public actor IngestActor {
                 WHERE jid = ?
                 """, arguments: [jid])
         }
+        // A DM whose only messages are encryption or business notices is not a conversation: the
+        // phone hides it, so it stays unlisted until a real message lists it again (above).
+        try db.execute(sql: """
+            UPDATE chat SET lastActivityAt = NULL
+            WHERE jid = ?1 AND kind = 'dm' AND pinnedAt IS NULL
+              AND EXISTS (SELECT 1 FROM message WHERE chatJid = ?1)
+              AND NOT EXISTS (SELECT 1 FROM message WHERE chatJid = ?1 AND NOT \(Self.noticeSQL))
+            """, arguments: [jid])
     }
+
+    /// A `message` row that is only a notice WhatsApp adds to a chat (encryption, business privacy).
+    static let noticeSQL = #"(kind = 'system' AND (typeName IN ('e2e_encrypted', 'e2e_encrypted_now') OR typeName LIKE 'biz\_%' ESCAPE '\'))"#
 
     // MARK: Alias merging
 

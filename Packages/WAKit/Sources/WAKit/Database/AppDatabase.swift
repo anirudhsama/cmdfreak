@@ -403,6 +403,18 @@ extension AppDatabase {
             try db.drop(table: "read_outbox")
         }
 
+        // History sync sends a DM holding only an encryption or business notice for contacts we
+        // never wrote to. The phone hides those; unlist them here too.
+        m.registerMigration("v16") { db in
+            try db.execute(sql: #"""
+                UPDATE chat SET lastActivityAt = NULL
+                WHERE kind = 'dm' AND pinnedAt IS NULL AND lastActivityAt IS NOT NULL
+                  AND EXISTS (SELECT 1 FROM message WHERE chatJid = chat.jid)
+                  AND NOT EXISTS (SELECT 1 FROM message WHERE chatJid = chat.jid AND NOT (kind = 'system'
+                      AND (typeName IN ('e2e_encrypted', 'e2e_encrypted_now') OR typeName LIKE 'biz\_%' ESCAPE '\')))
+                """#)
+        }
+
         return m
     }
 
