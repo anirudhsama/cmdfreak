@@ -818,6 +818,7 @@ public actor IngestActor {
         case .pin(let pinnedAt, let previous):
             try db.execute(sql: "UPDATE chat SET pinnedAt = ? WHERE jid = ? AND (pinnedAt IS NULL) = ?",
                            arguments: [previous, chatJid, pinnedAt == nil])
+            cs.dirty.insert(chatJid)
         case .mute(let until, let previous):
             try db.execute(sql: "UPDATE chat SET mutedUntil = ? WHERE jid = ? AND mutedUntil IS ?", arguments: [previous, chatJid, until])
         case .archive(let archived, let previous):
@@ -1791,6 +1792,7 @@ public actor IngestActor {
             let jid = canon(jid)
             try ensureChat(db, jid)
             try db.execute(sql: "UPDATE chat SET pinnedAt = ?, stateAt = ? WHERE jid = ?", arguments: [pinnedAt, Self.now, jid])
+            cs.dirty.insert(jid)  // unpinned, a DM holding only notices unlists
         case .mute(let jid, let until):
             let jid = canon(jid)
             try ensureChat(db, jid)
@@ -1962,10 +1964,11 @@ public actor IngestActor {
                 """, arguments: [jid])
         }
         // A DM whose only messages are encryption or business notices is not a conversation: the
-        // phone hides it, so it stays unlisted until a real message lists it again (above).
+        // phone hides it, so it stays unlisted until a real message lists it again (above). Unread
+        // ones stay: their messages may just not have synced.
         try db.execute(sql: """
             UPDATE chat SET lastActivityAt = NULL
-            WHERE jid = ?1 AND kind = 'dm' AND pinnedAt IS NULL
+            WHERE jid = ?1 AND kind = 'dm' AND pinnedAt IS NULL AND unreadCount = 0 AND NOT markedUnread
               AND EXISTS (SELECT 1 FROM message WHERE chatJid = ?1)
               AND NOT EXISTS (SELECT 1 FROM message WHERE chatJid = ?1 AND NOT \(Self.noticeSQL))
             """, arguments: [jid])
