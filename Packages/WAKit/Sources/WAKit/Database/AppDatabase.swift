@@ -410,8 +410,8 @@ extension AppDatabase {
                 UPDATE chat SET lastActivityAt = NULL
                 WHERE kind = 'dm' AND pinnedAt IS NULL AND lastActivityAt IS NOT NULL AND unreadCount = 0 AND NOT markedUnread
                   AND EXISTS (SELECT 1 FROM message WHERE chatJid = chat.jid)
-                  AND NOT EXISTS (SELECT 1 FROM message WHERE chatJid = chat.jid AND NOT (kind = 'system'
-                      AND (typeName IN ('e2e_encrypted', 'e2e_encrypted_now') OR typeName LIKE 'biz\_%' ESCAPE '\')))
+                  AND NOT EXISTS (SELECT 1 FROM message WHERE chatJid = chat.jid AND (kind = 'system'
+                      AND (typeName IN ('e2e_encrypted', 'e2e_encrypted_now') OR typeName LIKE 'biz\_%' ESCAPE '\')) IS NOT TRUE)
                 """#)
         }
 

@@ -98,6 +98,10 @@ import Testing
         try await ingest.apply([.chatAction(action: .pin(chatJid: F.me, pinnedAt: nil))])
         #expect(try await listed() == [carol, F.bob])
 
+        try await ingest.apply([.chatAction(action: .markRead(chatJid: F.alicePN, read: false))])
+        #expect(try await listed() == [carol, F.bob, F.alicePN])  // marked unread lists it, at its notice's time
+        try await ingest.apply([.chatAction(action: .markRead(chatJid: F.alicePN, read: true))])
+
         try await ingest.apply([F.live(F.message("A1", chat: F.alicePN, ts: 1_700_001_000))])
         #expect(try await listed() == [F.alicePN, carol, F.bob])
     }

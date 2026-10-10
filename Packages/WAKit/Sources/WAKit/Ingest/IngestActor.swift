@@ -825,6 +825,7 @@ public actor IngestActor {
             try db.execute(sql: "UPDATE chat SET archived = ? WHERE jid = ? AND archived = ?", arguments: [previous, chatJid, archived])
         case .markRead(let read, let previous):
             try db.execute(sql: "UPDATE chat SET markedUnread = ? WHERE jid = ? AND markedUnread = ?", arguments: [previous, chatJid, !read])
+            if previous { cs.dirty.insert(chatJid) }
         }
     }
 
@@ -1817,6 +1818,7 @@ public actor IngestActor {
                     """, arguments: [Self.now, readThrough, readThrough, jid])
             } else {
                 try db.execute(sql: "UPDATE chat SET markedUnread = 1, stateAt = ? WHERE jid = ?", arguments: [Self.now, jid])
+                cs.dirty.insert(jid)  // relists a DM holding only notices
             }
         case .delete(let jid, let cutoff):
             let jid = canon(jid)
@@ -1970,7 +1972,7 @@ public actor IngestActor {
             UPDATE chat SET lastActivityAt = NULL
             WHERE jid = ?1 AND kind = 'dm' AND pinnedAt IS NULL AND unreadCount = 0 AND NOT markedUnread
               AND EXISTS (SELECT 1 FROM message WHERE chatJid = ?1)
-              AND NOT EXISTS (SELECT 1 FROM message WHERE chatJid = ?1 AND NOT \(Self.noticeSQL))
+              AND NOT EXISTS (SELECT 1 FROM message WHERE chatJid = ?1 AND \(Self.noticeSQL) IS NOT TRUE)
             """, arguments: [jid])
     }
 
