@@ -818,12 +818,14 @@ public actor IngestActor {
         case .pin(let pinnedAt, let previous):
             try db.execute(sql: "UPDATE chat SET pinnedAt = ? WHERE jid = ? AND (pinnedAt IS NULL) = ?",
                            arguments: [previous, chatJid, pinnedAt == nil])
+            cs.dirty.insert(chatJid)
         case .mute(let until, let previous):
             try db.execute(sql: "UPDATE chat SET mutedUntil = ? WHERE jid = ? AND mutedUntil IS ?", arguments: [previous, chatJid, until])
         case .archive(let archived, let previous):
             try db.execute(sql: "UPDATE chat SET archived = ? WHERE jid = ? AND archived = ?", arguments: [previous, chatJid, archived])
         case .markRead(let read, let previous):
             try db.execute(sql: "UPDATE chat SET markedUnread = ? WHERE jid = ? AND markedUnread = ?", arguments: [previous, chatJid, !read])
+            if previous { cs.dirty.insert(chatJid) }
         }
     }
 
@@ -962,7 +964,11 @@ public actor IngestActor {
         case .historyChunk(let chunk):
             for a in chunk.aliases { try mergeAlias(lid: a.lid, pn: a.pn, db, &cs) }
             for c in chunk.contacts { try upsertContact(c, db) }
-            for c in chunk.chats { try upsertHistoryChat(c, db) }
+            for c in chunk.chats {
+                try upsertHistoryChat(c, db)
+                // The snapshot can list a DM that only holds a notice; `refreshPreview` unlists it.
+                if c.kind == .dm { cs.dirty.insert(canon(c.jid)) }
+            }
             for m in chunk.messages { try upsertMessage(m, live: false, db, &cs) }
             for u in chunk.updates { try applyUpdate(u, db, &cs) }
             for c in chunk.chats { try attributeSnapshotUnread(c, db) }
@@ -1787,6 +1793,7 @@ public actor IngestActor {
             let jid = canon(jid)
             try ensureChat(db, jid)
             try db.execute(sql: "UPDATE chat SET pinnedAt = ?, stateAt = ? WHERE jid = ?", arguments: [pinnedAt, Self.now, jid])
+            cs.dirty.insert(jid)  // unpinned, a DM holding only notices unlists
         case .mute(let jid, let until):
             let jid = canon(jid)
             try ensureChat(db, jid)
@@ -1811,6 +1818,7 @@ public actor IngestActor {
                     """, arguments: [Self.now, readThrough, readThrough, jid])
             } else {
                 try db.execute(sql: "UPDATE chat SET markedUnread = 1, stateAt = ? WHERE jid = ?", arguments: [Self.now, jid])
+                cs.dirty.insert(jid)  // relists a DM holding only notices
             }
         case .delete(let jid, let cutoff):
             let jid = canon(jid)
@@ -1957,7 +1965,19 @@ public actor IngestActor {
                 WHERE jid = ?
                 """, arguments: [jid])
         }
+        // A DM whose only messages are encryption or business notices is not a conversation: the
+        // phone hides it, so it stays unlisted until a real message lists it again (above). Unread
+        // ones stay: their messages may just not have synced.
+        try db.execute(sql: """
+            UPDATE chat SET lastActivityAt = NULL
+            WHERE jid = ?1 AND kind = 'dm' AND pinnedAt IS NULL AND unreadCount = 0 AND NOT markedUnread
+              AND EXISTS (SELECT 1 FROM message WHERE chatJid = ?1)
+              AND NOT EXISTS (SELECT 1 FROM message WHERE chatJid = ?1 AND \(Self.noticeSQL) IS NOT TRUE)
+            """, arguments: [jid])
     }
+
+    /// A `message` row that is only a notice WhatsApp adds to a chat (encryption, business privacy).
+    static let noticeSQL = #"(kind = 'system' AND (typeName IN ('e2e_encrypted', 'e2e_encrypted_now') OR typeName LIKE 'biz\_%' ESCAPE '\'))"#
 
     // MARK: Alias merging
 

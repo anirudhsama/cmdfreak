@@ -72,6 +72,40 @@ import Testing
         #expect(items[1].title == "Team")
     }
 
+    @Test func dmHoldingOnlyNoticesIsUnlistedUntilARealMessage() async throws {
+        let db = try F.tempDB()
+        let ingest = try IngestActor(database: db)
+        func notice(_ id: String, chat: String, type: String) -> BridgeMessage {
+            var m = F.message(id, chat: chat, fromMe: true, ts: 1_600_000_000, kind: .system, text: nil)
+            m.typeName = type
+            return m
+        }
+        let carol = "15553330000@s.whatsapp.net"
+        let listed = { try await db.reader.read { try ChatListQuery.fetch($0, filter: .chats).map(\.id) } }
+        try await ingest.apply([F.history(
+            chats: [F.chat(F.alicePN), F.chat(F.bob), F.chat(F.me, pinnedAt: 1_600_000_000),
+                    F.chat(carol, lastActivity: 1_700_000_200, unread: 2)],
+            messages: [notice("E1", chat: F.alicePN, type: "e2e_encrypted"), notice("E2", chat: F.alicePN, type: "biz_privacy_mode_to_fb"),
+                       notice("E3", chat: F.bob, type: "e2e_encrypted"), F.message("B1", chat: F.bob, ts: 1_600_000_001),
+                       notice("E4", chat: F.me, type: "e2e_encrypted"), notice("E5", chat: carol, type: "e2e_encrypted")]
+        )])
+        #expect(try await listed() == [F.me, carol, F.bob])  // pinned stays; unread messages not yet synced keep carol
+
+        // A later snapshot of the same chat does not list it again.
+        try await ingest.apply([F.history(chats: [F.chat(F.alicePN, lastActivity: 1_700_000_500)])])
+        #expect(try await listed() == [F.me, carol, F.bob])
+
+        try await ingest.apply([.chatAction(action: .pin(chatJid: F.me, pinnedAt: nil))])
+        #expect(try await listed() == [carol, F.bob])
+
+        try await ingest.apply([.chatAction(action: .markRead(chatJid: F.alicePN, read: false))])
+        #expect(try await listed() == [carol, F.bob, F.alicePN])  // marked unread lists it, at its notice's time
+        try await ingest.apply([.chatAction(action: .markRead(chatJid: F.alicePN, read: true))])
+
+        try await ingest.apply([F.live(F.message("A1", chat: F.alicePN, ts: 1_700_001_000))])
+        #expect(try await listed() == [F.alicePN, carol, F.bob])
+    }
+
     @Test func chatListFilterAndOrdering() async throws {
         let db = try F.tempDB()
         let ingest = try IngestActor(database: db)
